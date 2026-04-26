@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.9.25
+// @version      2.10.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1037,7 +1037,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           } else {
             row.dataset.buyState = "0";
             qtBuildMaps();
-            qtPostTrade(sym, shares, "buyShares", "Bought " + shares.toLocaleString("en-US") + " " + sym + " (" + tier + ")");
+            qtUiTrade(sym, shares, "buyShares", "Bought " + shares.toLocaleString("en-US") + " " + sym + " (" + tier + ")", { skipFirstTap: true });
             showROIPlanner(ownedMap, raw);
           }
         });
@@ -2630,7 +2630,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             var parent = row.parentNode;
             if (parent) parent.removeChild(row);
             qtBuildMaps();
-            qtPostTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")");
+            qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")", { skipFirstTap: true });
           }
         });
       });
@@ -2892,7 +2892,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       } else {
         // Press 2: Buy
         qtBuildMaps();
-        qtPostTrade(recSym, recShares, "buyShares", "Bought " + recShares.toLocaleString("en-US") + " " + recSym + " (" + recTier + ")");
+        qtUiTrade(recSym, recShares, "buyShares", "Bought " + recShares.toLocaleString("en-US") + " " + recSym + " (" + recTier + ")", { skipFirstTap: true });
         qtRecTapState[recSym + recTier] = 0;
         updateQtRecommendation(null);
       }
@@ -2932,21 +2932,17 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     "PTS","SYM","SYS","TCC","TCI","TCM","TCP","TCT","TGP","THS",
     "TMI","TSB","WLT","WSU","YAZ"];
 
-  // ── TheALFA's exact variables (from his insert()) ──
-  var qt_stocks = {}, qt_stockId = {}, qt_stockRows = {}, qt_localShareCache = {};
+  var qt_stocks = {}, qt_stockRows = {}, qt_localShareCache = {};
+  var qtPendingTrade = null;
+  var QT_PENDING_TIMEOUT_MS = 30000;
 
-  // ── TheALFA's exact insert() DOM parsing ──
   function qtBuildMaps() {
     $("ul[class^='stock_']").each(function() {
       var sym = $("img", $(this)).attr("src").split("logos/")[1].split(".svg")[0];
-      qt_stockId[sym] = $(this).attr("id");
       qt_stocks[sym] = $("div[class^='price_']", $(this));
       qt_stockRows[sym] = $(this);
     });
   }
-
-  // ── TheALFA's exact functions ──
-  function qtGetRFC() { var c = document.cookie.match(/rfc_v=([^;]+)/); return c ? c[1] : ""; }
 
   function qtParseTornNumber(val) {
     if (typeof val !== "string") return 0;
@@ -3002,38 +2998,192 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return (shares < data) ? { tier: 0, next: data } : { tier: multiplier, next: data * multiplier * 2 };
   }
 
-  // ── TheALFA's exact postTrade() ──
-  function qtPostTrade(symb, amt, step, msg) {
-    // Record buy intent so we can detect entry slippage after the next data load
-    if (step === "buyShares") {
+  // Trades go through Torn's own UI: open the Owned tab, set the share count
+  // via the input's React fiber onChange, then click the form's submit button
+  // via its fiber onClick. The first click advances Torn's UI to the
+  // "Confirm Transaction" step; the second click executes the trade. The
+  // userscript makes zero non-API HTTP requests — Torn's own React handlers
+  // are what contact api.torn.com.
+
+  function qtFindFiberProp(el, propName) {
+    var fiberKey = Object.keys(el).find(function(k) { return k.indexOf("__reactFiber") === 0; });
+    if (!fiberKey) return null;
+    var f = el[fiberKey];
+    while (f) {
+      if (f.memoizedProps && typeof f.memoizedProps[propName] === "function") {
+        return f.memoizedProps[propName];
+      }
+      f = f.return;
+    }
+    return null;
+  }
+
+  function qtWaitForElement(parent, selector, timeoutMs) {
+    return new Promise(function(resolve) {
+      var existing = parent.querySelector(selector);
+      if (existing) return resolve(existing);
+      var obs = new MutationObserver(function() {
+        var el = parent.querySelector(selector);
+        if (el) { obs.disconnect(); resolve(el); }
+      });
+      obs.observe(parent, { childList: true, subtree: true });
+      setTimeout(function() { obs.disconnect(); resolve(null); }, timeoutMs);
+    });
+  }
+
+  function qtWaitForButton(parent, textRegex, timeoutMs) {
+    return new Promise(function(resolve) {
+      var find = function() {
+        var btns = parent.querySelectorAll("button");
+        for (var i = 0; i < btns.length; i++) {
+          if (textRegex.test(btns[i].textContent)) return btns[i];
+        }
+        return null;
+      };
+      var existing = find();
+      if (existing) return resolve(existing);
+      var obs = new MutationObserver(function() {
+        var el = find();
+        if (el) { obs.disconnect(); resolve(el); }
+      });
+      obs.observe(parent, { childList: true, subtree: true });
+      setTimeout(function() { obs.disconnect(); resolve(null); }, timeoutMs);
+    });
+  }
+
+  function qtSleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+
+  // Step 1: scroll, open Owned tab, set value via fiber.onChange, click submit
+  // via fiber.onClick to advance to the "Confirm Transaction" step.
+  async function qtUiPrepare(pending) {
+    var symb = pending.symb;
+    var shareCount = pending.shareCount;
+    var action = pending.action;
+
+    qtBuildMaps();
+    var card$ = qt_stockRows[symb];
+    if (!card$ || !card$[0]) { showToast("Stock card not found for " + symb, "error"); return false; }
+    var cardEl = card$[0];
+
+    cardEl.scrollIntoView({ behavior: "smooth", block: "center" });
+
+    var ownedTab = cardEl.querySelector('[data-name="ownedTab"]');
+    if (!ownedTab) { showToast("Owned tab not found for " + symb, "error"); return false; }
+    if (!/active___/.test(ownedTab.className)) {
+      ownedTab.click();
+    }
+
+    var sideClass = action === "buyShares" ? "buyBlock___" : "sellBlock___";
+    var verbClass = action === "buyShares" ? "buy___"      : "sell___";
+
+    var form = await qtWaitForElement(document.body, '[class*="' + sideClass + '"] [class*="manageBlock___"]', 2000);
+    if (!form) { showToast("Trade form did not open for " + symb, "error"); return false; }
+
+    var inp = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
+    if (!inp) { showToast("Trade input not found", "error"); return false; }
+
+    var onChange = qtFindFiberProp(inp, "onChange");
+    if (!onChange) { showToast("Trade input handler not found — Torn UI changed?", "error"); return false; }
+
+    try {
+      onChange({ error: false, value: String(shareCount) });
+    } catch(e) {
+      showToast("Trade input rejected: " + e.message, "error");
+      return false;
+    }
+
+    await qtSleep(250);
+
+    var stepBtn = form.querySelector('[class*="' + verbClass + '"]');
+    if (!stepBtn) { showToast("Submit button not found", "error"); return false; }
+    var stepClick = qtFindFiberProp(stepBtn, "onClick");
+    if (!stepClick) { showToast("Submit handler not found — Torn UI changed?", "error"); return false; }
+
+    try {
+      stepClick();
+    } catch(e) {
+      showToast("Advance to confirm failed: " + e.message, "error");
+      return false;
+    }
+
+    var confirmBtn = await qtWaitForButton(form, /confirm/i, 2000);
+    if (!confirmBtn) { showToast("Confirm Transaction did not appear (amount invalid?)", "error"); return false; }
+
+    return true;
+  }
+
+  // Step 2: re-find the Confirm Transaction button (the actions area gets
+  // replaced when transitioning, so the prepare-time reference is stale) and
+  // fire its fiber onClick to execute the trade.
+  async function qtUiExecute(pending) {
+    var symb = pending.symb;
+    var shareCount = pending.shareCount;
+    var action = pending.action;
+    var label = pending.label;
+
+    var sideClass = action === "buyShares" ? "buyBlock___" : "sellBlock___";
+    var form = document.querySelector('[class*="' + sideClass + '"] [class*="manageBlock___"]');
+    if (!form) { showToast("Trade form closed — restart trade", "error"); return false; }
+
+    var btns = form.querySelectorAll("button");
+    var confirmBtn = null;
+    for (var i = 0; i < btns.length; i++) {
+      if (/confirm/i.test(btns[i].textContent)) { confirmBtn = btns[i]; break; }
+    }
+    if (!confirmBtn) { showToast("Confirm Transaction not visible — restart trade", "error"); return false; }
+
+    var finalClick = qtFindFiberProp(confirmBtn, "onClick");
+    if (!finalClick) { showToast("Confirm handler not found", "error"); return false; }
+
+    if (action === "buyShares") {
       var intentPrice = qtGetPrice(symb);
       if (intentPrice > 0) {
         lsSet("qt_intent_" + symb, JSON.stringify({ price: intentPrice, ts: Math.floor(Date.now() / 1000) }));
       }
     }
-    var execBtn = document.getElementById("qt-exec");
-    if (execBtn) { execBtn.disabled = true; execBtn.textContent = "Processing..."; }
-    $.post("https://www.torn.com/page.php?sid=StockMarket&step=" + step + "&rfcv=" + qtGetRFC(),
-      { stockId: qt_stockId[symb], amount: amt })
-    .done(function(r) {
-      try {
-        if (typeof r === "string") r = JSON.parse(r);
-        if (r.success) {
-          if (execBtn) { execBtn.textContent = "✓ " + msg; setTimeout(function(){ qtUpdateExec(); }, 3000); }
-          qtUpdateLocalCache(symb, step === "buyShares" ? amt : -amt);
-          showToast(msg, "success");
-        } else {
-          showToast(r.text || "Trade failed", "error");
-          if (execBtn) { execBtn.disabled = false; qtUpdateExec(); }
-        }
-      } catch(e) {
-        if (execBtn) { execBtn.textContent = "✓ " + msg; setTimeout(function(){ qtUpdateExec(); }, 3000); }
-      }
-    })
-    .fail(function() {
-      showToast("Request failed", "error");
-      if (execBtn) { execBtn.disabled = false; qtUpdateExec(); }
-    });
+
+    try {
+      finalClick();
+    } catch(e) {
+      showToast("Confirm failed: " + e.message, "error");
+      return false;
+    }
+
+    qtUpdateLocalCache(symb, action === "buyShares" ? shareCount : -shareCount);
+    showToast(label, "success");
+    return true;
+  }
+
+  // Public entry. Default: two-tap (first call prepares + toasts "tap again";
+  // second call within 30s on same symb/action/shares executes). Pass
+  // options.skipFirstTap=true to do prepare+execute in a single call — used by
+  // sites that already have their own visual two-tap (ROI buy, swing sell, rec).
+  async function qtUiTrade(symb, shares, action, label, options) {
+    options = options || {};
+
+    if (options.skipFirstTap) {
+      var ok = await qtUiPrepare({ symb: symb, shareCount: shares, action: action, label: label });
+      if (!ok) return false;
+      return await qtUiExecute({ symb: symb, shareCount: shares, action: action, label: label });
+    }
+
+    var key = symb + "|" + action + "|" + shares;
+    var now = Date.now();
+
+    if (qtPendingTrade && qtPendingTrade.key === key && (now - qtPendingTrade.ts) < QT_PENDING_TIMEOUT_MS) {
+      var p = qtPendingTrade;
+      qtPendingTrade = null;
+      return await qtUiExecute(p);
+    }
+
+    qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label, ts: now };
+    var prepared = await qtUiPrepare(qtPendingTrade);
+    if (prepared) {
+      showToast("Tap again to confirm: " + label, "warn");
+    } else {
+      qtPendingTrade = null;
+    }
+    return false;
   }
 
   // ── TheALFA's exact vault() ──
@@ -3043,7 +3193,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var price = qtGetPrice(symb);
     var amt = Math.floor(money / price);
     if (amt <= 0) { showToast("Amount too small", "warn"); return; }
-    qtPostTrade(symb, amt, "buyShares", "Vaulted $" + (amt*price).toLocaleString() + " (" + amt + " shares)");
+    qtUiTrade(symb, amt, "buyShares", "Vaulted $" + (amt*price).toLocaleString() + " (" + amt + " shares)");
   }
 
   // ── TheALFA's exact withdraw() ──
@@ -3072,23 +3222,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return Infinity; // not a benefit stock
   }
 
-  function qtWithdraw(symb, val) {
-    var price = qtGetPrice(symb);
-    if (price <= 0) { showToast("Could not read price for " + symb, "error"); return; }
-    var shares = Math.ceil((val / 0.999) / price);
-    if ($("#qt-lock-benefit").is(":checked")) {
-      var maxSell = qtBenefitLockMax(symb);
-      if (maxSell === -1) { showToast("Benefit Lock: Cannot verify share count — blocked for safety", "warn"); return; }
-      if (maxSell === 0)  { showToast("Benefit Lock: All shares are benefit block shares — cannot sell", "warn"); return; }
-      if (maxSell !== Infinity && shares > maxSell) {
-        shares = maxSell;
-        showToast("Benefit Lock: Capped to " + maxSell.toLocaleString() + " swing shares", "warn");
-      }
-    }
-    qtPostTrade(symb, shares, "sellShares", "Withdrawn approx $" + val.toLocaleString());
-  }
-
-  // ── TheALFA's exact withdrawAll() ──
   function qtWithdrawAll(symb) {
     var owned = qtGetOwnedShares(symb);
     if (owned <= 0) { showToast("You have no shares of " + symb, "warn"); return; }
@@ -3099,7 +3232,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (maxSell === 0)  { showToast("Benefit Lock: All shares are benefit block shares — cannot sell", "warn"); return; }
       if (maxSell !== Infinity) sellAmt = Math.min(sellAmt, maxSell);
     }
-    qtPostTrade(symb, sellAmt, "sellShares", "Sold all " + sellAmt.toLocaleString() + " shares");
+    qtUiTrade(symb, sellAmt, "sellShares", "Sold all " + sellAmt.toLocaleString() + " shares");
   }
 
   function fmtQtAmt(n) {
@@ -3198,7 +3331,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (price <= 0) { showToast("Could not read price for " + sym, "error"); return; }
     var amt = Math.floor(dollarAmt / price);
     if (amt <= 0) { showToast("Amount too small.", "warn"); return; }
-    qtPostTrade(sym, amt, "buyShares", "Bought " + amt.toLocaleString() + " " + sym);
+    qtUiTrade(sym, amt, "buyShares", "Bought " + amt.toLocaleString() + " " + sym);
   }
 
   function qtExecuteSell(sym, dollarAmt) {
@@ -3216,7 +3349,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         showToast("Benefit Lock: Capped to " + maxSell.toLocaleString() + " swing shares", "warn");
       }
     }
-    qtPostTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString() + " " + sym);
+    qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString() + " " + sym);
   }
 
   function createAmountBtn(label, amt, mode, idx) {
