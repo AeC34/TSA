@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.4
+// @version      2.15.5
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2875,7 +2875,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
   var qt_stocks = {}, qt_stockRows = {}, qt_localShareCache = {};
   var qtPendingTrade = null;
-  var QT_PENDING_TIMEOUT_MS = 30000;
 
   function qtBuildMaps() {
     $("ul[class^='stock_']").each(function() {
@@ -3295,15 +3294,17 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return false;
     }
     var key = symb + "|" + action;
-    var now = Date.now();
 
-    if (qtPendingTrade && qtPendingTrade.key === key && (now - qtPendingTrade.ts) < QT_PENDING_TIMEOUT_MS) {
+    // Two-tap match: same key AND same shareCount. If shares differ, the user
+    // is re-aiming — fall through to a fresh prepare with the new amount. No
+    // time expiry: pending lives until fired, overwritten, or page reload.
+    if (qtPendingTrade && qtPendingTrade.key === key && qtPendingTrade.shareCount === shares) {
       var p = qtPendingTrade;
       qtPendingTrade = null;
       return await qtUiExecute({ symb: p.symb, shareCount: p.shareCount, action: p.action, label: p.label });
     }
 
-    qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label, ts: now };
+    qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label };
     var prepared = await qtUiPrepare(qtPendingTrade);
     if (prepared) {
       showToast("Tap again to fire: " + label, "warn");
