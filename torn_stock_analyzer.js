@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.12.2
+// @version      2.12.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3251,6 +3251,34 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (b6) {
         try { b6.focus(); } catch(e) {}
         try { b6.click(); } catch(e) {}
+      }
+      await qtSleep(2000);
+    }
+
+    // Method 7: walk React fiber state hooks and force boolean state to true.
+    // The sell handler `function(){_(!0),m?n(Or()):...}` gates trade dispatch
+    // on a closure boolean (`m`). If we can flip it via React's own dispatch,
+    // the next onClick takes the trade-firing branch.
+    if (stillStuck()) {
+      var b7 = refind();
+      if (b7) {
+        try {
+          var fk = Object.keys(b7).find(function(k){return k.indexOf("__reactFiber")===0;});
+          var f7 = b7[fk];
+          while (f7) {
+            var hook = f7.memoizedState;
+            while (hook) {
+              if (typeof hook.memoizedState === 'boolean' && hook.queue && typeof hook.queue.dispatch === 'function') {
+                try { hook.queue.dispatch(true); } catch(e) {}
+              }
+              hook = hook.next;
+            }
+            f7 = f7.return;
+          }
+        } catch(e) {}
+        await qtSleep(300);
+        var freshFiberClick7 = qtFindFiberProp(b7, "onClick");
+        if (freshFiberClick7) try { freshFiberClick7(); } catch(e) {}
       }
       await qtSleep(2000);
     }
