@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.13.0
+// @version      2.13.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2581,6 +2581,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var sym    = row.dataset.sym;
           var shares = parseInt(row.dataset.shares, 10);
           var label  = row.dataset.label;
+          // Benefit Lock — same gate as qtWithdrawAll / qtExecuteSell.
+          if ($("#qt-lock-benefit").is(":checked")) {
+            var maxSell = qtBenefitLockMax(sym);
+            if (maxSell === -1) { showToast("Benefit Lock: Cannot verify share count — blocked for safety", "warn"); return; }
+            if (maxSell === 0)  { showToast("Benefit Lock: All shares are benefit block shares — cannot sell", "warn"); return; }
+            if (maxSell !== Infinity && shares > maxSell) {
+              shares = maxSell;
+              showToast("Benefit Lock: Capped to " + maxSell.toLocaleString() + " swing shares", "warn");
+            }
+          }
           qtBuildMaps();
           var fired = await qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")");
           if (fired) {
