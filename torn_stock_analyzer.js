@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.3
+// @version      2.15.4
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -591,6 +591,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
 
   function renderROIPlanner(ownedMap, raw, cashBalance, armoryFunds) {
+    if (!ownedMap || Object.keys(ownedMap).length === 0) {
+      return '<div style="padding:20px;text-align:center;color:#888;font-size:11px;line-height:1.5">' +
+             'No stocks owned yet.<br><br>' +
+             'Buy shares of a benefit stock to see ROI rankings here.</div>';
+    }
     if (!armoryFunds) armoryFunds = 0;
     // Calculate swing capital
     var swingCapital = 0;
@@ -4006,10 +4011,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           "<canvas id='qt-chart-canvas' height='110' style='width:100%;height:110px;display:block;'></canvas>" +
           "<div id='qt-chart-labels' style='position:relative;height:14px;font-size:8px;color:#6a6a9a;font-family:JetBrains Mono,monospace;margin-top:2px;'></div>" +
           "<div id='qt-tf-row' style='display:flex;gap:3px;margin-top:5px;'>" +
-            "<button class='qt-tf-btn' data-tf='1d' style='flex:1;padding:2px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:9px;font-family:JetBrains Mono,monospace;cursor:pointer;'>1d</button>" +
-            "<button class='qt-tf-btn' data-tf='3d' style='flex:1;padding:2px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:9px;font-family:JetBrains Mono,monospace;cursor:pointer;'>3d</button>" +
-            "<button class='qt-tf-btn' data-tf='7d' style='flex:1;padding:2px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:9px;font-family:JetBrains Mono,monospace;cursor:pointer;'>7d</button>" +
-            "<button class='qt-tf-btn' data-tf='all' style='flex:1;padding:2px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:9px;font-family:JetBrains Mono,monospace;cursor:pointer;'>All</button>" +
+            "<button class='qt-tf-btn' data-tf='1d' style='flex:1;min-height:32px;padding:7px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:10px;font-family:JetBrains Mono,monospace;cursor:pointer;'>1d</button>" +
+            "<button class='qt-tf-btn' data-tf='3d' style='flex:1;min-height:32px;padding:7px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:10px;font-family:JetBrains Mono,monospace;cursor:pointer;'>3d</button>" +
+            "<button class='qt-tf-btn' data-tf='7d' style='flex:1;min-height:32px;padding:7px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:10px;font-family:JetBrains Mono,monospace;cursor:pointer;'>7d</button>" +
+            "<button class='qt-tf-btn' data-tf='all' style='flex:1;min-height:32px;padding:7px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:10px;font-family:JetBrains Mono,monospace;cursor:pointer;'>All</button>" +
           "</div>" +
         "</div>" +
       "</div>";
@@ -4210,21 +4215,25 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         "<div style=\"margin-bottom:12px\">" +
         "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:4px\">Profit target (%)</div>" +
         "<input id=\"tsa-setting-profit\" type=\"number\" step=\"0.1\" min=\"0.1\" max=\"10\" value=\"" + getProfitTarget() + "\" style=\"width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;\">" +
+        "<div style=\"font-size:10px;color:" + muted + ";margin-top:4px;line-height:1.4\">Typical: 1–3%. Higher = wait for bigger profits, sells trigger less often.</div>" +
         "</div>" +
 
         "<div style=\"margin-bottom:12px\">" +
         "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:4px\">Stop loss (%)</div>" +
         "<input id=\"tsa-setting-stoploss\" type=\"number\" step=\"0.1\" min=\"0.1\" max=\"20\" value=\"" + getStopLoss() + "\" style=\"width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;\">" +
+        "<div style=\"font-size:10px;color:" + muted + ";margin-top:4px;line-height:1.4\">Typical: 2–5%. Lower = exit faster on a loss, but more false alarms.</div>" +
         "</div>" +
 
         "<div style=\"margin-bottom:12px\">" +
         "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:4px\">Auto-refresh (min, 0 = off)</div>" +
         "<input id=\"tsa-setting-autorefresh\" type=\"number\" step=\"1\" min=\"0\" max=\"60\" value=\"" + getAutoRefreshInterval() + "\" style=\"width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;\">" +
+        "<div style=\"font-size:10px;color:" + muted + ";margin-top:4px;line-height:1.4\">Typical: 5–15 min. 0 disables auto-refresh — only manual refresh.</div>" +
         "</div>" +
 
         "<div style=\"margin-bottom:16px\">" +
         "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:4px\">Price history (days, 1–30)</div>" +
         "<input id=\"tsa-setting-histdays\" type=\"number\" step=\"1\" min=\"1\" max=\"30\" value=\"" + parseInt(lsGet("tsa_history_days", "30"), 10) + "\" style=\"width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;\">" +
+        "<div style=\"font-size:10px;color:" + muted + ";margin-top:4px;line-height:1.4\">How many days of price history to fetch and chart. 30 = max detail, 7 = faster load.</div>" +
         "</div>" +
 
         "<div style=\"border-top:1px solid " + border + ";margin-bottom:12px;padding-top:12px\">" +
