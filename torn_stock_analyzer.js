@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.11.3
+// @version      2.11.4
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3088,6 +3088,17 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var onChange = qtFindFiberProp(inp, "onChange");
     if (!onChange) { showToast("Trade input handler not found — Torn UI changed?", "error"); return false; }
 
+    // Set value through every available path. Different React-controlled inputs
+    // respond to different combos; doing all three maximizes the chance the
+    // sell-side state actually captures the value.
+    try {
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      if (setter) setter.call(inp, String(shareCount));
+    } catch(e) {}
+    try {
+      inp.dispatchEvent(new Event("input", { bubbles: true }));
+      inp.dispatchEvent(new Event("change", { bubbles: true }));
+    } catch(e) {}
     try {
       onChange({ error: false, value: String(shareCount) });
     } catch(e) {
@@ -3095,7 +3106,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return false;
     }
 
-    await qtSleep(250);
+    await qtSleep(500);
 
     var stepBtn = form.querySelector('[class*="' + verbClass + '"]');
     if (!stepBtn) { showToast("Submit button not found", "error"); return false; }
@@ -3149,8 +3160,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     // Call with no args — the sell Confirm handler is `function(){_(!0),m?n(Or()):...}`
     // (zero parameters); console-verified that calling it directly with no args
-    // fires the trade. Passing a synthetic event arg may interact badly with
-    // closure references somewhere in the chain.
+    // fires the trade.
     try {
       finalClick();
     } catch(e) {
@@ -3158,12 +3168,27 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return false;
     }
 
+    // Verify the trade actually fired. If Torn's Confirm Transaction button is
+    // still visible after a generous settle, the auto-fire didn't take —
+    // surface a toast so the user can finish manually rather than thinking
+    // the trade went through.
+    await qtSleep(2500);
+    var stillStuck = false;
+    var freshForm = document.querySelector('[class*="' + sideClass + '"] [class*="manageBlock___"]');
+    if (freshForm) {
+      var freshBtns = freshForm.querySelectorAll("button");
+      for (var j = 0; j < freshBtns.length; j++) {
+        if (/confirm/i.test(freshBtns[j].textContent)) { stillStuck = true; break; }
+      }
+    }
+    if (stillStuck) {
+      showToast("Auto-fire didn't take — tap Torn's 'Confirm Transaction' to complete: " + label, "warn");
+      return false;
+    }
+
     qtUpdateLocalCache(symb, action === "buyShares" ? shareCount : -shareCount);
     showToast(label, "success");
 
-    // Restore the qt-exec quick-bar success-state UX that the old qtPostTrade had
-    // ("✓ Bought 1M of HRG" for 3s before reverting to the normal label).
-    // No-op for sites without a qt-exec button.
     var execBtn = document.getElementById("qt-exec");
     if (execBtn) {
       execBtn.textContent = "✓ " + label;
@@ -3186,7 +3211,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // Let Torn's React fully wire the freshly-rendered Confirm Transaction
       // button's closure before we fire its onClick. Sell paths in particular
       // need a longer settle than buys.
-      await qtSleep(1500);
+      await qtSleep(3000);
       return await qtUiExecute({ symb: symb, shareCount: shares, action: action, label: label });
     }
 
