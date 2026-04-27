@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.13.1
+// @version      2.14.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1017,7 +1017,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var sym    = row.dataset.buySym;
           var shares = parseInt(row.dataset.buyShares, 10);
           var tier   = row.dataset.buyTier;
-          qtBuildMaps();
           qtUiTrade(sym, shares, "buyShares", "Bought " + shares.toLocaleString("en-US") + " " + sym + " (" + tier + ")");
           showROIPlanner(ownedMap, raw);
         });
@@ -2581,17 +2580,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var sym    = row.dataset.sym;
           var shares = parseInt(row.dataset.shares, 10);
           var label  = row.dataset.label;
-          // Benefit Lock — same gate as qtWithdrawAll / qtExecuteSell.
-          if ($("#qt-lock-benefit").is(":checked")) {
-            var maxSell = qtBenefitLockMax(sym);
-            if (maxSell === -1) { showToast("Benefit Lock: Cannot verify share count — blocked for safety", "warn"); return; }
-            if (maxSell === 0)  { showToast("Benefit Lock: All shares are benefit block shares — cannot sell", "warn"); return; }
-            if (maxSell !== Infinity && shares > maxSell) {
-              shares = maxSell;
-              showToast("Benefit Lock: Capped to " + maxSell.toLocaleString() + " swing shares", "warn");
-            }
-          }
-          qtBuildMaps();
+          shares = qtApplyBenefitLock(sym, shares);
+          if (shares === null) return;
           var fired = await qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")");
           if (fired) {
             var parent = row.parentNode;
@@ -2830,7 +2820,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     recDiv.innerHTML = "<button id='qt-rec-btn' style='width:100%;padding:6px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg + ";color:" + color + ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;text-align:left;'>" + label + "</button>";
 
     document.getElementById("qt-rec-btn").addEventListener("click", function() {
-      qtBuildMaps();
       qtUiTrade(recSym, recShares, "buyShares", "Bought " + recShares.toLocaleString("en-US") + " " + recSym + " (" + recTier + ")");
       updateQtRecommendation(null);
     });
@@ -3229,6 +3218,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // tap 1 prepare or any failure — callers can use this to remove the row /
   // re-render after a successful trade.
   async function qtUiTrade(symb, shares, action, label, options) {
+    if (!shares || !isFinite(shares) || shares < 1) {
+      showToast("Invalid share count for " + symb, "error");
+      return false;
+    }
     var key = symb + "|" + action;
     var now = Date.now();
 
@@ -3253,6 +3246,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var money = qtGetMoneyFast();
     if (money === 0) { showToast("No money found", "warn"); return; }
     var price = qtGetPrice(symb);
+    if (price <= 0) { showToast("Could not read price for " + symb, "error"); return; }
     var amt = Math.floor(money / price);
     if (amt <= 0) { showToast("Amount too small", "warn"); return; }
     qtUiTrade(symb, amt, "buyShares", "Vaulted $" + (amt*price).toLocaleString() + " (" + amt + " shares)");
@@ -3284,16 +3278,36 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return Infinity; // not a benefit stock
   }
 
+  // Single source of truth for the Benefit Lock gate. Every sell path MUST
+  // call this before qtUiTrade so the three sites (swing-tx row, qtWithdrawAll,
+  // qtExecuteSell) can't drift out of sync. Calls qtBuildMaps internally so
+  // qtBenefitLockMax → qtGetOwnedShares has the latest qt_stockRows.
+  // Returns the share count to sell (possibly capped), or null if the lock
+  // refused the trade entirely (caller must not call qtUiTrade).
+  function qtApplyBenefitLock(sym, shares) {
+    if (!$("#qt-lock-benefit").is(":checked")) return shares;
+    qtBuildMaps();
+    var maxSell = qtBenefitLockMax(sym);
+    if (maxSell === -1) {
+      showToast("Benefit Lock: Cannot verify share count — blocked for safety", "warn");
+      return null;
+    }
+    if (maxSell === 0) {
+      showToast("Benefit Lock: All shares are benefit block shares — cannot sell", "warn");
+      return null;
+    }
+    if (maxSell !== Infinity && shares > maxSell) {
+      showToast("Benefit Lock: Capped to " + maxSell.toLocaleString() + " swing shares", "warn");
+      return maxSell;
+    }
+    return shares;
+  }
+
   function qtWithdrawAll(symb) {
     var owned = qtGetOwnedShares(symb);
     if (owned <= 0) { showToast("You have no shares of " + symb, "warn"); return; }
-    var sellAmt = owned;
-    if ($("#qt-lock-benefit").is(":checked")) {
-      var maxSell = qtBenefitLockMax(symb);
-      if (maxSell === -1) { showToast("Benefit Lock: Cannot verify share count — blocked for safety", "warn"); return; }
-      if (maxSell === 0)  { showToast("Benefit Lock: All shares are benefit block shares — cannot sell", "warn"); return; }
-      if (maxSell !== Infinity) sellAmt = Math.min(sellAmt, maxSell);
-    }
+    var sellAmt = qtApplyBenefitLock(symb, owned);
+    if (sellAmt === null) return;
     qtUiTrade(symb, sellAmt, "sellShares", "Sold all " + sellAmt.toLocaleString() + " shares");
   }
 
@@ -3402,15 +3416,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var price = qtGetPrice(sym);
     if (price <= 0) { showToast("Could not read price for " + sym, "error"); return; }
     var shares = Math.ceil((dollarAmt / 0.999) / price);
-    if ($("#qt-lock-benefit").is(":checked")) {
-      var maxSell = qtBenefitLockMax(sym);
-      if (maxSell === -1) { showToast("Benefit Lock: Cannot verify share count — blocked for safety", "warn"); return; }
-      if (maxSell === 0)  { showToast("Benefit Lock: All shares are benefit block shares — cannot sell", "warn"); return; }
-      if (maxSell !== Infinity && shares > maxSell) {
-        shares = maxSell;
-        showToast("Benefit Lock: Capped to " + maxSell.toLocaleString() + " swing shares", "warn");
-      }
-    }
+    shares = qtApplyBenefitLock(sym, shares);
+    if (shares === null) return;
     qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString() + " " + sym);
   }
 
