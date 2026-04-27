@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.11.1
+// @version      2.11.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3053,88 +3053,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
   function qtSleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
-  // TEMPORARY DIAGNOSTIC — captures the sell Confirm Transaction handler's
-  // onClick source so we can patch auto-execute. Will be removed once the
-  // sell flow is wired up. Captures:
-  //  - The button's outerHTML
-  //  - Every onClick / onChange / onMouseDown etc handler in the fiber chain
-  //  - The function source code for each
-  // Tries clipboard.writeText first, falls back to a copyable modal.
-  function qtShowDiagnosticDump(text) {
-    var existing = document.getElementById("tsa-debug-modal");
-    if (existing) existing.remove();
-    var modal = document.createElement("div");
-    modal.id = "tsa-debug-modal";
-    modal.style.cssText = "position:fixed;top:5%;left:5%;right:5%;bottom:5%;z-index:2147483647;background:#0f0f1a;border:2px solid #4a6fa5;border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:8px;color:#eee;font-family:monospace;font-size:11px;";
-    var hdr = document.createElement("div");
-    hdr.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;";
-    hdr.innerHTML = "<strong style='color:#4cff91'>TSA debug — select all + copy + paste in chat</strong>";
-    var closeBtn = document.createElement("button");
-    closeBtn.textContent = "✕";
-    closeBtn.style.cssText = "background:#cc2222;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:14px;";
-    closeBtn.onclick = function() { modal.remove(); };
-    hdr.appendChild(closeBtn);
-    var ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.cssText = "flex:1;width:100%;background:#000;color:#0f0;border:1px solid #444;padding:8px;font-family:monospace;font-size:10px;resize:none;box-sizing:border-box;";
-    modal.appendChild(hdr);
-    modal.appendChild(ta);
-    document.body.appendChild(modal);
-    setTimeout(function() { ta.focus(); ta.select(); }, 100);
-  }
-
-  function qtCaptureSellConfirmDiagnostic(confirmBtn) {
-    return new Promise(function(resolve) {
-      try {
-        var lines = ["=== TSA SELL CONFIRM DIAGNOSTIC v2.11.1 ==="];
-        lines.push("outerHTML: " + confirmBtn.outerHTML);
-        lines.push("");
-        lines.push("--- fiber chain handlers ---");
-        var fiberKey = Object.keys(confirmBtn).find(function(k){return k.indexOf("__reactFiber")===0;});
-        if (!fiberKey) {
-          lines.push("(no __reactFiber key found)");
-        } else {
-          var f = confirmBtn[fiberKey];
-          var depth = 0;
-          while (f && depth < 8) {
-            var tName = (typeof f.type === 'function' ? (f.type.displayName || f.type.name) : f.type) || '?';
-            var props = f.memoizedProps || {};
-            var handlers = Object.keys(props).filter(function(p){return /^on[A-Z]/.test(p);});
-            if (handlers.length > 0) {
-              lines.push("[" + depth + "] " + tName + " props: " + Object.keys(props).join(",") + " | handlers: " + handlers.join(","));
-              for (var i = 0; i < handlers.length; i++) {
-                var hname = handlers[i];
-                if (typeof props[hname] === "function") {
-                  lines.push("  " + hname + " => " + props[hname].toString());
-                }
-              }
-            }
-            f = f.return;
-            depth++;
-          }
-        }
-        var dump = lines.join("\n");
-        lsSet("qt_debug_sell_confirm", dump);
-        var done = function(clipOk) {
-          qtShowDiagnosticDump(dump);
-          showToast(clipOk
-            ? "DEBUG: sell handler copied to clipboard — paste in chat"
-            : "DEBUG: sell handler captured — copy from popup, paste in chat",
-            "warn");
-          resolve();
-        };
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(dump).then(function(){done(true);}).catch(function(){done(false);});
-        } else {
-          done(false);
-        }
-      } catch(e) {
-        showToast("DEBUG capture failed: " + e.message, "error");
-        resolve();
-      }
-    });
-  }
-
   // Synthetic event for calling React fiber click handlers directly. Some Torn
   // handlers call e.preventDefault() / e.stopPropagation() after dispatching;
   // calling without args makes them throw AFTER the trade fires, producing a
@@ -3218,12 +3136,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var confirmBtn = await qtWaitForButton(form, /confirm/i, 5000);
     if (!confirmBtn) { showToast("Confirm Transaction did not appear (amount invalid?)", "error"); return false; }
 
-    // TEMPORARY: capture sell-side Confirm handler source so we can fix auto-
-    // execute. Removed in next release once we have the data.
-    if (action === "sellShares") {
-      await qtCaptureSellConfirmDiagnostic(confirmBtn);
-    }
-
     return true;
   }
 
@@ -3257,8 +3169,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       }
     }
 
+    // Call with no args — the sell Confirm handler is `function(){_(!0),m?n(Or()):...}`
+    // (zero parameters); console-verified that calling it directly with no args
+    // fires the trade. Passing a synthetic event arg may interact badly with
+    // closure references somewhere in the chain.
     try {
-      finalClick(qtSyntheticEvent(confirmBtn));
+      finalClick();
     } catch(e) {
       showToast("Confirm failed: " + e.message, "error");
       return false;
@@ -3286,23 +3202,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   async function qtUiTrade(symb, shares, action, label, options) {
     options = options || {};
 
-    // Sells: Torn's "Confirm Transaction" button silently rejects script-
-    // dispatched clicks (a stricter `isTrusted` check than the buy flow has).
-    // We can't fake isTrusted from JS, so prepare the form and let the user
-    // tap Torn's own Confirm button. Buys continue with full automation.
-    if (action === "sellShares") {
-      var sellOk = await qtUiPrepare({ symb: symb, shareCount: shares, action: action, label: label });
-      if (!sellOk) return false;
-      showToast("Tap Torn's 'Confirm Transaction' to sell: " + label, "warn");
-      return true;
-    }
-
     if (options.skipFirstTap) {
       var ok = await qtUiPrepare({ symb: symb, shareCount: shares, action: action, label: label });
       if (!ok) return false;
       // Let Torn's React fully wire the freshly-rendered Confirm Transaction
-      // button's closure before we fire its onClick.
-      await qtSleep(500);
+      // button's closure before we fire its onClick. Sell paths in particular
+      // need a longer settle than buys.
+      await qtSleep(1500);
       return await qtUiExecute({ symb: symb, shareCount: shares, action: action, label: label });
     }
 
