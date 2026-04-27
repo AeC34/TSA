@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.12.3
+// @version      2.13.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1017,29 +1017,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var sym    = row.dataset.buySym;
           var shares = parseInt(row.dataset.buyShares, 10);
           var tier   = row.dataset.buyTier;
-          var state  = row.dataset.buyState || "0";
-          if (state === "0") {
-            row.dataset.buyState = "1";
-            row.style.background = "rgba(76,145,255,0.13)";
-            row.style.borderLeft = "2px solid #4c91ff";
-            var infoCol = row.querySelector("div");
-            if (infoCol) {
-              infoCol.innerHTML =
-                '<span style="font-size:10px;font-weight:700;color:#4c91ff;font-family:JetBrains Mono,monospace">▲ Tap again to confirm</span>' +
-                '<span style="font-size:9px;color:#4c91ff;font-family:JetBrains Mono,monospace">' + shares.toLocaleString("en-US") + ' shares · ' + tier + '</span>';
-            }
-            setTimeout(function() {
-              if (row.dataset.buyState === "1" && roiPlannerActive) {
-                row.dataset.buyState = "0";
-                showROIPlanner(ownedMap, raw);
-              }
-            }, 4000);
-          } else {
-            row.dataset.buyState = "0";
-            qtBuildMaps();
-            qtUiTrade(sym, shares, "buyShares", "Bought " + shares.toLocaleString("en-US") + " " + sym + " (" + tier + ")", { skipFirstTap: true });
-            showROIPlanner(ownedMap, raw);
-          }
+          qtBuildMaps();
+          qtUiTrade(sym, shares, "buyShares", "Bought " + shares.toLocaleString("en-US") + " " + sym + " (" + tier + ")");
+          showROIPlanner(ownedMap, raw);
         });
       });
     }
@@ -2596,41 +2576,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
 
       content.querySelectorAll(".tsa-swing-tx-row").forEach(function(row) {
-        row.addEventListener("click", function(e) {
+        row.addEventListener("click", async function(e) {
           e.stopPropagation();
           var sym    = row.dataset.sym;
           var shares = parseInt(row.dataset.shares, 10);
           var label  = row.dataset.label;
-          var state  = row.dataset.state || "0";
-          var isDarkSell = document.getElementById("tsa-overlay").classList.contains("tsa-dark");
-          var sellColor  = isDarkSell ? "#ff4c6a" : "#cc2222";
-          var sellBg     = isDarkSell ? "rgba(255,76,106,0.1)" : "rgba(204,34,34,0.08)";
-          if (state === "0") {
-            row.dataset.state = "1";
-            row.dataset.origHtml = row.innerHTML;
-            row.style.background = sellBg;
-            row.style.borderLeft = "2px solid " + sellColor;
-            row.style.paddingLeft = "8px";
-            row.innerHTML =
-              "<div style=\"display:flex;flex-direction:column;gap:2px\">" +
-                "<span style=\"font-size:10px;font-weight:700;color:" + sellColor + ";font-family:JetBrains Mono,monospace\">▲ Tap again to confirm</span>" +
-                "<span style=\"font-size:9px;color:" + sellColor + ";font-family:JetBrains Mono,monospace\">SELL " + shares.toLocaleString("en-US") + " " + sym + " · " + label + "</span>" +
-              "</div>";
-            setTimeout(function() {
-              if (row.dataset.state === "1") {
-                row.dataset.state = "0";
-                row.style.background = "";
-                row.style.borderLeft = "";
-                row.style.paddingLeft = "";
-                row.innerHTML = row.dataset.origHtml || "";
-              }
-            }, 4000);
-          } else {
-            row.dataset.state = "0";
+          qtBuildMaps();
+          var fired = await qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")");
+          if (fired) {
             var parent = row.parentNode;
             if (parent) parent.removeChild(row);
-            qtBuildMaps();
-            qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")", { skipFirstTap: true });
           }
         });
       });
@@ -2838,7 +2793,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
 
   // Track recommendation tap state per symbol
-  var qtRecTapState = {};
 
   function updateQtRecommendation(sym) {
     var recDiv = document.getElementById("qt-rec");
@@ -2860,42 +2814,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var recShares = rec.tierInfo.sharesNeeded;
     var recCost = rec.cost;
 
-    var tapState = qtRecTapState[recSym + recTier] || 0;
-    var label = tapState === 0
-      ? "💡 " + recSym + " " + recTier + " · " + recShares.toLocaleString("en-US") + " shares · " + fmRoi(recCost)
-      : "▲ Buy " + recShares.toLocaleString("en-US") + " " + recSym + " — tap to confirm";
+    var label = "💡 " + recSym + " " + recTier + " · " + recShares.toLocaleString("en-US") + " shares · " + fmRoi(recCost);
 
     recDiv.style.display = "block";
     recDiv.innerHTML = "<button id='qt-rec-btn' style='width:100%;padding:6px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg + ";color:" + color + ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;text-align:left;'>" + label + "</button>";
 
     document.getElementById("qt-rec-btn").addEventListener("click", function() {
-      var state = qtRecTapState[recSym + recTier] || 0;
-      if (state === 0) {
-        // Press 1: Scroll to stock
-        qtBuildMaps();
-        var allImgs = document.querySelectorAll("img[src*='/logos/']");
-        allImgs.forEach(function(img) {
-          if (img.src.toLowerCase().indexOf("/" + recSym.toLowerCase() + ".svg") >= 0) {
-            var el = img;
-            for (var i = 0; i < 8; i++) {
-              el = el.parentElement;
-              if (!el) break;
-              if (el.className && el.className.indexOf("stock___") >= 0) {
-                el.scrollIntoView({ behavior: "smooth", block: "center" });
-                break;
-              }
-            }
-          }
-        });
-        qtRecTapState[recSym + recTier] = 1;
-        updateQtRecommendation(null);
-      } else {
-        // Press 2: Buy
-        qtBuildMaps();
-        qtUiTrade(recSym, recShares, "buyShares", "Bought " + recShares.toLocaleString("en-US") + " " + recSym + " (" + recTier + ")", { skipFirstTap: true });
-        qtRecTapState[recSym + recTier] = 0;
-        updateQtRecommendation(null);
-      }
+      qtBuildMaps();
+      qtUiTrade(recSym, recShares, "buyShares", "Bought " + recShares.toLocaleString("en-US") + " " + recSym + " (" + recTier + ")");
+      updateQtRecommendation(null);
     });
   }
   function getRoiRecommendation(sym) {
@@ -3088,35 +3015,18 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var onChange = qtFindFiberProp(inp, "onChange");
     if (!onChange) { showToast("Trade input handler not found — Torn UI changed?", "error"); return false; }
 
-    // Set value through every available path. The keypress simulation may set
-    // a "user touched" flag in React state that downstream validators (the
-    // sell handler's `m` closure) check before allowing the trade.
-    var sStr = String(shareCount);
-    try { inp.focus(); } catch(e) {}
+    // Just fiber.onChange — verified end-to-end in console that this single
+    // call is sufficient to set value cleanly. Adding keypress/setter/dispatch
+    // events triggered extra React re-renders that put sell-side state in a
+    // configuration where the subsequent Confirm onClick took the wrong branch.
     try {
-      for (var ki = 0; ki < sStr.length; ki++) {
-        var ch = sStr.charAt(ki);
-        inp.dispatchEvent(new KeyboardEvent("keydown",  { key: ch, bubbles: true, cancelable: true }));
-        inp.dispatchEvent(new KeyboardEvent("keypress", { key: ch, bubbles: true, cancelable: true }));
-        inp.dispatchEvent(new KeyboardEvent("keyup",    { key: ch, bubbles: true, cancelable: true }));
-      }
-    } catch(e) {}
-    try {
-      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-      if (setter) setter.call(inp, sStr);
-    } catch(e) {}
-    try {
-      inp.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, data: sStr, inputType: "insertText" }));
-      inp.dispatchEvent(new Event("change", { bubbles: true }));
-    } catch(e) {}
-    try {
-      onChange({ error: false, value: sStr });
+      onChange({ error: false, value: String(shareCount) });
     } catch(e) {
       showToast("Trade input rejected: " + e.message, "error");
       return false;
     }
 
-    await qtSleep(500);
+    await qtSleep(1000);
 
     var stepBtn = form.querySelector('[class*="' + verbClass + '"]');
     if (!stepBtn) { showToast("Submit button not found", "error"); return false; }
@@ -3300,39 +3210,28 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return true;
   }
 
-  // Public entry. Default: two-tap (first call prepares + toasts "tap again";
-  // second call within 30s on same symb/action/shares executes). Pass
-  // options.skipFirstTap=true to do prepare+execute in a single call — used by
-  // sites that already have their own visual two-tap (ROI buy, swing sell, rec).
+  // Public entry. Two-tap to comply with Torn's "1 user click = 1 action" rule:
+  //   Tap 1 → qtUiPrepare (open Owned tab, set value, advance to Confirm
+  //           Transaction state). One initiation, one preparation action.
+  //   Tap 2 → qtUiExecute (fire Confirm Transaction). Second initiation,
+  //           one trade-firing action.
+  // Returns true if the trade was actually fired (tap 2 success), false on
+  // tap 1 prepare or any failure — callers can use this to remove the row /
+  // re-render after a successful trade.
   async function qtUiTrade(symb, shares, action, label, options) {
-    options = options || {};
-
-    if (options.skipFirstTap) {
-      var ok = await qtUiPrepare({ symb: symb, shareCount: shares, action: action, label: label });
-      if (!ok) return false;
-      // Let Torn's React fully wire the freshly-rendered Confirm Transaction
-      // button's closure before we fire its onClick.
-      await qtSleep(1500);
-      return await qtUiExecute({ symb: symb, shareCount: shares, action: action, label: label });
-    }
-
-    // Key intentionally excludes share count: stock prices tick between taps,
-    // and `Math.floor(dollarAmt / price)` would produce different share counts
-    // for the same user intent, breaking the two-tap match. Tap 2 executes
-    // with the share count captured at tap 1 (pending.shareCount).
     var key = symb + "|" + action;
     var now = Date.now();
 
     if (qtPendingTrade && qtPendingTrade.key === key && (now - qtPendingTrade.ts) < QT_PENDING_TIMEOUT_MS) {
       var p = qtPendingTrade;
       qtPendingTrade = null;
-      return await qtUiExecute(p);
+      return await qtUiExecute({ symb: p.symb, shareCount: p.shareCount, action: p.action, label: p.label });
     }
 
     qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label, ts: now };
     var prepared = await qtUiPrepare(qtPendingTrade);
     if (prepared) {
-      showToast("Tap again to confirm: " + label, "warn");
+      showToast("Tap again to fire: " + label, "warn");
     } else {
       qtPendingTrade = null;
     }
