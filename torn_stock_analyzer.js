@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.2
+// @version      2.15.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1482,7 +1482,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
   }
 
+  // Dedup identical toasts within 3 seconds. Stops Benefit-Lock-cap and similar
+  // warnings from spamming the screen on rapid clicks.
+  var lastToastMsg = "";
+  var lastToastTs = 0;
   function showToast(msg, type) {
+    var now = Date.now();
+    if (msg === lastToastMsg && (now - lastToastTs) < 3000) return;
+    lastToastMsg = msg;
+    lastToastTs = now;
     var colors = {
       success: { bg:"rgba(20,160,70,0.93)",  border:"#4cff91", icon:"✓" },
       error:   { bg:"rgba(170,20,50,0.93)",  border:"#ff4c6a", icon:"✕" },
@@ -3543,6 +3551,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     // ALL buy btn
     var allBuyBtn = document.createElement("button");
+    allBuyBtn.title = "Vault — buy max shares with all available cash";
     var isDarkNow = lsGet("tsa_dark", "false") === "true";
     allBuyBtn.style.cssText = "padding:6px 9px;border-radius:7px;border:1px solid " + (isDarkNow ? "rgba(76,255,145,0.5)" : "#1a8a45") + ";background:" + (isDarkNow ? "rgba(76,255,145,0.15)" : "rgba(26,138,69,0.1)") + ";color:" + (isDarkNow ? "#4cff91" : "#1a8a45") + ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
     allBuyBtn.textContent = "ALL";
@@ -3555,6 +3564,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     // ALL sell btn
     var allSellBtn = document.createElement("button");
+    allSellBtn.title = "Withdraw all — sell every share of this stock (respects Benefit Lock)";
     allSellBtn.style.cssText = "padding:6px 9px;border-radius:7px;border:1px solid " + (isDarkNow ? "rgba(255,76,106,0.5)" : "#cc2222") + ";background:" + (isDarkNow ? "rgba(255,76,106,0.12)" : "rgba(204,34,34,0.08)") + ";color:" + (isDarkNow ? "#ff4c6a" : "#cc2222") + ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
     allSellBtn.textContent = "ALL";
     allSellBtn.onclick = function() {
@@ -3965,8 +3975,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           "<div id='qt-stock-list' style='display:none;position:absolute;top:calc(100% + 3px);left:0;right:0;background:#13131f;border:1px solid #2a2a4a;border-radius:7px;z-index:99999;max-height:200px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,0.5);'></div>" +
         "</div>" +
         "<button id='qt-edit' title='Edit trade amounts' style='padding:6px 8px;border-radius:7px;border:1px solid #2a2a4a;background:transparent;color:#6a6a9a;font-family:JetBrains Mono,monospace;font-size:10px;cursor:pointer;flex-shrink:0;'>✎</button>" +
-        "<label id='qt-lock-label' style='display:flex;align-items:center;gap:5px;cursor:pointer;flex-shrink:0;padding:4px 8px;border-radius:7px;border:1px solid rgba(255,193,7,0.35);background:rgba(255,193,7,0.08);'>" +
-          "<input type='checkbox' id='qt-lock-benefit' checked style='accent-color:#ffc107;width:13px;height:13px;cursor:pointer'>" +
+        "<label id='qt-lock-label' title='When ON, sells are capped to swing shares so benefit-tier blocks are protected' style='display:flex;align-items:center;gap:6px;cursor:pointer;flex-shrink:0;padding:8px 10px;border-radius:7px;border:1px solid rgba(255,193,7,0.35);background:rgba(255,193,7,0.08);min-height:32px;'>" +
+          "<input type='checkbox' id='qt-lock-benefit' checked style='accent-color:#ffc107;width:18px;height:18px;cursor:pointer;flex-shrink:0;'>" +
           "<span id='qt-lock-text' style='font-size:10px;font-weight:700;color:#ffc107;font-family:JetBrains Mono,monospace;letter-spacing:0.04em;white-space:nowrap;'>🔒 Benefit Lock</span>" +
         "</label>" +
       "</div>" +
