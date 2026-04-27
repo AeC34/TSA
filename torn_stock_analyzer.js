@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.12.1
+// @version      2.12.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3088,19 +3088,29 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var onChange = qtFindFiberProp(inp, "onChange");
     if (!onChange) { showToast("Trade input handler not found — Torn UI changed?", "error"); return false; }
 
-    // Set value through every available path. Different React-controlled inputs
-    // respond to different combos; doing all three maximizes the chance the
-    // sell-side state actually captures the value.
+    // Set value through every available path. The keypress simulation may set
+    // a "user touched" flag in React state that downstream validators (the
+    // sell handler's `m` closure) check before allowing the trade.
+    var sStr = String(shareCount);
+    try { inp.focus(); } catch(e) {}
     try {
-      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-      if (setter) setter.call(inp, String(shareCount));
+      for (var ki = 0; ki < sStr.length; ki++) {
+        var ch = sStr.charAt(ki);
+        inp.dispatchEvent(new KeyboardEvent("keydown",  { key: ch, bubbles: true, cancelable: true }));
+        inp.dispatchEvent(new KeyboardEvent("keypress", { key: ch, bubbles: true, cancelable: true }));
+        inp.dispatchEvent(new KeyboardEvent("keyup",    { key: ch, bubbles: true, cancelable: true }));
+      }
     } catch(e) {}
     try {
-      inp.dispatchEvent(new Event("input", { bubbles: true }));
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      if (setter) setter.call(inp, sStr);
+    } catch(e) {}
+    try {
+      inp.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, data: sStr, inputType: "insertText" }));
       inp.dispatchEvent(new Event("change", { bubbles: true }));
     } catch(e) {}
     try {
-      onChange({ error: false, value: String(shareCount) });
+      onChange({ error: false, value: sStr });
     } catch(e) {
       showToast("Trade input rejected: " + e.message, "error");
       return false;
@@ -3215,6 +3225,32 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (b4) {
         var freshFiberClick = qtFindFiberProp(b4, "onClick");
         if (freshFiberClick) try { freshFiberClick(); } catch(e) {}
+      }
+      await qtSleep(2000);
+    }
+
+    // Method 5: focus + Enter keypress. Browsers fire click on focused buttons
+    // when Enter is pressed; some React handlers wire through keyboard nav.
+    if (stillStuck()) {
+      var b5 = refind();
+      if (b5) {
+        try { b5.focus(); } catch(e) {}
+        try {
+          var ek = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+          b5.dispatchEvent(new KeyboardEvent('keydown',  ek));
+          b5.dispatchEvent(new KeyboardEvent('keypress', ek));
+          b5.dispatchEvent(new KeyboardEvent('keyup',    ek));
+        } catch(e) {}
+      }
+      await qtSleep(2000);
+    }
+
+    // Method 6: focus + DOM .click() on a freshly-focused button.
+    if (stillStuck()) {
+      var b6 = refind();
+      if (b6) {
+        try { b6.focus(); } catch(e) {}
+        try { b6.click(); } catch(e) {}
       }
       await qtSleep(2000);
     }
