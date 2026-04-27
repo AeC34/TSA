@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.14.0
+// @version      2.15.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2861,6 +2861,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   var qt_stocks = {}, qt_stockRows = {}, qt_localShareCache = {};
   var qtPendingTrade = null;
   var QT_PENDING_TIMEOUT_MS = 30000;
+  // Serializes concurrent qtUiTrade calls. While a trade is being prepared
+  // or executed, additional clicks are dropped silently — the user can click
+  // the row 1000 times a second; only one in-flight trade exists at a time.
+  var qtTradeInFlight = false;
 
   function qtBuildMaps() {
     $("ul[class^='stock_']").each(function() {
@@ -2979,6 +2983,52 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
   function qtSleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
+  // Event-driven wait — resolves as soon as `predicate()` returns truthy after
+  // any DOM mutation under `observeRoot`. Resolves true on success, false on
+  // timeout. If predicate is already true at call time, resolves immediately.
+  // Replaces fixed `qtSleep` waits so the script reacts as fast as Torn's UI
+  // is ready, no slower and no faster.
+  function qtWaitForCondition(observeRoot, predicate, maxMs) {
+    return new Promise(function(resolve) {
+      if (predicate()) return resolve(true);
+      var done = false;
+      var t;
+      var obs;
+      var finish = function(val) {
+        if (done) return;
+        done = true;
+        try { if (obs) obs.disconnect(); } catch(e) {}
+        try { clearTimeout(t); } catch(e) {}
+        resolve(val);
+      };
+      obs = new MutationObserver(function() {
+        if (predicate()) finish(true);
+      });
+      obs.observe(observeRoot, { childList: true, subtree: true, attributes: true, characterData: true });
+      t = setTimeout(function() { finish(predicate()); }, maxMs);
+    });
+  }
+
+  // Resolves true on the first DOM mutation under `observeRoot`, or false on
+  // timeout. Used to wait for any React re-render after a state-change call.
+  function qtWaitForAnyMutation(observeRoot, maxMs) {
+    return new Promise(function(resolve) {
+      var done = false;
+      var t;
+      var obs;
+      var finish = function(val) {
+        if (done) return;
+        done = true;
+        try { if (obs) obs.disconnect(); } catch(e) {}
+        try { clearTimeout(t); } catch(e) {}
+        resolve(val);
+      };
+      obs = new MutationObserver(function() { finish(true); });
+      obs.observe(observeRoot, { childList: true, subtree: true, attributes: true, characterData: true });
+      t = setTimeout(function() { finish(false); }, maxMs);
+    });
+  }
+
   // Step 1: scroll, open Owned tab, set value via fiber.onChange, click submit
   // via fiber.onClick to advance to the "Confirm Transaction" step.
   async function qtUiPrepare(pending) {
@@ -3018,6 +3068,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // call is sufficient to set value cleanly. Adding keypress/setter/dispatch
     // events triggered extra React re-renders that put sell-side state in a
     // configuration where the subsequent Confirm onClick took the wrong branch.
+    var oldInputValue = inp.value;
     try {
       onChange({ error: false, value: String(shareCount) });
     } catch(e) {
@@ -3025,7 +3076,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return false;
     }
 
-    await qtSleep(1000);
+    // Event-driven: wait for React to re-render the input. As soon as inp.value
+    // changes (the React commit landed), proceed. No fixed sleep.
+    await qtWaitForCondition(form, function() { return inp.value !== oldInputValue; }, 2000);
 
     var stepBtn = form.querySelector('[class*="' + verbClass + '"]');
     if (!stepBtn) { showToast("Submit button not found", "error"); return false; }
@@ -3100,16 +3153,23 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return null;
     };
 
+    var stockRoot = document.getElementById('stockmarketroot') || document.body;
+    var notStuck = function() { return !stillStuck(); };
+
+    // Each method waits via MutationObserver — exits as soon as the form
+    // transitions away from Confirm Transaction (trade fired) OR after 3s
+    // of no relevant change (try next method). No fixed sleeps.
+
     // Method 1: fiber.onClick (proven to work for sells when called from a
-    // post-real-interaction state; may or may not work for our scripted state).
+    // post-real-interaction state).
     try { finalClick(); } catch(e) {}
-    await qtSleep(2000);
+    await qtWaitForCondition(stockRoot, notStuck, 3000);
 
     // Method 2: DOM .click() on the (re-found) confirm button.
     if (stillStuck()) {
       var b2 = refind();
       if (b2) try { b2.click(); } catch(e) {}
-      await qtSleep(2000);
+      await qtWaitForCondition(stockRoot, notStuck, 3000);
     }
 
     // Method 3: Full PointerEvent + MouseEvent sequence on a fresh button.
@@ -3124,22 +3184,20 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           b3.dispatchEvent(new MouseEvent('click',         { bubbles: true, cancelable: true, view: window, button: 0 }));
         } catch(e) {}
       }
-      await qtSleep(2000);
+      await qtWaitForCondition(stockRoot, notStuck, 3000);
     }
 
-    // Method 4: Re-find fiber.onClick on the now-current button (the original
-    // finalClick reference may be stale after re-renders).
+    // Method 4: Re-find fiber.onClick on the now-current button.
     if (stillStuck()) {
       var b4 = refind();
       if (b4) {
         var freshFiberClick = qtFindFiberProp(b4, "onClick");
         if (freshFiberClick) try { freshFiberClick(); } catch(e) {}
       }
-      await qtSleep(2000);
+      await qtWaitForCondition(stockRoot, notStuck, 3000);
     }
 
-    // Method 5: focus + Enter keypress. Browsers fire click on focused buttons
-    // when Enter is pressed; some React handlers wire through keyboard nav.
+    // Method 5: focus + Enter keypress.
     if (stillStuck()) {
       var b5 = refind();
       if (b5) {
@@ -3151,7 +3209,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           b5.dispatchEvent(new KeyboardEvent('keyup',    ek));
         } catch(e) {}
       }
-      await qtSleep(2000);
+      await qtWaitForCondition(stockRoot, notStuck, 3000);
     }
 
     // Method 6: focus + DOM .click() on a freshly-focused button.
@@ -3161,13 +3219,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         try { b6.focus(); } catch(e) {}
         try { b6.click(); } catch(e) {}
       }
-      await qtSleep(2000);
+      await qtWaitForCondition(stockRoot, notStuck, 3000);
     }
 
-    // Method 7: walk React fiber state hooks and force boolean state to true.
-    // The sell handler `function(){_(!0),m?n(Or()):...}` gates trade dispatch
-    // on a closure boolean (`m`). If we can flip it via React's own dispatch,
-    // the next onClick takes the trade-firing branch.
+    // Method 7: walk React fiber state hooks and force boolean state to true,
+    // wait for the resulting re-render, then call onClick on the fresh button.
     if (stillStuck()) {
       var b7 = refind();
       if (b7) {
@@ -3185,11 +3241,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             f7 = f7.return;
           }
         } catch(e) {}
-        await qtSleep(300);
-        var freshFiberClick7 = qtFindFiberProp(b7, "onClick");
+        // Wait for the dispatched state changes to commit before re-finding & clicking.
+        await qtWaitForAnyMutation(stockRoot, 500);
+        var freshFiberClick7 = qtFindFiberProp(refind() || b7, "onClick");
         if (freshFiberClick7) try { freshFiberClick7(); } catch(e) {}
       }
-      await qtSleep(2000);
+      await qtWaitForCondition(stockRoot, notStuck, 3000);
     }
 
     if (stillStuck()) {
@@ -3218,27 +3275,37 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // tap 1 prepare or any failure — callers can use this to remove the row /
   // re-render after a successful trade.
   async function qtUiTrade(symb, shares, action, label, options) {
+    // Drop concurrent calls. The user can click 1000 times a second; only the
+    // first click that finds the script idle takes effect. Subsequent clicks
+    // during prepare/execute are silently ignored (no toast — keeps the UI
+    // quiet) and the user can tap again as soon as the previous chain finishes.
+    if (qtTradeInFlight) return false;
     if (!shares || !isFinite(shares) || shares < 1) {
       showToast("Invalid share count for " + symb, "error");
       return false;
     }
-    var key = symb + "|" + action;
-    var now = Date.now();
+    qtTradeInFlight = true;
+    try {
+      var key = symb + "|" + action;
+      var now = Date.now();
 
-    if (qtPendingTrade && qtPendingTrade.key === key && (now - qtPendingTrade.ts) < QT_PENDING_TIMEOUT_MS) {
-      var p = qtPendingTrade;
-      qtPendingTrade = null;
-      return await qtUiExecute({ symb: p.symb, shareCount: p.shareCount, action: p.action, label: p.label });
-    }
+      if (qtPendingTrade && qtPendingTrade.key === key && (now - qtPendingTrade.ts) < QT_PENDING_TIMEOUT_MS) {
+        var p = qtPendingTrade;
+        qtPendingTrade = null;
+        return await qtUiExecute({ symb: p.symb, shareCount: p.shareCount, action: p.action, label: p.label });
+      }
 
-    qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label, ts: now };
-    var prepared = await qtUiPrepare(qtPendingTrade);
-    if (prepared) {
-      showToast("Tap again to fire: " + label, "warn");
-    } else {
-      qtPendingTrade = null;
+      qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label, ts: now };
+      var prepared = await qtUiPrepare(qtPendingTrade);
+      if (prepared) {
+        showToast("Tap again to fire: " + label, "warn");
+      } else {
+        qtPendingTrade = null;
+      }
+      return false;
+    } finally {
+      qtTradeInFlight = false;
     }
-    return false;
   }
 
   // ── TheALFA's exact vault() ──
