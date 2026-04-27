@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.11.4
+// @version      2.12.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3205,13 +3205,26 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   async function qtUiTrade(symb, shares, action, label, options) {
     options = options || {};
 
+    // Sells: Torn's Confirm Transaction handler reads a closure flag that's
+    // only set by real `isTrusted=true` user interactions. No combination of
+    // synthetic events / fiber walks / dispatched events can flip that flag,
+    // and DOM clicks on stock controls are silently rejected. Verified
+    // experimentally — every auto-fire path ends with the form stuck on
+    // Confirm Transaction. Stop at prepare and let the user tap Torn's button.
+    // Buys don't gate on isTrusted, so they continue with full automation.
+    if (action === "sellShares") {
+      var sellOk = await qtUiPrepare({ symb: symb, shareCount: shares, action: action, label: label });
+      if (!sellOk) return false;
+      showToast("Tap Torn's 'Confirm Transaction' to sell: " + label, "warn");
+      return true;
+    }
+
     if (options.skipFirstTap) {
       var ok = await qtUiPrepare({ symb: symb, shareCount: shares, action: action, label: label });
       if (!ok) return false;
       // Let Torn's React fully wire the freshly-rendered Confirm Transaction
-      // button's closure before we fire its onClick. Sell paths in particular
-      // need a longer settle than buys.
-      await qtSleep(3000);
+      // button's closure before we fire its onClick.
+      await qtSleep(1500);
       return await qtUiExecute({ symb: symb, shareCount: shares, action: action, label: label });
     }
 
