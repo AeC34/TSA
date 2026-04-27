@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.10.3
+// @version      2.10.4
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3095,7 +3095,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var form = await qtWaitForElement(document.body, '[class*="' + sideClass + '"] [class*="manageBlock___"]', 2000);
     if (!form) { showToast("Trade form did not open for " + symb, "error"); return false; }
 
-    var inp = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
+    // Wait for the input — after a previous trade, the form briefly stays in
+    // "Confirm Transaction" state (no input) before resetting. A MutationObserver
+    // catches the moment the input mounts back, instead of erroring instantly.
+    var inp = await qtWaitForElement(form, 'input[data-testid="legacy-money-input"]:not([type="hidden"])', 3000);
     if (!inp) { showToast("Trade input not found", "error"); return false; }
 
     var onChange = qtFindFiberProp(inp, "onChange");
