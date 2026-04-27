@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.1
+// @version      2.15.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1677,9 +1677,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             var realizedProfit = (liveP * 0.999 - costP) * soldShares;
             realizedEvents.push({ ts: nowTs, profit: realizedProfit, sym: rpSym, sell_price: liveP });
           }
-          // Trim events older than 90 days
+          // Trim events older than 90 days. Keep entries that are missing `ts`
+          // (legacy data from older TSA versions that didn't record a timestamp)
+          // — discarding them silently would lose the user's realized-P/L history.
           var trim90 = nowTs - 90 * 86400;
-          realizedEvents = realizedEvents.filter(function(e) { return e.ts >= trim90; });
+          realizedEvents = realizedEvents.filter(function(e) { return !e.ts || e.ts >= trim90; });
           localStorage.setItem("tsa_realized_events", JSON.stringify(realizedEvents));
         } catch(e) {}
         // Save current holdings snapshot for next comparison
@@ -3064,17 +3066,21 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // call is sufficient to set value cleanly. Adding keypress/setter/dispatch
     // events triggered extra React re-renders that put sell-side state in a
     // configuration where the subsequent Confirm onClick took the wrong branch.
-    var oldInputValue = inp.value;
+    var sStr = String(shareCount);
     try {
-      onChange({ error: false, value: String(shareCount) });
+      onChange({ error: false, value: sStr });
     } catch(e) {
       showToast("Trade input rejected: " + e.message, "error");
       return false;
     }
 
-    // Event-driven: wait for React to re-render the input. As soon as inp.value
-    // changes (the React commit landed), proceed. No fixed sleep.
-    await qtWaitForCondition(form, function() { return inp.value !== oldInputValue; }, 2000);
+    // Event-driven: proceed as soon as the input reflects the target value
+    // (compare with commas stripped — Torn formats the rendered value with
+    // thousands separators). Resolves immediately if the input is already at
+    // the target (e.g. user re-clicks the same amount), so no wasted 2s wait.
+    await qtWaitForCondition(form, function() {
+      return inp.value.replace(/,/g, "") === sStr;
+    }, 2000);
 
     var stepBtn = form.querySelector('[class*="' + verbClass + '"]');
     if (!stepBtn) { showToast("Submit button not found", "error"); return false; }
