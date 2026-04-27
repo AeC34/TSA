@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.11.2
+// @version      2.11.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3053,30 +3053,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
   function qtSleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
-  // Synthetic event for calling React fiber click handlers directly. Some Torn
-  // handlers call e.preventDefault() / e.stopPropagation() after dispatching;
-  // calling without args makes them throw AFTER the trade fires, producing a
-  // false-negative error toast. Passing this shape avoids that.
-  function qtSyntheticEvent(target) {
-    return {
-      target: target,
-      currentTarget: target,
-      nativeEvent: { target: target, type: "click", bubbles: true, cancelable: true, isTrusted: false },
-      type: "click",
-      bubbles: true,
-      cancelable: true,
-      defaultPrevented: false,
-      eventPhase: 3,
-      timeStamp: Date.now(),
-      isTrusted: false,
-      preventDefault: function() {},
-      stopPropagation: function() {},
-      persist: function() {},
-      isDefaultPrevented: function() { return false; },
-      isPropagationStopped: function() { return false; }
-    };
-  }
-
   // Step 1: scroll, open Owned tab, set value via fiber.onChange, click submit
   // via fiber.onClick to advance to the "Confirm Transaction" step.
   async function qtUiPrepare(pending) {
@@ -3126,8 +3102,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var stepClick = qtFindFiberProp(stepBtn, "onClick");
     if (!stepClick) { showToast("Submit handler not found — Torn UI changed?", "error"); return false; }
 
+    // Call with no args — matches the working console call pattern. Passing a
+    // synthetic event arg interfered with sell-side state advancement.
     try {
-      stepClick(qtSyntheticEvent(stepBtn));
+      stepClick();
     } catch(e) {
       showToast("Advance to confirm failed: " + e.message, "error");
       return false;
