@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.12.0
+// @version      2.12.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3158,30 +3158,68 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       }
     }
 
-    // Call with no args — the sell Confirm handler is `function(){_(!0),m?n(Or()):...}`
-    // (zero parameters); console-verified that calling it directly with no args
-    // fires the trade.
-    try {
-      finalClick();
-    } catch(e) {
-      showToast("Confirm failed: " + e.message, "error");
+    // Helper: is Confirm Transaction still visible? If not, trade fired.
+    var stillStuck = function() {
+      var f = document.querySelector('[class*="' + sideClass + '"] [class*="manageBlock___"]');
+      if (!f) return false;
+      var bs = f.querySelectorAll("button");
+      for (var i = 0; i < bs.length; i++) {
+        if (/confirm/i.test(bs[i].textContent)) return true;
+      }
       return false;
+    };
+
+    // Re-find confirm button right before clicking — handler closures depend
+    // on the latest render's state.
+    var refind = function() {
+      var f = document.querySelector('[class*="' + sideClass + '"] [class*="manageBlock___"]');
+      if (!f) return null;
+      var bs = f.querySelectorAll("button");
+      for (var i = 0; i < bs.length; i++) {
+        if (/confirm/i.test(bs[i].textContent)) return bs[i];
+      }
+      return null;
+    };
+
+    // Method 1: fiber.onClick (proven to work for sells when called from a
+    // post-real-interaction state; may or may not work for our scripted state).
+    try { finalClick(); } catch(e) {}
+    await qtSleep(2000);
+
+    // Method 2: DOM .click() on the (re-found) confirm button.
+    if (stillStuck()) {
+      var b2 = refind();
+      if (b2) try { b2.click(); } catch(e) {}
+      await qtSleep(2000);
     }
 
-    // Verify the trade actually fired. If Torn's Confirm Transaction button is
-    // still visible after a generous settle, the auto-fire didn't take —
-    // surface a toast so the user can finish manually rather than thinking
-    // the trade went through.
-    await qtSleep(2500);
-    var stillStuck = false;
-    var freshForm = document.querySelector('[class*="' + sideClass + '"] [class*="manageBlock___"]');
-    if (freshForm) {
-      var freshBtns = freshForm.querySelectorAll("button");
-      for (var j = 0; j < freshBtns.length; j++) {
-        if (/confirm/i.test(freshBtns[j].textContent)) { stillStuck = true; break; }
+    // Method 3: Full PointerEvent + MouseEvent sequence on a fresh button.
+    if (stillStuck()) {
+      var b3 = refind();
+      if (b3) {
+        try {
+          b3.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window, button: 0, isPrimary: true }));
+          b3.dispatchEvent(new MouseEvent('mousedown',     { bubbles: true, cancelable: true, view: window, button: 0 }));
+          b3.dispatchEvent(new PointerEvent('pointerup',   { bubbles: true, cancelable: true, view: window, button: 0, isPrimary: true }));
+          b3.dispatchEvent(new MouseEvent('mouseup',       { bubbles: true, cancelable: true, view: window, button: 0 }));
+          b3.dispatchEvent(new MouseEvent('click',         { bubbles: true, cancelable: true, view: window, button: 0 }));
+        } catch(e) {}
       }
+      await qtSleep(2000);
     }
-    if (stillStuck) {
+
+    // Method 4: Re-find fiber.onClick on the now-current button (the original
+    // finalClick reference may be stale after re-renders).
+    if (stillStuck()) {
+      var b4 = refind();
+      if (b4) {
+        var freshFiberClick = qtFindFiberProp(b4, "onClick");
+        if (freshFiberClick) try { freshFiberClick(); } catch(e) {}
+      }
+      await qtSleep(2000);
+    }
+
+    if (stillStuck()) {
       showToast("Auto-fire didn't take — tap Torn's 'Confirm Transaction' to complete: " + label, "warn");
       return false;
     }
@@ -3204,20 +3242,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // sites that already have their own visual two-tap (ROI buy, swing sell, rec).
   async function qtUiTrade(symb, shares, action, label, options) {
     options = options || {};
-
-    // Sells: Torn's Confirm Transaction handler reads a closure flag that's
-    // only set by real `isTrusted=true` user interactions. No combination of
-    // synthetic events / fiber walks / dispatched events can flip that flag,
-    // and DOM clicks on stock controls are silently rejected. Verified
-    // experimentally — every auto-fire path ends with the form stuck on
-    // Confirm Transaction. Stop at prepare and let the user tap Torn's button.
-    // Buys don't gate on isTrusted, so they continue with full automation.
-    if (action === "sellShares") {
-      var sellOk = await qtUiPrepare({ symb: symb, shareCount: shares, action: action, label: label });
-      if (!sellOk) return false;
-      showToast("Tap Torn's 'Confirm Transaction' to sell: " + label, "warn");
-      return true;
-    }
 
     if (options.skipFirstTap) {
       var ok = await qtUiPrepare({ symb: symb, shareCount: shares, action: action, label: label });
