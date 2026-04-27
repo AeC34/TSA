@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.0
+// @version      2.15.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2861,10 +2861,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   var qt_stocks = {}, qt_stockRows = {}, qt_localShareCache = {};
   var qtPendingTrade = null;
   var QT_PENDING_TIMEOUT_MS = 30000;
-  // Serializes concurrent qtUiTrade calls. While a trade is being prepared
-  // or executed, additional clicks are dropped silently — the user can click
-  // the row 1000 times a second; only one in-flight trade exists at a time.
-  var qtTradeInFlight = false;
 
   function qtBuildMaps() {
     $("ul[class^='stock_']").each(function() {
@@ -3275,37 +3271,27 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // tap 1 prepare or any failure — callers can use this to remove the row /
   // re-render after a successful trade.
   async function qtUiTrade(symb, shares, action, label, options) {
-    // Drop concurrent calls. The user can click 1000 times a second; only the
-    // first click that finds the script idle takes effect. Subsequent clicks
-    // during prepare/execute are silently ignored (no toast — keeps the UI
-    // quiet) and the user can tap again as soon as the previous chain finishes.
-    if (qtTradeInFlight) return false;
     if (!shares || !isFinite(shares) || shares < 1) {
       showToast("Invalid share count for " + symb, "error");
       return false;
     }
-    qtTradeInFlight = true;
-    try {
-      var key = symb + "|" + action;
-      var now = Date.now();
+    var key = symb + "|" + action;
+    var now = Date.now();
 
-      if (qtPendingTrade && qtPendingTrade.key === key && (now - qtPendingTrade.ts) < QT_PENDING_TIMEOUT_MS) {
-        var p = qtPendingTrade;
-        qtPendingTrade = null;
-        return await qtUiExecute({ symb: p.symb, shareCount: p.shareCount, action: p.action, label: p.label });
-      }
-
-      qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label, ts: now };
-      var prepared = await qtUiPrepare(qtPendingTrade);
-      if (prepared) {
-        showToast("Tap again to fire: " + label, "warn");
-      } else {
-        qtPendingTrade = null;
-      }
-      return false;
-    } finally {
-      qtTradeInFlight = false;
+    if (qtPendingTrade && qtPendingTrade.key === key && (now - qtPendingTrade.ts) < QT_PENDING_TIMEOUT_MS) {
+      var p = qtPendingTrade;
+      qtPendingTrade = null;
+      return await qtUiExecute({ symb: p.symb, shareCount: p.shareCount, action: p.action, label: p.label });
     }
+
+    qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label, ts: now };
+    var prepared = await qtUiPrepare(qtPendingTrade);
+    if (prepared) {
+      showToast("Tap again to fire: " + label, "warn");
+    } else {
+      qtPendingTrade = null;
+    }
+    return false;
   }
 
   // ── TheALFA's exact vault() ──
