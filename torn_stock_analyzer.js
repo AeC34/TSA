@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.10.0
+// @version      2.10.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3053,6 +3053,22 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
   function qtSleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
+  // Synthetic event for calling React fiber click handlers directly. Some Torn
+  // handlers call e.preventDefault() / e.stopPropagation() after dispatching;
+  // calling without args makes them throw AFTER the trade fires, producing a
+  // false-negative error toast. Passing this shape avoids that.
+  function qtSyntheticEvent(target) {
+    return {
+      target: target,
+      currentTarget: target,
+      nativeEvent: { target: target, type: "click" },
+      type: "click",
+      preventDefault: function() {},
+      stopPropagation: function() {},
+      persist: function() {}
+    };
+  }
+
   // Step 1: scroll, open Owned tab, set value via fiber.onChange, click submit
   // via fiber.onClick to advance to the "Confirm Transaction" step.
   async function qtUiPrepare(pending) {
@@ -3100,7 +3116,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (!stepClick) { showToast("Submit handler not found — Torn UI changed?", "error"); return false; }
 
     try {
-      stepClick();
+      stepClick(qtSyntheticEvent(stepBtn));
     } catch(e) {
       showToast("Advance to confirm failed: " + e.message, "error");
       return false;
@@ -3143,7 +3159,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }
 
     try {
-      finalClick();
+      finalClick(qtSyntheticEvent(confirmBtn));
     } catch(e) {
       showToast("Confirm failed: " + e.message, "error");
       return false;
@@ -3151,6 +3167,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     qtUpdateLocalCache(symb, action === "buyShares" ? shareCount : -shareCount);
     showToast(label, "success");
+
+    // Restore the qt-exec quick-bar success-state UX that the old qtPostTrade had
+    // ("✓ Bought 1M of HRG" for 3s before reverting to the normal label).
+    // No-op for sites without a qt-exec button.
+    var execBtn = document.getElementById("qt-exec");
+    if (execBtn) {
+      execBtn.textContent = "✓ " + label;
+      setTimeout(function() { qtUpdateExec(); }, 3000);
+    }
+
     return true;
   }
 
