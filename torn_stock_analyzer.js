@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.19
+// @version      2.15.20
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2730,6 +2730,18 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         loadData();
       });
 
+      // Visual feedback so the user can see WHICH Block is queued for tap 2.
+      // The corner toast alone is easy to miss; a per-row highlight makes
+      // the prepared state obvious.
+      var armedSwingRow = null;
+      function clearSwingRowHighlight() {
+        if (!armedSwingRow) return;
+        armedSwingRow.style.background = "";
+        armedSwingRow.style.boxShadow = "";
+        var armBadge = armedSwingRow.querySelector(".tsa-swing-armed-badge");
+        if (armBadge && armBadge.parentNode) armBadge.parentNode.removeChild(armBadge);
+        armedSwingRow = null;
+      }
       content.querySelectorAll(".tsa-swing-tx-row").forEach(function(row) {
         row.addEventListener("click", async function(e) {
           e.stopPropagation();
@@ -2744,8 +2756,30 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           if (shares === null) return;
           var fired = await qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")");
           if (fired) {
+            // Trade fired (tap 2 success or one-step config) — drop the row.
+            clearSwingRowHighlight();
             var parent = row.parentNode;
             if (parent) parent.removeChild(row);
+            return;
+          }
+          // Tap 1 succeeded if qtPendingTrade matches what we just queued.
+          // Highlight this row so the user can see which Block is armed for
+          // the second tap.
+          var key = sym + "|sellShares";
+          if (qtPendingTrade && qtPendingTrade.key === key && qtPendingTrade.shareCount === shares) {
+            clearSwingRowHighlight();
+            row.style.background = "rgba(255,76,106,0.18)";
+            row.style.boxShadow = "inset 0 0 0 1px rgba(255,76,106,0.6)";
+            var armBadge = document.createElement("span");
+            armBadge.className = "tsa-swing-armed-badge";
+            armBadge.textContent = "↻ tap to confirm";
+            armBadge.style.cssText = "margin-left:8px;font-size:9px;font-weight:700;color:#ff4c6a;text-transform:uppercase;letter-spacing:0.05em";
+            row.appendChild(armBadge);
+            armedSwingRow = row;
+          } else {
+            // Prepare failed (qtPendingTrade was cleared) — drop any old armed
+            // visual so the UI doesn't lie.
+            clearSwingRowHighlight();
           }
         });
       });
