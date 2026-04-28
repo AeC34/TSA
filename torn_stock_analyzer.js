@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.16
+// @version      2.15.17
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3053,8 +3053,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return parseFloat($(qt_stocks[id]).text().replace(/,/g, "")) || 0;
   }
 
-  function qtGetOwnedShares(id) {
-    if (qt_localShareCache[id] !== undefined) return qt_localShareCache[id];
+  function qtGetOwnedShares(id, bypassCache) {
+    if (!bypassCache && qt_localShareCache[id] !== undefined) return qt_localShareCache[id];
     var row = qt_stockRows[id];
     if (!row) return 0;
     var mobileEl = row.find("p[class^='count']");
@@ -3253,6 +3253,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var stepClick = qtFindFiberProp(stepBtn, "onClick");
     if (!stepClick) { showToast("Submit handler not found — Torn UI changed?", "error"); return false; }
 
+    // Snapshot live owned-share count BEFORE clicking. If Torn has the
+    // confirmation prompt disabled (or otherwise fires the trade in a single
+    // step), the Confirm Transaction button never appears — but the share
+    // count changes. We use the count delta as a fallback success signal.
+    var preTradeOwned = qtGetOwnedShares(symb, true);
+
     // Call with no args — matches the working console call pattern. Passing a
     // synthetic event arg interfered with sell-side state advancement.
     try {
@@ -3262,9 +3268,45 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return false;
     }
 
-    var confirmBtn = await qtWaitForButton(form, /confirm/i, 5000);
-    if (!confirmBtn) { showToast("Confirm Transaction did not appear (amount invalid?)", "error"); return false; }
+    // Wait for either:
+    //   "confirm" — Confirm Transaction button appears (two-step flow, normal),
+    //   "fired"   — owned shares changed in the expected direction
+    //               (one-step flow, e.g. Torn confirmation prompt disabled),
+    //   null      — neither happens within 5s (real failure).
+    var stockRoot = document.getElementById('stockmarketroot') || document.body;
+    var resolution = await new Promise(function(resolve) {
+      var done = false;
+      var t = setTimeout(function() { if (!done) { done = true; obs.disconnect(); resolve(null); } }, 5000);
+      var check = function() {
+        if (done) return;
+        var btns = form.querySelectorAll("button");
+        for (var i = 0; i < btns.length; i++) {
+          if (/confirm/i.test(btns[i].textContent)) {
+            done = true; clearTimeout(t); obs.disconnect(); resolve("confirm"); return;
+          }
+        }
+        var post = qtGetOwnedShares(symb, true);
+        var fired = action === "buyShares" ? post > preTradeOwned : post < preTradeOwned;
+        if (fired) {
+          done = true; clearTimeout(t); obs.disconnect(); resolve("fired");
+        }
+      };
+      var obs = new MutationObserver(check);
+      obs.observe(stockRoot, { childList: true, subtree: true, characterData: true });
+      check(); // initial
+    });
 
+    if (resolution === "fired") {
+      // Trade completed in one tap — sync local cache, success toast, no
+      // pending second tap needed.
+      qtUpdateLocalCache(symb, action === "buyShares" ? shareCount : -shareCount);
+      showToast(label, "success");
+      return false;
+    }
+    if (!resolution) {
+      showToast("Confirm Transaction did not appear (amount invalid?)", "error");
+      return false;
+    }
     return true;
   }
 
