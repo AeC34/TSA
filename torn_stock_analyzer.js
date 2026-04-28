@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.6
+// @version      2.15.7
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1022,6 +1022,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var sym    = row.dataset.buySym;
           var shares = parseInt(row.dataset.buyShares, 10);
           var tier   = row.dataset.buyTier;
+          qtBuildMaps();
+          var price  = qtGetPrice(sym);
+          var cash   = qtGetMoneyFast();
+          if (price > 0 && cash > 0 && shares * price > cash) {
+            showToast("Need $" + (shares * price - cash).toLocaleString("en-US") + " more for " + sym + " " + tier, "warn");
+            return;
+          }
           qtUiTrade(sym, shares, "buyShares", "Bought " + shares.toLocaleString("en-US") + " " + sym + " (" + tier + ")");
           showROIPlanner(ownedMap, raw);
         });
@@ -2595,6 +2602,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var sym    = row.dataset.sym;
           var shares = parseInt(row.dataset.shares, 10);
           var label  = row.dataset.label;
+          qtBuildMaps();
+          var owned = qtGetOwnedShares(sym);
+          if (owned <= 0) { showToast("You have no shares of " + sym, "warn"); return; }
+          if (shares > owned) shares = owned;
           shares = qtApplyBenefitLock(sym, shares);
           if (shares === null) return;
           var fired = await qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")");
@@ -2835,6 +2846,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     recDiv.innerHTML = "<button id='qt-rec-btn' style='width:100%;padding:6px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg + ";color:" + color + ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;text-align:left;'>" + label + "</button>";
 
     document.getElementById("qt-rec-btn").addEventListener("click", function() {
+      var liveCash = qtGetMoneyFast();
+      if (liveCash > 0 && recCost > liveCash) {
+        showToast("Need $" + (recCost - liveCash).toLocaleString("en-US") + " more for " + recSym + " " + recTier, "warn");
+        return;
+      }
       qtUiTrade(recSym, recShares, "buyShares", "Bought " + recShares.toLocaleString("en-US") + " " + recSym + " (" + recTier + ")");
       updateQtRecommendation(null);
     });
