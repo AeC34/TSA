@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.11
+// @version      2.15.12
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -295,22 +295,36 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   ];
 
   // Lookup map for O(1) ROI_TABLE access: key = "SYM|Tn"
-  var ROI_MAP = (function() {
-    var m = {};
-    ROI_TABLE.forEach(function(e) { m[e.sym + "|" + e.tier] = e; });
-    return m;
-  })();
+  var ROI_MAP = {};
+  function rebuildRoiMap() {
+    Object.keys(ROI_MAP).forEach(function(k) { delete ROI_MAP[k]; });
+    ROI_TABLE.forEach(function(e) { ROI_MAP[e.sym + "|" + e.tier] = e; });
+  }
+  rebuildRoiMap();
 
   // Item IDs with sellable market value
   var ITEM_IDS = [364, 365, 366, 367, 368, 369, 370, 817, 818];
   // PTS gives 100 points = $3M fixed
   var PTS_VALUE = 3000000;
 
+  // Stocks with item-paying benefits that aren't hardcoded in ROI_TABLE — the
+  // script discovers their item ID at runtime (one-shot) by name and synthesises
+  // T1-T6 entries into ROI_TABLE.
+  var DYNAMIC_BENEFIT_STOCKS = {
+    "BAG": { itemName: "Ammunition Pack", freq: 7, type: "variable" }
+  };
+
   var roiSkipped = (function() { try { return JSON.parse(localStorage.getItem("tsa_roi_skipped") || "[]") || []; } catch(e) { return []; } })();
   var itemPrices = {}; // cache: itemId -> price
   // itemNames are stable, persist them — saves an API call per id every reload.
   var itemNames = (function() {
     try { return JSON.parse(lsGet("tsa_item_names", "{}")) || {}; }
+    catch(e) { return {}; }
+  })();
+  // itemIdsByName: name → id reverse map, populated by a one-time
+  // /torn/?selections=items fetch. Used to resolve DYNAMIC_BENEFIT_STOCKS.
+  var itemIdsByName = (function() {
+    try { return JSON.parse(lsGet("tsa_item_ids_by_name", "{}")) || {}; }
     catch(e) { return {}; }
   })();
 
@@ -362,15 +376,68 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     });
   }
 
+  // One-shot fetch of the full Torn items dictionary to resolve any
+  // DYNAMIC_BENEFIT_STOCKS item names → IDs. Skipped if every needed name is
+  // already cached locally.
+  function ensureDynamicItemIds(cb) {
+    var allKnown = Object.keys(DYNAMIC_BENEFIT_STOCKS).every(function(sym) {
+      return itemIdsByName[DYNAMIC_BENEFIT_STOCKS[sym].itemName];
+    });
+    if (allKnown) { cb(); return; }
+    var url = "https://api.torn.com/torn/?selections=items&key=" + getTornKey();
+    GM_xmlhttpRequest({
+      method: "GET", url: url,
+      onload: function(r) {
+        try {
+          var d = JSON.parse(r.responseText);
+          if (d.items) {
+            Object.keys(d.items).forEach(function(id) {
+              var item = d.items[id];
+              if (item && item.name) itemIdsByName[item.name] = parseInt(id, 10);
+            });
+            lsSet("tsa_item_ids_by_name", JSON.stringify(itemIdsByName));
+          }
+        } catch(e) {}
+        cb();
+      },
+      onerror: function() { cb(); }
+    });
+  }
+
+  // Once item IDs are resolved, splice T1-T6 entries for each dynamic stock
+  // into ROI_TABLE (and its lookup map) and register their item ID for price /
+  // name fetching. Idempotent.
+  function augmentRoiTableWithDynamicStocks() {
+    Object.keys(DYNAMIC_BENEFIT_STOCKS).forEach(function(sym) {
+      var def = DYNAMIC_BENEFIT_STOCKS[sym];
+      var itemId = itemIdsByName[def.itemName];
+      if (!itemId) return;
+      if (ROI_TABLE.some(function(e) { return e.sym === sym; })) return;
+      for (var t = 1; t <= 6; t++) {
+        ROI_TABLE.push({
+          sym: sym, tier: "T" + t,
+          cost: 0, payout: 0, freq: def.freq, type: def.type, item: itemId
+        });
+      }
+      if (ITEM_IDS.indexOf(itemId) < 0) ITEM_IDS.push(itemId);
+    });
+    rebuildRoiMap();
+  }
+
   function fetchAllItemPrices(cb) {
-    // Two requests per id: live market price + (one-off, cached) item name.
-    var remaining = ITEM_IDS.length * 2;
-    var done = false;
-    function finish() { if (!done) { done = true; cb(); } }
-    setTimeout(finish, 10000); // failsafe: call cb after 10s even if a request never returns
-    ITEM_IDS.forEach(function(id) {
-      fetchItemPrice(id, function() { remaining--; if (remaining === 0) finish(); });
-      fetchItemName(id,  function() { remaining--; if (remaining === 0) finish(); });
+    // Resolve any pending dynamic item IDs first, then add their entries to
+    // ROI_TABLE, then fetch market price + display name for the (possibly
+    // expanded) ITEM_IDS list.
+    ensureDynamicItemIds(function() {
+      augmentRoiTableWithDynamicStocks();
+      var remaining = ITEM_IDS.length * 2;
+      var done = false;
+      function finish() { if (!done) { done = true; cb(); } }
+      setTimeout(finish, 10000); // failsafe: call cb after 10s even if a request never returns
+      ITEM_IDS.forEach(function(id) {
+        fetchItemPrice(id, function() { remaining--; if (remaining === 0) finish(); });
+        fetchItemName(id,  function() { remaining--; if (remaining === 0) finish(); });
+      });
     });
   }
 
