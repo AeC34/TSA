@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.15
+// @version      2.15.16
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -4321,10 +4321,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       "<div class=\"tsa-header\">" +
         "<div class=\"tsa-header-left\">" +
           "<span class=\"tsa-title\">TORN STOCK ANALYZER</span>" +
-          "<button class=\"tsa-theme-btn\" id=\"tsa-theme-btn\" title=\"Toggle theme\">" + (isDarkInit ? "[L]" : "[D]") + "</button>" +
           "<button class=\"tsa-theme-btn\" id=\"tsa-roi-btn\" title=\"ROI Planner\">📊</button>" +
           "<button class=\"tsa-theme-btn\" id=\"tsa-alerts-btn\" title=\"Price Alerts\">🔔</button>" +
-          "<button class=\"tsa-theme-btn\" id=\"tsa-apikey-btn\" title=\"Set API Key\">🔑</button>" +
           "<button class=\"tsa-theme-btn\" id=\"tsa-settings-btn\" title=\"Settings\">⚙️</button>" +
           "<button class=\"tsa-theme-btn\" id=\"tsa-update-btn\" title=\"Update all\">↻</button>" +
         "</div>" +
@@ -4337,27 +4335,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     document.body.appendChild(overlay);
     applyOverlayPosition(getOverlayPosition());
 
-    document.getElementById("tsa-theme-btn").addEventListener("click", function() {
-      var isDark = overlay.classList.toggle("tsa-dark");
+    // Apply theme + API key changes from the Settings panel.
+    function applyThemeChange(isDark) {
+      if (isDark) overlay.classList.add("tsa-dark");
+      else overlay.classList.remove("tsa-dark");
       lsSet("tsa_dark", isDark.toString());
-      document.getElementById("tsa-theme-btn").textContent = isDark ? "[L]" : "[D]";
-      // Sync quick trade bar theme
       applyQtTheme(isDark);
-      // Re-render content with new colours
-      if (roiPlannerActive && lastOwnedMap) {
-        showROIPlanner(lastOwnedMap, lastRaw);
-      } else if (lastOwnedMap) {
-        loadData();
-      }
-    });
-
-    document.getElementById("tsa-apikey-btn").addEventListener("click", function() {
-      var content = document.getElementById("tsa-content");
-      showKeyOnboarding(content, function() {
-        showToast("API key saved.", "success");
-        loadData();
-      });
-    });
+    }
 
     document.getElementById("tsa-settings-btn").addEventListener("click", function() {
       var content = document.getElementById("tsa-content");
@@ -4368,79 +4352,108 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var text = isDarkNow ? "#c8c8d8" : "#222";
       var muted = isDarkNow ? "#7a7a9a" : "#666";
 
+      var inputStyle = "width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;";
+      var labelTitle = "font-size:11px;color:" + muted + ";margin-bottom:4px";
+      var hint       = "font-size:10px;color:" + muted + ";margin-top:4px;line-height:1.4";
+      var section    = "border-top:1px solid " + border + ";margin-bottom:12px;padding-top:12px";
+      var sectionH   = "font-size:10px;letter-spacing:0.1em;color:" + muted + ";text-transform:uppercase;font-weight:bold;margin-bottom:10px";
+      var checkLabel = "display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px";
+
       content.innerHTML =
         "<div style=\"padding:14px\">" +
         "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + muted + ";text-transform:uppercase;font-weight:bold;margin-bottom:14px\">Settings</div>" +
 
+        // ── Trades & alerts ─────────────────────
+        "<div style=\"" + sectionH + "\">Trades & alerts</div>" +
         "<div style=\"margin-bottom:12px\">" +
-        "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:4px\">Profit target (%)</div>" +
-        "<input id=\"tsa-setting-profit\" type=\"number\" step=\"0.1\" min=\"0.1\" max=\"10\" value=\"" + getProfitTarget() + "\" style=\"width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;\">" +
-        "<div style=\"font-size:10px;color:" + muted + ";margin-top:4px;line-height:1.4\">Typical: 1–3%. Higher = wait for bigger profits, sells trigger less often.</div>" +
+          "<div style=\"" + labelTitle + "\">Profit target (%)</div>" +
+          "<input id=\"tsa-setting-profit\" type=\"number\" step=\"0.1\" min=\"0.1\" max=\"10\" value=\"" + getProfitTarget() + "\" style=\"" + inputStyle + "\">" +
+          "<div style=\"" + hint + "\">Typical: 1–3%. Higher = wait for bigger profits, sells trigger less often.</div>" +
         "</div>" +
-
         "<div style=\"margin-bottom:12px\">" +
-        "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:4px\">Stop loss (%)</div>" +
-        "<input id=\"tsa-setting-stoploss\" type=\"number\" step=\"0.1\" min=\"0.1\" max=\"20\" value=\"" + getStopLoss() + "\" style=\"width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;\">" +
-        "<div style=\"font-size:10px;color:" + muted + ";margin-top:4px;line-height:1.4\">Typical: 2–5%. Lower = exit faster on a loss, but more false alarms.</div>" +
+          "<div style=\"" + labelTitle + "\">Stop loss (%)</div>" +
+          "<input id=\"tsa-setting-stoploss\" type=\"number\" step=\"0.1\" min=\"0.1\" max=\"20\" value=\"" + getStopLoss() + "\" style=\"" + inputStyle + "\">" +
+          "<div style=\"" + hint + "\">Typical: 2–5%. Lower = exit faster on a loss, but more false alarms.</div>" +
         "</div>" +
 
+        // ── Refresh & data ─────────────────────
+        "<div style=\"" + section + "\">" +
+        "<div style=\"" + sectionH + "\">Refresh & data</div>" +
         "<div style=\"margin-bottom:12px\">" +
-        "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:4px\">Auto-refresh (min, 0 = off)</div>" +
-        "<input id=\"tsa-setting-autorefresh\" type=\"number\" step=\"1\" min=\"0\" max=\"60\" value=\"" + getAutoRefreshInterval() + "\" style=\"width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;\">" +
-        "<div style=\"font-size:10px;color:" + muted + ";margin-top:4px;line-height:1.4\">Typical: 5–15 min. 0 disables auto-refresh — only manual refresh.</div>" +
+          "<div style=\"" + labelTitle + "\">Auto-refresh (min, 0 = off)</div>" +
+          "<input id=\"tsa-setting-autorefresh\" type=\"number\" step=\"1\" min=\"0\" max=\"60\" value=\"" + getAutoRefreshInterval() + "\" style=\"" + inputStyle + "\">" +
+          "<div style=\"" + hint + "\">Typical: 5–15 min. 0 disables auto-refresh — only manual refresh.</div>" +
+        "</div>" +
+        "<div style=\"margin-bottom:12px\">" +
+          "<div style=\"" + labelTitle + "\">Price history (days, 1–30)</div>" +
+          "<input id=\"tsa-setting-histdays\" type=\"number\" step=\"1\" min=\"1\" max=\"30\" value=\"" + parseInt(lsGet("tsa_history_days", "30"), 10) + "\" style=\"" + inputStyle + "\">" +
+          "<div style=\"" + hint + "\">How many days of price history to fetch and chart. 30 = max detail, 7 = faster load.</div>" +
+        "</div>" +
         "</div>" +
 
-        "<div style=\"margin-bottom:16px\">" +
-        "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:4px\">Price history (days, 1–30)</div>" +
-        "<input id=\"tsa-setting-histdays\" type=\"number\" step=\"1\" min=\"1\" max=\"30\" value=\"" + parseInt(lsGet("tsa_history_days", "30"), 10) + "\" style=\"width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;\">" +
-        "<div style=\"font-size:10px;color:" + muted + ";margin-top:4px;line-height:1.4\">How many days of price history to fetch and chart. 30 = max detail, 7 = faster load.</div>" +
+        // ── Display ─────────────────────
+        "<div style=\"" + section + "\">" +
+        "<div style=\"" + sectionH + "\">Display</div>" +
+        "<div style=\"margin-bottom:12px\">" +
+          "<div style=\"" + labelTitle + "\">Theme</div>" +
+          "<select id=\"tsa-setting-theme\" style=\"" + inputStyle + "\">" +
+            "<option value=\"light\"" + (!isDarkNow ? " selected" : "") + ">Light</option>" +
+            "<option value=\"dark\""  + (isDarkNow  ? " selected" : "") + ">Dark</option>" +
+          "</select>" +
         "</div>" +
-
-        "<div style=\"border-top:1px solid " + border + ";margin-bottom:12px;padding-top:12px\">" +
-        "<div style=\"font-size:10px;letter-spacing:0.1em;color:" + muted + ";text-transform:uppercase;font-weight:bold;margin-bottom:10px\">Buy signals</div>" +
-        "<label style=\"display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px\">" +
+        "<label style=\"" + checkLabel + "\">" +
           "<input type=\"checkbox\" id=\"tsa-setting-show-watch\"" + (getShowWatch() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
           "<span style=\"font-size:12px;color:" + text + "\">Show Watch section</span>" +
         "</label>" +
-        "<label style=\"display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px\">" +
+        "<label style=\"" + checkLabel + "\">" +
           "<input type=\"checkbox\" id=\"tsa-setting-show-qt-chart\"" + (getShowQtChart() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
           "<span style=\"font-size:12px;color:" + text + "\">Show Quick Trade chart</span>" +
         "</label>" +
         "<div style=\"margin-bottom:12px\">" +
-          "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:4px\">Min score for Top 5 (0–160)</div>" +
-          "<input id=\"tsa-setting-top5-min\" type=\"number\" step=\"1\" min=\"0\" max=\"160\" value=\"" + getTop5MinScore() + "\" style=\"width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;\">" +
+          "<div style=\"" + labelTitle + "\">Min score for Top 5 (0–160)</div>" +
+          "<input id=\"tsa-setting-top5-min\" type=\"number\" step=\"1\" min=\"0\" max=\"160\" value=\"" + getTop5MinScore() + "\" style=\"" + inputStyle + "\">" +
         "</div>" +
-        "<label style=\"display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px\">" +
+        "<label style=\"" + checkLabel + "\">" +
           "<input type=\"checkbox\" id=\"tsa-setting-req-investors\"" + (getRequirePositiveInvestors() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer;accent-color:#4a6fa5\">" +
           "<span style=\"font-size:12px;color:" + text + "\">Require positive investor-delta in Top 5 Buy</span>" +
         "</label>" +
-        "</div>" +
-
-        "<div style=\"border-top:1px solid " + border + ";margin-bottom:12px;padding-top:12px\">" +
-        "<div style=\"font-size:10px;letter-spacing:0.1em;color:" + muted + ";text-transform:uppercase;font-weight:bold;margin-bottom:10px\">Trading profit</div>" +
-        "<label style=\"display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px\">" +
-          "<input type=\"checkbox\" id=\"tsa-setting-swing-only\"" + (getProfitSwingOnly() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
-          "<span style=\"font-size:12px;color:" + text + "\">Swing trade profit only</span>" +
-        "</label>" +
-        "<label style=\"display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px\">" +
-          "<input type=\"checkbox\" id=\"tsa-setting-show-realized\"" + (getShowRealized() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
-          "<span style=\"font-size:12px;color:" + text + "\">Show realized profit</span>" +
-        "</label>" +
-        "<div id=\"tsa-realized-options\" style=\"display:" + (getShowRealized() ? "block" : "none") + ";padding-left:23px\">" +
-          "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:4px\">Period (days, 1–90)</div>" +
-          "<input id=\"tsa-setting-realized-days\" type=\"number\" step=\"1\" min=\"1\" max=\"90\" value=\"" + getRealizedDays() + "\" style=\"width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;margin-bottom:8px\">" +
-          "<button id=\"tsa-realized-reset\" style=\"width:100%;padding:7px;border-radius:7px;border:1px solid " + border + ";background:none;color:" + muted + ";font-size:12px;cursor:pointer\">Reset realized profit</button>" +
-        "</div>" +
-        "</div>" +
-
         "<div style=\"margin-bottom:12px\">" +
-          "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:4px\">Overlay position</div>" +
-          "<select id=\"tsa-setting-position\" style=\"width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;\">" +
+          "<div style=\"" + labelTitle + "\">Overlay position</div>" +
+          "<select id=\"tsa-setting-position\" style=\"" + inputStyle + "\">" +
             "<option value=\"bottom-right\"" + (getOverlayPosition() === "bottom-right" ? " selected" : "") + ">Bottom right</option>" +
             "<option value=\"bottom-left\""  + (getOverlayPosition() === "bottom-left"  ? " selected" : "") + ">Bottom left</option>" +
             "<option value=\"top-right\""    + (getOverlayPosition() === "top-right"    ? " selected" : "") + ">Top right</option>" +
             "<option value=\"top-left\""     + (getOverlayPosition() === "top-left"     ? " selected" : "") + ">Top left</option>" +
           "</select>" +
+        "</div>" +
+        "</div>" +
+
+        // ── Realized profits ─────────────────────
+        "<div style=\"" + section + "\">" +
+        "<div style=\"" + sectionH + "\">Realized profits</div>" +
+        "<label style=\"" + checkLabel + "\">" +
+          "<input type=\"checkbox\" id=\"tsa-setting-swing-only\"" + (getProfitSwingOnly() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
+          "<span style=\"font-size:12px;color:" + text + "\">Swing trade profit only</span>" +
+        "</label>" +
+        "<label style=\"" + checkLabel + "\">" +
+          "<input type=\"checkbox\" id=\"tsa-setting-show-realized\"" + (getShowRealized() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
+          "<span style=\"font-size:12px;color:" + text + "\">Show realized profit</span>" +
+        "</label>" +
+        "<div id=\"tsa-realized-options\" style=\"display:" + (getShowRealized() ? "block" : "none") + ";padding-left:23px\">" +
+          "<div style=\"" + labelTitle + "\">Period (days, 1–90)</div>" +
+          "<input id=\"tsa-setting-realized-days\" type=\"number\" step=\"1\" min=\"1\" max=\"90\" value=\"" + getRealizedDays() + "\" style=\"" + inputStyle + ";margin-bottom:8px\">" +
+          "<button id=\"tsa-realized-reset\" style=\"width:100%;padding:7px;border-radius:7px;border:1px solid " + border + ";background:none;color:" + muted + ";font-size:12px;cursor:pointer\">Reset realized profit</button>" +
+        "</div>" +
+        "</div>" +
+
+        // ── Account ─────────────────────
+        "<div style=\"" + section + "\">" +
+        "<div style=\"" + sectionH + "\">Account</div>" +
+        "<div style=\"margin-bottom:12px\">" +
+          "<div style=\"" + labelTitle + "\">Torn API key</div>" +
+          "<input id=\"tsa-setting-apikey\" type=\"password\" autocomplete=\"off\" value=\"" + (TORN_API_KEY || "") + "\" style=\"" + inputStyle + "\">" +
+          "<div style=\"" + hint + "\">Stored in your browser only — never sent anywhere except <code>api.torn.com</code>. Get a key at torn.com/preferences.php#tab=api.</div>" +
+        "</div>" +
         "</div>" +
 
         "<div style=\"display:flex;gap:8px\">" +
@@ -4474,6 +4487,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var reqInv = document.getElementById("tsa-setting-req-investors").checked;
         var rd = parseInt((document.getElementById("tsa-setting-realized-days") || {}).value || "7", 10);
         var posVal = document.getElementById("tsa-setting-position").value;
+        var themeVal = document.getElementById("tsa-setting-theme").value;
+        var keyVal = (document.getElementById("tsa-setting-apikey").value || "").trim();
         if (isNaN(profit) || profit <= 0) { showToast("Invalid profit target", "warn"); return; }
         if (isNaN(stop) || stop <= 0) { showToast("Invalid stop loss", "warn"); return; }
         if (isNaN(ar) || ar < 0) { showToast("Invalid auto-refresh interval", "warn"); return; }
@@ -4493,6 +4508,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         if (showRealized && !isNaN(rd)) lsSet("tsa_realized_days", rd.toString());
         lsSet("tsa_overlay_position", posVal);
         applyOverlayPosition(posVal);
+        // Theme: only re-apply if it actually changed.
+        var wasDark = lsGet("tsa_dark", "false") === "true";
+        var nowDark = themeVal === "dark";
+        if (wasDark !== nowDark) applyThemeChange(nowDark);
+        // API key: only persist if changed and non-empty.
+        if (keyVal && keyVal !== TORN_API_KEY) {
+          TORN_API_KEY = keyVal;
+          lsSet("tsa-torn-apikey", keyVal);
+        }
         var saveBtn = document.getElementById("tsa-settings-save");
         if (saveBtn) {
           saveBtn.textContent = "Saved ✓";
