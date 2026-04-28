@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.9
+// @version      2.15.10
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -559,11 +559,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (!o.has_dividend || o.benefit_shares <= 0) return;
       var increments = o.dividend_increment || 0;
       if (increments <= 0) return;
-      // Find matching ROI table entries
+      // Sum every tier ≤ user's current increment. Torn benefit blocks stack:
+      // owning T2 means you also receive the T1 reward each cycle, so weekly
+      // income is the sum of every tier you've reached, not just the highest.
       ROI_TABLE.forEach(function(entry) {
         if (entry.sym !== sym) return;
         var tierNum = parseInt(entry.tier.replace("T",""), 10);
-        if (tierNum !== increments) return;
+        if (tierNum > increments) return;
         // Payout per 7 days
         var payoutPerDay = entry.payout / entry.freq;
         var itemVal = getItemValue(entry);
@@ -1791,7 +1793,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
       var top5Buy = top5BuyAll.slice(0, 5);
 
-      // WATCH: all owned stocks with score 50-79 not already in top5Buy
+      // WATCH: all owned stocks with score 45-74 not already in top5Buy
       var watchList = stockResults.filter(function(s) {
         if (!s.owned) return false;
         if (s.score < 45 || s.score >= 75) return false;
