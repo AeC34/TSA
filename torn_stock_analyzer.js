@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.8
+// @version      2.15.9
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1025,10 +1025,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           qtBuildMaps();
           var price  = qtGetPrice(sym);
           var cash   = qtGetMoneyFast();
+          // Tier buys must hit the exact share count to unlock the benefit
+          // block — refuse rather than partial-buy wasted shares.
           if (price > 0 && cash > 0 && shares * price > cash) {
-            shares = Math.floor(cash / price);
+            showToast("Need $" + (shares * price - cash).toLocaleString("en-US") + " more for " + sym + " " + tier, "warn");
+            return;
           }
-          if (shares <= 0) { showToast("Not enough cash to buy any " + sym, "warn"); return; }
           qtUiTrade(sym, shares, "buyShares", "Bought " + shares.toLocaleString("en-US") + " " + sym + " (" + tier + ")");
           showROIPlanner(ownedMap, raw);
         });
@@ -2847,14 +2849,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     document.getElementById("qt-rec-btn").addEventListener("click", function() {
       var liveCash = qtGetMoneyFast();
-      var buyShares = recShares;
+      // Tier rec buys must hit the exact share count to unlock the benefit
+      // block — refuse rather than partial-buy wasted shares.
       if (liveCash > 0 && recCost > liveCash) {
-        qtBuildMaps();
-        var livePrice = qtGetPrice(recSym);
-        if (livePrice > 0) buyShares = Math.floor(liveCash / livePrice);
+        showToast("Need $" + (recCost - liveCash).toLocaleString("en-US") + " more for " + recSym + " " + recTier, "warn");
+        return;
       }
-      if (buyShares <= 0) { showToast("Not enough cash to buy any " + recSym, "warn"); return; }
-      qtUiTrade(recSym, buyShares, "buyShares", "Bought " + buyShares.toLocaleString("en-US") + " " + recSym + " (" + recTier + ")");
+      qtUiTrade(recSym, recShares, "buyShares", "Bought " + recShares.toLocaleString("en-US") + " " + recSym + " (" + recTier + ")");
       updateQtRecommendation(null);
     });
   }
