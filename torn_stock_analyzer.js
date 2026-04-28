@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.12
+// @version      2.15.13
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -327,6 +327,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     try { return JSON.parse(lsGet("tsa_item_ids_by_name", "{}")) || {}; }
     catch(e) { return {}; }
   })();
+  // itemMarketValues: name → Torn's official baseline market_value, from the
+  // same items fetch. Used to give synthesised DYNAMIC_BENEFIT_STOCKS entries
+  // a real `payout` so income math has a sensible baseline.
+  var itemMarketValues = (function() {
+    try { return JSON.parse(lsGet("tsa_item_market_values", "{}")) || {}; }
+    catch(e) { return {}; }
+  })();
 
   function fmRoi(n) {
     if (n >= 1e9) return "$" + (n/1e9).toFixed(2) + "B";
@@ -393,9 +400,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           if (d.items) {
             Object.keys(d.items).forEach(function(id) {
               var item = d.items[id];
-              if (item && item.name) itemIdsByName[item.name] = parseInt(id, 10);
+              if (item && item.name) {
+                itemIdsByName[item.name] = parseInt(id, 10);
+                if (typeof item.market_value === "number") {
+                  itemMarketValues[item.name] = item.market_value;
+                }
+              }
             });
             lsSet("tsa_item_ids_by_name", JSON.stringify(itemIdsByName));
+            lsSet("tsa_item_market_values", JSON.stringify(itemMarketValues));
           }
         } catch(e) {}
         cb();
@@ -413,10 +426,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var itemId = itemIdsByName[def.itemName];
       if (!itemId) return;
       if (ROI_TABLE.some(function(e) { return e.sym === sym; })) return;
+      // Use Torn's official market_value as the per-cycle baseline payout —
+      // matches what the rest of ROI_TABLE does for item-paying stocks.
+      var baseline = itemMarketValues[def.itemName] || 0;
       for (var t = 1; t <= 6; t++) {
         ROI_TABLE.push({
           sym: sym, tier: "T" + t,
-          cost: 0, payout: 0, freq: def.freq, type: def.type, item: itemId
+          cost: 0, payout: baseline, freq: def.freq, type: def.type, item: itemId
         });
       }
       if (ITEM_IDS.indexOf(itemId) < 0) ITEM_IDS.push(itemId);
@@ -657,23 +673,23 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // Sum every tier ≤ user's current increment. Torn benefit blocks stack:
       // owning T2 means you also receive the T1 reward each cycle, so weekly
       // income is the sum of every tier you've reached, not just the highest.
+      // For item-paying stocks: prefer the live market price; fall back to the
+      // baked-in baseline if the API hasn't returned a price yet. For cash
+      // stocks (entry.item is 0) entry.payout is the income.
       ROI_TABLE.forEach(function(entry) {
         if (entry.sym !== sym) return;
         var tierNum = parseInt(entry.tier.replace("T",""), 10);
         if (tierNum > increments) return;
-        // Payout per 7 days
-        var payoutPerDay = entry.payout / entry.freq;
         var itemVal = getItemValue(entry);
-        var itemPerDay = itemVal / entry.freq;
-        weeklyTotal += (payoutPerDay + itemPerDay) * 7;
+        var perCycle = (entry.item && itemVal > 0) ? itemVal : entry.payout;
+        weeklyTotal += (perCycle / entry.freq) * 7;
       });
     });
     // Add extra entry (bridgebuilder)
     if (extraEntry) {
-      var itemVal = getItemValue(extraEntry);
-      var payoutPerDay = extraEntry.payout / extraEntry.freq;
-      var itemPerDay = itemVal / extraEntry.freq;
-      weeklyTotal += (payoutPerDay + itemPerDay) * 7;
+      var exItemVal = getItemValue(extraEntry);
+      var exPerCycle = (extraEntry.item && exItemVal > 0) ? exItemVal : extraEntry.payout;
+      weeklyTotal += (exPerCycle / extraEntry.freq) * 7;
     }
     return weeklyTotal;
   }
@@ -771,13 +787,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         if (roiSkipped.indexOf(key) >= 0) return false;
         if (e.sym === target.sym && e.tierInfo.nextIncrement === target.tierInfo.nextIncrement) return false;
         if (!e.payoutEntry) return false;
-        var itemVal = getItemValue(e.payoutEntry);
-        return ((e.payoutEntry.payout + itemVal) / e.payoutEntry.freq * 7) > 0;
+        var fItemVal = getItemValue(e.payoutEntry);
+        var fPerCycle = (e.payoutEntry.item && fItemVal > 0) ? fItemVal : e.payoutEntry.payout;
+        return (fPerCycle / e.payoutEntry.freq * 7) > 0;
       });
 
       allBridgeCandidates.forEach(function(e) {
-        var itemVal     = getItemValue(e.payoutEntry);
-        var extraIncome = (e.payoutEntry.payout + itemVal) / e.payoutEntry.freq * 7;
+        var bItemVal = getItemValue(e.payoutEntry);
+        var bPerCycle = (e.payoutEntry.item && bItemVal > 0) ? bItemVal : e.payoutEntry.payout;
+        var extraIncome = bPerCycle / e.payoutEntry.freq * 7;
 
         if (e.cost <= chainCap) {
           // Affordable now — buy it, reduce capital, increase income stream
@@ -797,8 +815,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var laterCandidates = [];
       allBridgeCandidates.forEach(function(e) {
         if (bridgeChain.some(function(b) { return b.sym === e.sym && b.tier === ("T" + e.tierInfo.nextIncrement); })) return; // already handled as "now"
-        var itemVal     = getItemValue(e.payoutEntry);
-        var extraIncome = (e.payoutEntry.payout + itemVal) / e.payoutEntry.freq * 7;
+        var lItemVal = getItemValue(e.payoutEntry);
+        var lPerCycle = (e.payoutEntry.item && lItemVal > 0) ? lItemVal : e.payoutEntry.payout;
+        var extraIncome = lPerCycle / e.payoutEntry.freq * 7;
         var daysUntil   = daysToAfford(e.cost, chainCap, chainIncome);
         if (daysUntil === Infinity || daysUntil > 365) return;
         // Simulate buying this bridge after daysUntil: does it save days to target?
@@ -825,8 +844,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var targetRoi = target.roi || 0;
       var sellCandidates = [];
       ownedEntries.forEach(function(e) {
-        var itemVal = getItemValue(e);
-        var weekly = e.payout ? (e.payout + itemVal) / (e.freq || 7) * 7 : 0;
+        var sItemVal = getItemValue(e);
+        var sPerCycle = (e.item && sItemVal > 0) ? sItemVal : e.payout;
+        var weekly = sPerCycle ? sPerCycle / (e.freq || 7) * 7 : 0;
         var liveEntry = raw ? raw.find(function(x) { return x.stock === e.sym; }) : null;
         var livePrice = liveEntry ? (parseFloat(liveEntry.price) || 0) : 0;
         var o = ownedMap[e.sym];
@@ -973,8 +993,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           if (entry.sym !== sym) return;
           var tierNum = parseInt(entry.tier.replace("T",""), 10);
           if (tierNum > increments) return;
-          var itemVal = getItemValue(entry);
-          stockWeekly += (entry.payout + itemVal) / entry.freq * 7;
+          var bItemVal = getItemValue(entry);
+          var bPerCycle = (entry.item && bItemVal > 0) ? bItemVal : entry.payout;
+          stockWeekly += bPerCycle / entry.freq * 7;
           if (entry.item) itemName = getItemName(entry.item) || itemName;
         });
         if (stockWeekly > 0) {
@@ -1074,7 +1095,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         '<span style="' + s + ';font-size:9px;color:' + c.muted + '">' + row.tier + '</span>' +
         '<div style="display:flex;flex-direction:column;gap:1px;overflow:hidden;min-width:0">' +
           '<span style="' + s + ';font-size:10px;color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + costLine + (nextPayoutStr ? '<span style="color:' + nextPayoutColor + '">' + nextPayoutStr + '</span>' : '') + '</span>' +
-          '<span style="font-size:9px;color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + fmRoi(row.payout) + (itemVal > 0 ? " + " + fmRoi(itemVal) : "") + " / " + row.freq + "d</span>" +
+          '<span style="font-size:9px;color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + fmRoi(row.payout) + " / " + row.freq + "d" + (itemVal > 0 ? " · live " + fmRoi(itemVal) : "") + "</span>" +
         '</div>' +
         '<span style="' + s + ';font-size:11px;font-weight:700;text-align:right;color:' + symColor + '">' + roiPct + '</span>' +
         '<button class="tsa-roi-skip" data-key="' + key + '" data-owned="' + (row.isOwned?1:0) + '" style="' + skipBtnStyle + '">' + skipLabel + '</button>' +
