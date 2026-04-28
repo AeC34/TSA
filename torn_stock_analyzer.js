@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.10
+// @version      2.15.11
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -308,6 +308,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
   var roiSkipped = (function() { try { return JSON.parse(localStorage.getItem("tsa_roi_skipped") || "[]") || []; } catch(e) { return []; } })();
   var itemPrices = {}; // cache: itemId -> price
+  // itemNames are stable, persist them — saves an API call per id every reload.
+  var itemNames = (function() {
+    try { return JSON.parse(lsGet("tsa_item_names", "{}")) || {}; }
+    catch(e) { return {}; }
+  })();
 
   function fmRoi(n) {
     if (n >= 1e9) return "$" + (n/1e9).toFixed(2) + "B";
@@ -337,16 +342,35 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     });
   }
 
+  function fetchItemName(itemId, cb) {
+    if (itemNames[itemId]) { cb(itemNames[itemId]); return; }
+    var url = "https://api.torn.com/torn/" + itemId + "?selections=items&key=" + getTornKey();
+    GM_xmlhttpRequest({
+      method: "GET", url: url,
+      onload: function(r) {
+        try {
+          var d = JSON.parse(r.responseText);
+          var entry = d.items && d.items[itemId];
+          if (entry && entry.name) {
+            itemNames[itemId] = entry.name;
+            lsSet("tsa_item_names", JSON.stringify(itemNames));
+            cb(entry.name);
+          } else { cb(""); }
+        } catch(e) { cb(""); }
+      },
+      onerror: function() { cb(""); }
+    });
+  }
+
   function fetchAllItemPrices(cb) {
-    var remaining = ITEM_IDS.length;
+    // Two requests per id: live market price + (one-off, cached) item name.
+    var remaining = ITEM_IDS.length * 2;
     var done = false;
     function finish() { if (!done) { done = true; cb(); } }
     setTimeout(finish, 10000); // failsafe: call cb after 10s even if a request never returns
     ITEM_IDS.forEach(function(id) {
-      fetchItemPrice(id, function() {
-        remaining--;
-        if (remaining === 0) finish();
-      });
+      fetchItemPrice(id, function() { remaining--; if (remaining === 0) finish(); });
+      fetchItemName(id,  function() { remaining--; if (remaining === 0) finish(); });
     });
   }
 
@@ -354,6 +378,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (entry.sym === "PTS") return PTS_VALUE;
     if (entry.item && itemPrices[entry.item]) return itemPrices[entry.item];
     return 0;
+  }
+
+  function getItemName(itemId) {
+    return (itemId && itemNames[itemId]) ? itemNames[itemId] : "";
   }
 
   // Calculate Bollinger Bands using all stored price history
@@ -872,14 +900,19 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         if (!o.has_dividend || o.benefit_shares <= 0) return;
         var increments = o.dividend_increment || 0;
         if (increments <= 0) return;
+        var stockWeekly = 0;
+        var itemName = "";
         ROI_TABLE.forEach(function(entry) {
           if (entry.sym !== sym) return;
           var tierNum = parseInt(entry.tier.replace("T",""), 10);
-          if (tierNum !== increments) return;
+          if (tierNum > increments) return;
           var itemVal = getItemValue(entry);
-          var weekly = (entry.payout + itemVal) / entry.freq * 7;
-          incomeBreakdown.push(sym + " " + fmRoi(weekly));
+          stockWeekly += (entry.payout + itemVal) / entry.freq * 7;
+          if (entry.item) itemName = getItemName(entry.item) || itemName;
         });
+        if (stockWeekly > 0) {
+          incomeBreakdown.push(sym + (itemName ? " (" + itemName + ")" : "") + " " + fmRoi(stockWeekly));
+        }
       });
       if (incomeBreakdown.length > 0) {
         html += nmRow("Breakdown", incomeBreakdown.slice(0,3).join(" · "));
