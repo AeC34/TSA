@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.13
+// @version      2.15.14
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1538,7 +1538,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }
 
     // ── HARD FILTERS ─────────────────────────────────────────────────
-    var recentPrices = [p_h1,p_h2,p_h4,p_h8,p_h12,p_d1].filter(function(x){ return x > 0; });
+    // Include m30: Torn prices can swing and bounce within a single hour — without
+    // m30 the "already rallied" filter would miss intra-hour dip-and-recover moves.
+    var recentPrices = [p_m30,p_h1,p_h2,p_h4,p_h8,p_h12,p_d1].filter(function(x){ return x > 0; });
     var recentLow = recentPrices.length > 0 ? Math.min.apply(null, recentPrices) : 0;
     // Already rallied if price has recovered more than half of the weekly drop
     var rallyPct = recentLow > 0 && p_live > recentLow ? ((p_live - recentLow) / recentLow * 100) : 0;
@@ -1562,7 +1564,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var hasReversal       = scoreBreakdown.reversal >= 25;
     var hasStrongReversal = scoreBreakdown.reversal >= 30;
     var signal;
-    if (score >= 100 && scoreBreakdown.macd === 25 && hasStrongReversal) signal = "STRONG BUY";
+    if (score >= 100 && scoreBreakdown.macd >= 25 && hasStrongReversal) signal = "STRONG BUY";
     else if (score >= 75 && (hasStrongReversal || (hasReversal && !sustainedDowntrend))) signal = "BUY";
     else if (score >= 45) signal = "CONSIDER";
     else                  signal = "WAIT";
