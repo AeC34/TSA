@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.17
+// @version      2.15.18
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2730,9 +2730,44 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         loadData();
       });
 
+      // Click-twice-to-confirm safety on swing-tx rows. Selling a specific
+      // historical buy lot is destructive, and on Torn configs that fire
+      // trades in one step (no Confirm Transaction prompt) the lot would
+      // sell on the very first click without any chance to back out. First
+      // click arms the row (visual highlight + warn toast); second click
+      // within 8 s actually fires the sell. Clicking a different armed row
+      // disarms the previous one.
+      var armedSwingRow = null;
+      var armedSwingTimer = null;
+      function disarmSwingRow() {
+        if (!armedSwingRow) return;
+        armedSwingRow.dataset.state = "0";
+        armedSwingRow.style.background = "";
+        armedSwingRow.style.boxShadow = "";
+        armedSwingRow = null;
+        if (armedSwingTimer) { clearTimeout(armedSwingTimer); armedSwingTimer = null; }
+      }
       content.querySelectorAll(".tsa-swing-tx-row").forEach(function(row) {
         row.addEventListener("click", async function(e) {
           e.stopPropagation();
+
+          // First click: arm the row, ask for confirmation, return.
+          if (armedSwingRow !== row) {
+            disarmSwingRow();
+            armedSwingRow = row;
+            row.dataset.state = "1";
+            row.style.background = "rgba(255,76,106,0.18)";
+            row.style.boxShadow = "inset 0 0 0 1px rgba(255,76,106,0.6)";
+            var armSym    = row.dataset.sym;
+            var armShares = parseInt(row.dataset.shares, 10);
+            var armLabel  = row.dataset.label;
+            showToast("Tap again to sell " + armShares.toLocaleString("en-US") + " " + armSym + " (" + armLabel + ")", "warn");
+            armedSwingTimer = setTimeout(function() { disarmSwingRow(); }, 8000);
+            return;
+          }
+
+          // Second click on the same row: disarm, then actually sell.
+          disarmSwingRow();
           var sym    = row.dataset.sym;
           var shares = parseInt(row.dataset.shares, 10);
           var label  = row.dataset.label;
@@ -3298,10 +3333,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     if (resolution === "fired") {
       // Trade completed in one tap — sync local cache, success toast, no
-      // pending second tap needed.
+      // pending second tap needed. Return the "fired" sentinel so qtUiTrade
+      // can tell its caller the trade actually happened (vs a real failure).
       qtUpdateLocalCache(symb, action === "buyShares" ? shareCount : -shareCount);
       showToast(label, "success");
-      return false;
+      return "fired";
     }
     if (!resolution) {
       showToast("Confirm Transaction did not appear (amount invalid?)", "error");
@@ -3502,7 +3538,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label };
     var prepared = await qtUiPrepare(qtPendingTrade);
-    if (prepared) {
+    if (prepared === "fired") {
+      // One-step Torn config: trade already completed inside qtUiPrepare.
+      // Tell the caller so it can clean up (e.g. remove a swing-tx row).
+      qtPendingTrade = null;
+      return true;
+    }
+    if (prepared === true) {
       showToast("Tap again to fire: " + label, "warn");
     } else {
       qtPendingTrade = null;
