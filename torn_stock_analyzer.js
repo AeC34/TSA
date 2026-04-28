@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.14
+// @version      2.15.15
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1548,6 +1548,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var alreadyRallied = rallyPct > rallyThreshold;
     // RSI overbought: use top-85th percentile when available, else absolute >65
     var rsiOverbought = rsiPercentile !== null ? rsiPercentile >= 85 : (rsi !== null && rsi > 65);
+    var priceAboveWeek = p_w1 > 0 && p_live > p_w1;
 
     if (sustainedDowntrend) reasons.unshift("Downtrend (" + downtrendCount + "/3)");
 
@@ -1568,6 +1569,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     else if (score >= 75 && (hasStrongReversal || (hasReversal && !sustainedDowntrend))) signal = "BUY";
     else if (score >= 45) signal = "CONSIDER";
     else                  signal = "WAIT";
+
+    // Hard-filter cap: if the entry is already rallied / above weekly average /
+    // RSI overbought, the technical setup may exist but the entry window is poor.
+    // Downgrade STRONG BUY and BUY → CONSIDER so the label reflects the caution
+    // (rather than excluding the stock from the Top 5 list entirely).
+    if (alreadyRallied || priceAboveWeek || rsiOverbought) {
+      if (signal === "STRONG BUY" || signal === "BUY") signal = "CONSIDER";
+    }
 
     // SELL LOGIC
     var sellSignal = null, netProfitPct = null, hoursHeld = null;
@@ -1897,11 +1906,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       stockResults.forEach(function(s) {
         s.invDelta = getInvestorDelta(s.symbol, cachedInvHistory);
       });
+      // Hard filters (rallied / above-week / overbought) no longer exclude here —
+      // they're now reflected in the signal label (capped at CONSIDER) so the
+      // user still sees the stock with a clear "don't buy now" indicator.
       var top5BuyAll = stockResults.filter(function(s) {
         if (s.score < top5MinScore) return false;
-        if (s.alreadyRallied) return false;
-        if (s.priceAboveWeek) return false;
-        if (s.rsiOverbought) return false;
         if (getRequirePositiveInvestors() && (s.invDelta === null || s.invDelta <= 0)) return false;
         if (!s.owned) return true;
         // Owned stocks only show in top 5 if BUY or above (score >= 75)
@@ -1916,13 +1925,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
       var top5Buy = top5BuyAll.slice(0, 5);
 
-      // WATCH: all owned stocks with score 45-74 not already in top5Buy
+      // WATCH: all owned stocks with score 45-74 not already in top5Buy.
+      // Hard filters are now expressed via the signal label, not exclusion.
       var watchList = stockResults.filter(function(s) {
         if (!s.owned) return false;
         if (s.score < 45 || s.score >= 75) return false;
-        if (s.alreadyRallied) return false;
-        if (s.priceAboveWeek) return false;
-        if (s.rsiOverbought) return false;
         return !top5Buy.some(function(b) { return b.symbol === s.symbol; });
       });
 
