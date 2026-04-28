@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.5
+// @version      2.15.6
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2986,7 +2986,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var el = find();
         if (el) { obs.disconnect(); resolve(el); }
       });
-      obs.observe(parent, { childList: true, subtree: true });
+      // characterData: catches text-only updates (e.g. Torn rewriting the same
+      // button from "sell" → "Confirm Transaction" without replacing the node).
+      obs.observe(parent, { childList: true, subtree: true, characterData: true });
       setTimeout(function() { obs.disconnect(); resolve(null); }, timeoutMs);
     });
   }
@@ -3478,7 +3480,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (!sym) { showToast("Select a stock first.", "warn"); return; }
     var price = qtGetPrice(sym);
     if (price <= 0) { showToast("Could not read price for " + sym, "error"); return; }
-    var amt = Math.floor(dollarAmt / price);
+    var money = qtGetMoneyFast();
+    var spend = (money > 0 && dollarAmt > money) ? money : dollarAmt;
+    var amt = Math.floor(spend / price);
     if (amt <= 0) { showToast("Amount too small.", "warn"); return; }
     qtUiTrade(sym, amt, "buyShares", "Bought " + amt.toLocaleString() + " " + sym);
   }
@@ -3488,7 +3492,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (!sym) { showToast("Select a stock first.", "warn"); return; }
     var price = qtGetPrice(sym);
     if (price <= 0) { showToast("Could not read price for " + sym, "error"); return; }
+    var owned = qtGetOwnedShares(sym);
+    if (owned <= 0) { showToast("You have no shares of " + sym, "warn"); return; }
     var shares = Math.ceil((dollarAmt / 0.999) / price);
+    if (shares > owned) shares = owned;
     shares = qtApplyBenefitLock(sym, shares);
     if (shares === null) return;
     qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString() + " " + sym);
