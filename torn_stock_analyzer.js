@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.20
+// @version      2.15.21
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2730,17 +2730,32 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         loadData();
       });
 
-      // Visual feedback so the user can see WHICH Block is queued for tap 2.
-      // The corner toast alone is easy to miss; a per-row highlight makes
-      // the prepared state obvious.
+      // Per-row "armed" feedback: when the user taps a Block row to sell, we
+      // show a red highlight + "TAP AGAIN TO SELL" badge on the row IMMEDIATELY,
+      // before any async trade prep — that way the user sees confirmation
+      // they're on tap 1 even if the corner toast is hidden behind the panel
+      // or otherwise missed. Cleared after the async outcome:
+      //   - tap 2 fires the trade  → row removed (success path),
+      //   - prepare fails outright → highlight cleared (no fake armed state).
       var armedSwingRow = null;
       function clearSwingRowHighlight() {
         if (!armedSwingRow) return;
         armedSwingRow.style.background = "";
         armedSwingRow.style.boxShadow = "";
-        var armBadge = armedSwingRow.querySelector(".tsa-swing-armed-badge");
-        if (armBadge && armBadge.parentNode) armBadge.parentNode.removeChild(armBadge);
+        var oldBadge = armedSwingRow.querySelector(".tsa-swing-armed-badge");
+        if (oldBadge && oldBadge.parentNode) oldBadge.parentNode.removeChild(oldBadge);
         armedSwingRow = null;
+      }
+      function armSwingRow(row) {
+        clearSwingRowHighlight();
+        row.style.background = "rgba(255,76,106,0.20)";
+        row.style.boxShadow = "inset 0 0 0 2px #ff4c6a";
+        var armBadge = document.createElement("span");
+        armBadge.className = "tsa-swing-armed-badge";
+        armBadge.textContent = "↻ TAP AGAIN TO SELL";
+        armBadge.style.cssText = "margin-left:8px;font-size:10px;font-weight:800;color:#ff4c6a;text-transform:uppercase;letter-spacing:0.06em";
+        row.appendChild(armBadge);
+        armedSwingRow = row;
       }
       content.querySelectorAll(".tsa-swing-tx-row").forEach(function(row) {
         row.addEventListener("click", async function(e) {
@@ -2754,33 +2769,27 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           if (shares > owned) shares = owned;
           shares = qtApplyBenefitLock(sym, shares);
           if (shares === null) return;
+
+          // Show armed visual immediately — independent of the async qtUiTrade
+          // outcome. We'll clean it up after based on what happened.
+          var wasArmedBefore = (armedSwingRow === row);
+          armSwingRow(row);
+
           var fired = await qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")");
+
           if (fired) {
-            // Trade fired (tap 2 success or one-step config) — drop the row.
+            // Tap 2 success (or one-step Torn) — trade is done, drop the row.
             clearSwingRowHighlight();
             var parent = row.parentNode;
             if (parent) parent.removeChild(row);
             return;
           }
-          // Tap 1 succeeded if qtPendingTrade matches what we just queued.
-          // Highlight this row so the user can see which Block is armed for
-          // the second tap.
+          // Tap 1: keep the armed visual ONLY if qtUiTrade actually queued the
+          // trade (qtPendingTrade still set). If prepare failed and pending was
+          // cleared, drop the armed visual so we don't lie about the state.
           var key = sym + "|sellShares";
-          if (qtPendingTrade && qtPendingTrade.key === key && qtPendingTrade.shareCount === shares) {
-            clearSwingRowHighlight();
-            row.style.background = "rgba(255,76,106,0.18)";
-            row.style.boxShadow = "inset 0 0 0 1px rgba(255,76,106,0.6)";
-            var armBadge = document.createElement("span");
-            armBadge.className = "tsa-swing-armed-badge";
-            armBadge.textContent = "↻ tap to confirm";
-            armBadge.style.cssText = "margin-left:8px;font-size:9px;font-weight:700;color:#ff4c6a;text-transform:uppercase;letter-spacing:0.05em";
-            row.appendChild(armBadge);
-            armedSwingRow = row;
-          } else {
-            // Prepare failed (qtPendingTrade was cleared) — drop any old armed
-            // visual so the UI doesn't lie.
-            clearSwingRowHighlight();
-          }
+          var stillPending = qtPendingTrade && qtPendingTrade.key === key && qtPendingTrade.shareCount === shares;
+          if (!stillPending && !wasArmedBefore) clearSwingRowHighlight();
         });
       });
 
