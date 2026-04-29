@@ -158,7 +158,20 @@ Example dump:
 
 ---
 
+## Back button (verified — TornPDA, 2026-04-29)
+
+After a successful trade Torn shows a "transaction complete" view with a back button that returns the form to the input state. Without dismissing it, the next trade-prep can't open a fresh form.
+
+Identifiable by:
+
+- **Text content:** `Back` (exact match, case-insensitive).
+- **Class:** `torn-btn gray` — note the **absence** of a per-build `___xxxx` hash suffix that the `buy___`/`sell___` trigger buttons carry. The two-class form is the differentiator.
+- **Scope:** lives inside `#stockmarketroot` but **outside** `[class*="manageBlock___"]` — a scoped `manageBlock___ button` query won't find it.
+
+To dismiss programmatically, click via React fiber `onClick` (matches the rest of the trade flow's pattern), with native `.click()` as a fallback.
+
+---
+
 ## Open items (not yet verified)
 
 - **Error / disabled states** — what does the button look like when input is invalid (e.g. > owned shares for sell, > available cash for buy)? Not yet observed; the helper will surface a toast on timeout.
-- **TornPDA mobile DOM** — assumed identical; verify before declaring TornPDA support.

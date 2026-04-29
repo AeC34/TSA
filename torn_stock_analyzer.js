@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.23
+// @version      2.15.24
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3236,6 +3236,44 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     });
   }
 
+  // After a successful trade, Torn shows a "transaction complete" view with a
+  // back button (text "Back", class "torn-btn gray" with no per-build hash —
+  // see TORN_STOCKS_DOM.md). Auto-click it so the next swing-tx Block sell
+  // can prepare a fresh form without manual intervention.
+  async function qtClickPostTradeBack() {
+    var root = document.getElementById('stockmarketroot') || document.body;
+    var backBtn = await new Promise(function(resolve) {
+      var done = false;
+      var t;
+      var obs;
+      var find = function() {
+        var btns = root.querySelectorAll('button');
+        for (var i = 0; i < btns.length; i++) {
+          if (/^back$/i.test((btns[i].textContent || "").trim())) return btns[i];
+        }
+        return null;
+      };
+      var initial = find();
+      if (initial) return resolve(initial);
+      t = setTimeout(function() { if (!done) { done = true; obs.disconnect(); resolve(null); } }, 2000);
+      obs = new MutationObserver(function() {
+        if (done) return;
+        var b = find();
+        if (b) { done = true; clearTimeout(t); obs.disconnect(); resolve(b); }
+      });
+      obs.observe(root, { childList: true, subtree: true, characterData: true });
+    });
+    if (!backBtn) return false;
+    var fiberClick = qtFindFiberProp(backBtn, "onClick");
+    try {
+      if (fiberClick) fiberClick();
+      else backBtn.click();
+      return true;
+    } catch(e) {
+      try { backBtn.click(); return true; } catch(e2) { return false; }
+    }
+  }
+
   // Step 1: scroll, open Owned tab, set value via fiber.onChange, click submit
   // via fiber.onClick to advance to the "Confirm Transaction" step.
   async function qtUiPrepare(pending) {
@@ -3350,6 +3388,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // can tell its caller the trade actually happened (vs a real failure).
       qtUpdateLocalCache(symb, action === "buyShares" ? shareCount : -shareCount);
       showToast(label, "success");
+      qtClickPostTradeBack(); // fire-and-forget; reset form for the next sell
       return "fired";
     }
     if (!resolution) {
@@ -3515,6 +3554,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     qtUpdateLocalCache(symb, action === "buyShares" ? shareCount : -shareCount);
     showToast(label, "success");
+    qtClickPostTradeBack(); // fire-and-forget; reset form for the next sell
 
     var execBtn = document.getElementById("qt-exec");
     if (execBtn) {
