@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.24
+// @version      2.15.25
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3119,18 +3119,21 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return textMoney ? qtParseTornNumber(textMoney) : 0;
   }
 
-  // Exact copy of TheALFA's getBenefitTier()
+  // Returns the user's current benefit tier number for `sym` (T1, T2, T3...
+  // → 1, 2, 3...) given their owned share count, plus the cumulative shares
+  // needed to reach the NEXT tier. Torn benefit blocks stack at thresholds
+  // (2^n - 1) × BENEFIT_REQ[sym]: T1 = 1×req, T2 = 3×req, T3 = 7×req, T4 = 15×req, etc.
   function qtGetBenefitTier(sym, shares) {
     var data = BENEFIT_REQ[sym];
     if (!data) return { tier: 0, next: 0 };
-    // TheALFA uses STOCK_DATA which has type "P" for passive stocks
-    // Our BENEFIT_REQ only stores the base number, so we check our own map
     if (PASSIVE_STOCKS.indexOf(sym) >= 0) {
       return (shares >= data) ? { tier: 1, next: data } : { tier: 0, next: data };
     }
-    var multiplier = 1;
-    while (shares >= data * (multiplier * 2)) { multiplier *= 2; }
-    return (shares < data) ? { tier: 0, next: data } : { tier: multiplier, next: data * multiplier * 2 };
+    if (shares < data) return { tier: 0, next: data };
+    // Largest n such that shares >= (2^n - 1) * data.
+    var tier = 1;
+    while (shares >= (Math.pow(2, tier + 1) - 1) * data) tier++;
+    return { tier: tier, next: (Math.pow(2, tier + 1) - 1) * data };
   }
 
   // Trades go through Torn's own UI: open the Owned tab, set the share count
@@ -3633,10 +3636,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (currentOwned === 0) return -1; // sentinel: cannot verify → block
       var curTier = qtGetBenefitTier(symb, currentOwned);
       if (curTier.tier === 0) return Infinity; // no benefit tier → no restriction
-      // Max sellable = current owned minus shares needed to stay at current tier
+      // Max sellable = current owned minus shares needed to stay at current tier.
+      // Active benefit blocks need the cumulative threshold (2^tier - 1) × req
+      // to maintain that tier, NOT just `tier × req` — selling down to tier × req
+      // would drop the user to a lower tier. Passive stocks are single-tier so
+      // they only need `req` shares total.
       var keepShares = PASSIVE_STOCKS.indexOf(symb) >= 0
         ? BENEFIT_REQ[symb]
-        : BENEFIT_REQ[symb] * curTier.tier;
+        : (Math.pow(2, curTier.tier) - 1) * BENEFIT_REQ[symb];
       return Math.max(0, currentOwned - keepShares);
     }
     return Infinity; // not a benefit stock
