@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.22
+// @version      2.15.23
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -4553,42 +4553,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         "</div>" +
         "</div>" +
 
-        // ── Debug ─────────────────────
-        "<div style=\"" + section + "\">" +
-        "<div style=\"" + sectionH + "\">Debug</div>" +
-        "<button id=\"tsa-debug-capture-dom\" style=\"width:100%;padding:8px;border-radius:7px;border:1px solid " + border + ";background:none;color:" + text + ";font-size:12px;cursor:pointer;margin-bottom:8px\">Capture current trade-form DOM</button>" +
-        "<textarea id=\"tsa-debug-dom-out\" readonly placeholder=\"Captured HTML will appear here. Tap the button while on Torn's post-trade screen.\" style=\"width:100%;box-sizing:border-box;height:120px;padding:8px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:10px;font-family:monospace;resize:vertical\"></textarea>" +
-        "<div style=\"" + hint + "\">For mobile / TornPDA debugging when the browser inspector isn't available. Captured HTML stays local.</div>" +
-        "</div>" +
-
         "<div style=\"display:flex;gap:8px\">" +
         "<button id=\"tsa-settings-save\" style=\"flex:1;padding:8px;border-radius:7px;border:none;background:#4a6fa5;color:#fff;font-size:13px;font-weight:bold;cursor:pointer\">Save</button>" +
         "<button id=\"tsa-settings-cancel\" style=\"flex:1;padding:8px;border-radius:7px;border:1px solid " + border + ";background:none;color:" + muted + ";font-size:13px;cursor:pointer\">Cancel</button>" +
         "</div>" +
         "</div>";
-
-      // Debug capture: dump the current trade form's HTML for the user to copy.
-      document.getElementById("tsa-debug-capture-dom").addEventListener("click", function() {
-        var out = document.getElementById("tsa-debug-dom-out");
-        var card = document.querySelector('[class*="manageBlock___"]');
-        if (!card) {
-          // No open form — capture the focused stock card instead so we get
-          // whatever Torn is currently showing for the trade UI.
-          var stockUls = document.querySelectorAll('ul[class^="stock_"]');
-          var dump = "";
-          stockUls.forEach(function(ul, i) {
-            // Only dump the one(s) that look "active" — i.e. with an open form
-            // OR the first if no form is open at all.
-            var hasForm = ul.querySelector('[class*="manageBlock___"]');
-            if (hasForm || (i === 0 && !dump)) dump += ul.outerHTML + "\n\n";
-          });
-          out.value = dump || "[No manageBlock___ form open and no stock card found. Trigger the trade and try again.]";
-        } else {
-          out.value = card.outerHTML;
-        }
-        try { out.select(); document.execCommand && document.execCommand("copy"); } catch(e) {}
-        showToast("Trade-form DOM captured", "info");
-      });
 
       // Toggle realized options visibility
       document.getElementById("tsa-setting-show-realized").addEventListener("change", function() {
