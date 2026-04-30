@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.28
+// @version      2.15.29
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3078,9 +3078,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
 
   // After a successful trade, Torn shows a "transaction complete" view with a
-  // back button (text "Back", class "torn-btn gray" with no per-build hash —
-  // see TORN_STOCKS_DOM.md). Auto-click it so the next swing-tx Block sell
-  // can prepare a fresh form without manual intervention.
+  // back button (text "Back", class "torn-btn gray" with no per-build hash).
+  // Auto-click it so the next swing-tx Block sell can prepare a fresh form
+  // without manual intervention.
   async function qtClickPostTradeBack() {
     var root = document.getElementById('stockmarketroot') || document.body;
     var backBtn = await new Promise(function(resolve) {
