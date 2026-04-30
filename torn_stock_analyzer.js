@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.26
+// @version      2.15.27
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1468,9 +1468,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     //    0p  falling       Still falling
     var m30Valid = p_m30 > 0, h1Valid = p_h1 > 0, h2Valid = p_h2 > 0, h4Valid = p_h4 > 0;
     if (m30Valid && h1Valid && h2Valid && h4Valid) {
-      var r_m30_h1 = p_m30 > p_h1;
-      var r_h1_h2  = p_h1  > p_h2;
-      var r_h2_h4  = p_h2  > p_h4;
+      let r_m30_h1 = p_m30 > p_h1;
+      let r_h1_h2  = p_h1  > p_h2;
+      let r_h2_h4  = p_h2  > p_h4;
       if (r_m30_h1 && r_h1_h2 && r_h2_h4) {
         score += 40; scoreBreakdown.reversal = 40; reasons.push("Active uptrend (4h)");
       } else if (r_m30_h1 && r_h1_h2) {
@@ -1485,8 +1485,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         reasons.push("Still falling " + ((p_m30 - p_h1) / p_h1 * 100).toFixed(2) + "%");
       }
     } else if (m30Valid && h1Valid && h2Valid) {
-      var r_m30_h1 = p_m30 > p_h1;
-      var r_h1_h2  = p_h1  > p_h2;
+      let r_m30_h1 = p_m30 > p_h1;
+      let r_h1_h2  = p_h1  > p_h2;
       if (r_m30_h1 && r_h1_h2) {
         score += 30; scoreBreakdown.reversal = 30; reasons.push("Active rise");
       } else if (r_m30_h1) {
@@ -3390,7 +3390,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // pending second tap needed. Return the "fired" sentinel so qtUiTrade
       // can tell its caller the trade actually happened (vs a real failure).
       qtUpdateLocalCache(symb, action === "buyShares" ? shareCount : -shareCount);
-      showToast(label, "success");
+      showToast(pending.label, "success");
       qtClickPostTradeBack(); // fire-and-forget; reset form for the next sell
       return "fired";
     }
