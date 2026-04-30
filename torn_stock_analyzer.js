@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.27
+// @version      2.15.28
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -470,23 +470,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // Calculate Bollinger Bands using all stored price history
   // Returns { upper, middle, lower, pctB } or null if insufficient data
   // pctB = position within bands: 0 = at lower, 1 = at upper, <0 = below lower
-  function calcBollingerBands(sym, history, livePrice) {
-    var entries = history ? history[sym.toUpperCase()] : null;
-    if (!entries || entries.length < 20) return null;
-    var prices = entries.map(function(e) { return e.price; });
-    // Use last 20 prices for SMA and stddev
-    var period = 20;
-    var slice = prices.slice(-period);
-    var sma = slice.reduce(function(a, b) { return a + b; }, 0) / period;
-    var variance = slice.reduce(function(sum, p) { return sum + Math.pow(p - sma, 2); }, 0) / period;
-    var stddev = Math.sqrt(variance);
-    var upper = sma + 2 * stddev;
-    var lower = sma - 2 * stddev;
-    var range = upper - lower;
-    if (range === 0) return null; // no volatility — bands are meaningless
-    var pctB = (livePrice - lower) / range;
-    return { upper: upper, middle: sma, lower: lower, pctB: pctB };
-  }
   // Returns { macd, signal, histogram, crossover } or null if insufficient data
   function calcMACD(sym, history) {
     var entries = history ? history[sym.toUpperCase()] : null;
@@ -548,12 +531,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
 
   // Calculate RSI using all stored price history (kept for backward compat)
-  function calcRSI(sym, history) {
-    var entries = history ? history[sym.toUpperCase()] : null;
-    if (!entries || entries.length < 15) return null;
-    return rsiFromPrices(entries.map(function(e) { return e.price; }));
-  }
-
   // Torn-specific RSI context: returns current RSI + its percentile within this
   // stock's own historical RSI range. Uses 28-price windows (28h of hourly data)
   // stepped every 4 prices through history — auto-calibrates to each stock's
@@ -738,9 +715,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // Weekly income from current benefit blocks
     var weeklyIncome = calcWeeklyIncome(ownedMap, raw, null);
 
-    // Find next 3 recommended purchases using dynamic tier costs
-    var ownedKeys = ownedEntries.map(function(e){ return e.sym + e.tier; });
-
     // Build dynamic next tier list for all 35 stocks with benefit data
     var benefitSyms = Object.keys(BENEFIT_REQ);
     var dynamicNextTiers = [];
@@ -769,7 +743,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // Target = best ROI entry regardless of affordability
     var target = dynamicNextTiers[0] || null;
     var nextEntries = target ? [target] : [];
-    var nextEntry = target;
 
     // Bridgebuilder chain: buy multiple bridges you can afford (keep them, don't sell),
     // each one adds dividend income that accelerates reaching Next Move.
@@ -849,7 +822,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var weekly = sPerCycle ? sPerCycle / (e.freq || 7) * 7 : 0;
         var liveEntry = raw ? raw.find(function(x) { return x.stock === e.sym; }) : null;
         var livePrice = liveEntry ? (parseFloat(liveEntry.price) || 0) : 0;
-        var o = ownedMap[e.sym];
         var req = BENEFIT_REQ[e.sym] || 0;
         // Use this entry's specific tier number, not the overall increment
         var entryTierNum = parseInt(e.tier.replace("T",""), 10) || 0;
@@ -1884,9 +1856,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
       // If ROI planner is active, show it instead
       if (roiPlannerActive) { showROIPlanner(ownedMap, raw); return; }
-      function safeParseArr(key) { try { return JSON.parse(localStorage.getItem(key) || "[]") || []; } catch(e) { return []; } }
-      var hiddenStocks = safeParseArr("tsa_hidden");
-
       var cachedPriceHistory = _savedHistory || loadHistory();
       var stockResults = STOCKS_LIST
         .map(function(s) { return calcScore(s, raw, ownedMap, cachedPriceHistory); })
@@ -2499,95 +2468,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
       content.innerHTML = html;
 
-      // Buy signal chart click handler
-      function drawChart(sym, chartId, stockData) {
-        var chartDiv = document.getElementById(chartId);
-        if (!chartDiv) return;
-        var canvas = document.getElementById("canvas-" + sym);
-        if (!canvas) return;
-
-        var r = stockData ? stockData.find(function(x){ return x.stock === sym; }) : null;
-        if (!r) { chartDiv.innerHTML += "<div style='font-size:9px;color:#888;text-align:center'>No data</div>"; return; }
-
-        // Chronological order of spread prices
-        var pts = [
-          {l:"1W", p: parseFloat((r.interval && r.interval.w1 && r.interval.w1.price)) || 0},
-          {l:"4D", p: parseFloat((r.interval && r.interval.d4 && r.interval.d4.price)) || 0},
-          {l:"2D", p: parseFloat((r.interval && r.interval.d2 && r.interval.d2.price)) || 0},
-          {l:"1D", p: parseFloat((r.interval && r.interval.d1 && r.interval.d1.price)) || 0},
-          {l:"12H", p: parseFloat((r.interval && r.interval.h12 && r.interval.h12.price)) || 0},
-          {l:"8H", p: parseFloat((r.interval && r.interval.h8 && r.interval.h8.price)) || 0},
-          {l:"4H", p: parseFloat((r.interval && r.interval.h4 && r.interval.h4.price)) || 0},
-          {l:"2H", p: parseFloat((r.interval && r.interval.h2 && r.interval.h2.price)) || 0},
-          {l:"1H", p: parseFloat((r.interval && r.interval.h1 && r.interval.h1.price)) || 0},
-          {l:"Now", p: parseFloat(r.price) || 0}
-        ].filter(function(pt){ return pt.p > 0; });
-
-        if (pts.length < 2) return;
-
-        var isDarkC = document.getElementById("tsa-overlay").classList.contains("tsa-dark");
-        var lineColor = isDarkC ? "#4cff91" : "#1a8a45";
-        var gridColor = isDarkC ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)";
-        var textColor = isDarkC ? "#7a7a9a" : "#888";
-
-        var w = canvas.offsetWidth || 280;
-        var h = 80;
-        canvas.width = w;
-        canvas.height = h;
-        var ctx = canvas.getContext("2d");
-        if (!ctx) return;
-
-        var prices = pts.map(function(pt){ return pt.p; });
-        var minP = Math.min.apply(null, prices);
-        var maxP = Math.max.apply(null, prices);
-        var range = maxP - minP || 1;
-        var pad = 8;
-
-        ctx.clearRect(0, 0, w, h);
-
-        // Grid lines
-        ctx.strokeStyle = gridColor;
-        ctx.lineWidth = 1;
-        [0.25, 0.5, 0.75].forEach(function(f) {
-          var y = pad + (1-f) * (h - pad*2);
-          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-        });
-
-        // Price line
-        ctx.strokeStyle = lineColor;
-        ctx.lineWidth = 2;
-        ctx.lineJoin = "round";
-        ctx.beginPath();
-        pts.forEach(function(pt, i) {
-          var x = pad + (i / (pts.length-1)) * (w - pad*2);
-          var y = pad + (1 - (pt.p - minP) / range) * (h - pad*2);
-          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        });
-        ctx.stroke();
-
-        // Fill under line
-        ctx.fillStyle = isDarkC ? "rgba(76,255,145,0.06)" : "rgba(26,138,69,0.06)";
-        ctx.lineTo(pad + (pts.length-1)/(pts.length-1) * (w-pad*2), h-pad);
-        ctx.lineTo(pad, h-pad);
-        ctx.closePath();
-        ctx.fill();
-
-        // Last point dot
-        var lastX = w - pad;
-        var lastY = pad + (1 - (pts[pts.length-1].p - minP) / range) * (h - pad*2);
-        ctx.beginPath();
-        ctx.arc(lastX, lastY, 3, 0, Math.PI*2);
-        ctx.fillStyle = lineColor;
-        ctx.fill();
-
-        // Min/Max labels
-        ctx.fillStyle = textColor;
-        ctx.font = "9px Arial";
-        ctx.textAlign = "right";
-        ctx.fillText("$" + maxP.toFixed(2), w-2, pad+8);
-        ctx.fillText("$" + minP.toFixed(2), w-2, h-pad+1);
-      }
-
       // Helper: set stock in Quick Trade dropdown
       function qtSetStock(sym) {
         var hidden = document.getElementById("qt-stock");
@@ -2844,7 +2724,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // ── Price + investors history storage ──
   var HISTORY_KEY = "tsa_price_history";
   var INVESTOR_HISTORY_KEY = "tsa_investor_history";
-  var HISTORY_MAX_AGE = 30 * 24 * 60 * 60 * 1000; // default 30 days
 
   function getHistoryMaxAge() {
     var days = parseInt(lsGet("tsa_history_days", "30"), 10);
@@ -2875,7 +2754,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           localStorage.setItem(HISTORY_KEY, JSON.stringify(reduced));
           saved = true;
           break;
-        } catch(e2) {}
+        } catch {}
       }
       if (!saved && !saveHistory._warned) {
         saveHistory._warned = true;
@@ -3034,23 +2913,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       updateQtRecommendation(null);
     });
   }
-  function getRoiRecommendation(sym) {
-    if (!lastOwnedMap || !lastRaw) return null;
-    var tierInfo = calcNextTier(sym, lastOwnedMap, lastRaw);
-    if (!tierInfo || tierInfo.sharesNeeded <= 0) return null;
-    // Check capital
-    var liveEntry = lastRaw.find(function(x) { return x.stock === sym.toUpperCase(); });
-    if (!liveEntry) return null;
-    // Estimate available capital from cash (rough — exact is in ROI planner)
-    return {
-      sym: sym,
-      sharesNeeded: tierInfo.sharesNeeded,
-      cost: tierInfo.cost,
-      tier: "T" + tierInfo.nextIncrement,
-      livePrice: tierInfo.livePrice
-    };
-  }
-
   var QT_DEFAULT_AMOUNTS = [1000000, 3000000, 5000000, 10000000, 25000000, 50000000, 100000000];
   var qtAmounts = (function() {
     try {
@@ -3169,35 +3031,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     });
   }
 
-  function qtWaitForButton(parent, textRegex, timeoutMs) {
-    return new Promise(function(resolve) {
-      var find = function() {
-        var btns = parent.querySelectorAll("button");
-        for (var i = 0; i < btns.length; i++) {
-          if (textRegex.test(btns[i].textContent)) return btns[i];
-        }
-        return null;
-      };
-      var existing = find();
-      if (existing) return resolve(existing);
-      var obs = new MutationObserver(function() {
-        var el = find();
-        if (el) { obs.disconnect(); resolve(el); }
-      });
-      // characterData: catches text-only updates (e.g. Torn rewriting the same
-      // button from "sell" → "Confirm Transaction" without replacing the node).
-      obs.observe(parent, { childList: true, subtree: true, characterData: true });
-      setTimeout(function() { obs.disconnect(); resolve(null); }, timeoutMs);
-    });
-  }
-
-  function qtSleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
-
   // Event-driven wait — resolves as soon as `predicate()` returns truthy after
   // any DOM mutation under `observeRoot`. Resolves true on success, false on
   // timeout. If predicate is already true at call time, resolves immediately.
-  // Replaces fixed `qtSleep` waits so the script reacts as fast as Torn's UI
-  // is ready, no slower and no faster.
+  // Reacts as fast as Torn's UI is ready, no slower and no faster — replaces
+  // any fixed-delay wait pattern.
   function qtWaitForCondition(observeRoot, predicate, maxMs) {
     return new Promise(function(resolve) {
       if (predicate()) return resolve(true);
@@ -3273,7 +3111,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       else backBtn.click();
       return true;
     } catch(e) {
-      try { backBtn.click(); return true; } catch(e2) { return false; }
+      try { backBtn.click(); return true; } catch { return false; }
     }
   }
 
@@ -3691,55 +3529,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
 
   function saveQtAmounts() { lsSet("qt_amounts", JSON.stringify(qtAmounts)); }
-
-  function renderQtAmounts() {
-    var grid = document.getElementById("qt-amounts");
-    if (!grid) return;
-    grid.innerHTML = "";
-    var userMoney = qtGetMoneyFast();
-    qtAmounts.forEach(function(amt, i) {
-      var btn = document.createElement("button");
-      var isActive = qtSelAmt === amt;
-      var cantAfford = qtMode === "buy" && userMoney > 0 && amt > userMoney;
-      btn.style.cssText = "position:relative;padding:6px 9px;border-radius:7px;border:1px solid " +
-        (isActive ? (qtMode === "buy" ? "#4cff91" : "#ff4c6a") : "#2a2a4a") +
-        ";background:" + (isActive ? (qtMode === "buy" ? "rgba(76,255,145,0.08)" : "rgba(255,76,106,0.08)") : "#13131f") +
-        ";color:" + (isActive ? (qtMode === "buy" ? "#4cff91" : "#ff4c6a") : "#5a5a8a") +
-        ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;" +
-        (cantAfford ? "opacity:0.35;" : "");
-      if (cantAfford) btn.title = "Need $" + (amt - userMoney).toLocaleString("en-US") + " more";
-      btn.textContent = fmtQtAmt(amt);
-      if (qtEditMode) {
-        var del = document.createElement("span");
-        del.textContent = "✕";
-        del.style.cssText = "position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;background:#ff4c6a;color:#fff;font-size:9px;line-height:16px;text-align:center;cursor:pointer;";
-        del.onclick = function(e) {
-          e.stopPropagation();
-          qtAmounts.splice(i, 1);
-          if (qtSelAmt === amt) qtSelAmt = null;
-          saveQtAmounts(); renderQtAmounts(); qtUpdateExec();
-        };
-        btn.appendChild(del);
-      }
-      btn.onclick = function() {
-        if (qtEditMode) return;
-        qtSelAmt = (qtSelAmt === amt) ? null : amt;
-        renderQtAmounts(); qtUpdateExec();
-      };
-      grid.appendChild(btn);
-    });
-    if (qtEditMode) {
-      var addBtn = document.createElement("button");
-      addBtn.textContent = "+";
-      addBtn.style.cssText = "padding:6px 10px;border-radius:7px;border:1px dashed #2a2a4a;background:transparent;color:#6a6a9a;font-family:JetBrains Mono,monospace;font-size:14px;cursor:pointer;flex-shrink:0;";
-      addBtn.onclick = function() {
-        var val = prompt("Enter amount in $ (e.g. 25000000):");
-        val = parseInt(val, 10);
-        if (val > 0) { qtAmounts.push(val); qtAmounts.sort(function(a,b){return a-b;}); saveQtAmounts(); renderQtAmounts(); }
-      };
-      grid.appendChild(addBtn);
-    }
-  }
 
   function qtUpdateExec() {
     var btn = document.getElementById("qt-exec");
@@ -4460,7 +4249,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var isMobile = /Mobi|Android/i.test(navigator.userAgent);
     overlay.style.width = isMobile ? (window.innerWidth - 32) + "px" : "420px";
     if (lsGet("tsa_dark", "false") === "true") overlay.classList.add("tsa-dark");
-    var isDarkInit = lsGet("tsa_dark", "false") === "true";
     overlay.innerHTML =
       "<div class=\"tsa-header\">" +
         "<div class=\"tsa-header-left\">" +
@@ -4490,7 +4278,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     document.getElementById("tsa-settings-btn").addEventListener("click", function() {
       var content = document.getElementById("tsa-content");
       var isDarkNow = overlay.classList.contains("tsa-dark");
-      var bg  = isDarkNow ? "#0f0f1a" : "#ffffff";
       var bg2 = isDarkNow ? "#1a1a2e" : "#f7f9fc";
       var border = isDarkNow ? "#2a2a4a" : "#eee";
       var text = isDarkNow ? "#c8c8d8" : "#222";
