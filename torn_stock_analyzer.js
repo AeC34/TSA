@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.31
+// @version      2.15.32
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3187,16 +3187,19 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     // Event-driven: proceed as soon as the input reflects the target value
     // (compare with commas stripped — Torn formats the rendered value with
-    // thousands separators). Resolves immediately if the input is already at
-    // the target (e.g. user re-clicks the same amount), so no wasted 2s wait.
-    // If the value never lands, ABORT — clicking Sell with empty/wrong input
-    // makes Torn default to "all shares" (the Block-2 same-stock disaster).
-    var valueTook = await qtWaitForCondition(form, function() {
-      return inp.value.replace(/,/g, "") === sStr;
-    }, 2000);
+    // thousands separators). Re-query the LIVE input each tick — the captured
+    // `inp` may be stale if Torn re-mounted the input after a previous trade,
+    // and Torn submits based on the LIVE element's React state, not the
+    // detached one. If the live value never reaches sStr, ABORT.
+    var liveInputValueOk = function() {
+      var live = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
+      return !!live && live.value.replace(/,/g, "") === sStr;
+    };
+    var valueTook = await qtWaitForCondition(form, liveInputValueOk, 2000);
     if (!valueTook) {
+      var liveNow = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
       showToast("Trade input did not accept " + sStr + " for " + symb +
-                " (got \"" + (inp.value || "") + "\") — click Torn's Back, then retry", "error");
+                " (live=\"" + (liveNow ? liveNow.value : "null") + "\") — click Torn's Back, then retry", "error");
       return false;
     }
 
@@ -3204,6 +3207,20 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (!stepBtn) { showToast("Submit button not found", "error"); return false; }
     var stepClick = qtFindFiberProp(stepBtn, "onClick");
     if (!stepClick) { showToast("Submit handler not found — Torn UI changed?", "error"); return false; }
+
+    // Final pre-submit guard: re-verify the LIVE input value RIGHT before
+    // clicking Sell. Closes the window where Torn's React could re-render
+    // between qtWaitForCondition resolving and stepClick firing — without
+    // this, the Block-2 same-stock case can still ship the wrong amount
+    // because the predicate succeeded against a transient state but the
+    // live element regressed before submit.
+    if (!liveInputValueOk()) {
+      var liveAtSubmit = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
+      showToast("Trade input drifted before Sell click for " + symb +
+                " (live=\"" + (liveAtSubmit ? liveAtSubmit.value : "null") +
+                "\", expected=\"" + sStr + "\") — click Torn's Back, then retry", "error");
+      return false;
+    }
 
     // Snapshot live owned-share count BEFORE clicking. If Torn has the
     // confirmation prompt disabled (or otherwise fires the trade in a single
