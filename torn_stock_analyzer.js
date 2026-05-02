@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.32
+// @version      2.15.33
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3183,6 +3183,25 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     } catch(e) {
       showToast("Trade input rejected: " + e.message, "error");
       return false;
+    }
+
+    // BUY-only reinforcement: Torn pre-fills the buy input with the max-
+    // affordable share count (it's already in `data-money` when the form
+    // opens). fiber.onChange updates the displayed value but leaves React's
+    // internal "user-typed" state untouched, so submit can ship with max
+    // instead of our value. Use the React-safe native setter + bubbled
+    // input event to flip that tracker — equivalent to the user typing.
+    // SELL keeps onChange-only because the previous attempt to add this
+    // for sell destabilized state (see comment block above).
+    if (action === "buyShares") {
+      try {
+        var liveInpForSet = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
+        if (liveInpForSet) {
+          var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+          nativeSetter.call(liveInpForSet, sStr);
+          liveInpForSet.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      } catch(e) {}
     }
 
     // Event-driven: proceed as soon as the input reflects the target value
