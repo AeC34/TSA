@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.30
+// @version      2.15.31
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3147,6 +3147,29 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var inp = await qtWaitForElement(form, 'input[data-testid="legacy-money-input"]:not([type="hidden"])', 3000);
     if (!inp) { showToast("Trade input not found", "error"); return false; }
 
+    // Verify the form is in input view, not stuck on Confirm Transaction from
+    // a previous trade whose post-trade Back-click silently failed. Same class
+    // (sell___/buy___) lives on both states; the differentiator is button text:
+    // "sell"/"buy" in input view, "Confirm Transaction" in confirm view. If
+    // stuck, attempt a self-heal Back-click once before aborting.
+    var verbBtnReady = function() {
+      var b = form.querySelector('[class*="' + verbClass + '"]');
+      if (!b) return false;
+      var txt = (b.textContent || "").trim().toLowerCase();
+      return !!txt && !/confirm/.test(txt);
+    };
+    if (!verbBtnReady()) {
+      await qtClickPostTradeBack();
+      var recovered = await qtWaitForCondition(form, verbBtnReady, 1500);
+      if (!recovered) {
+        showToast("Trade form stuck on Confirm — click Torn's Back, then retry " + symb, "error");
+        return false;
+      }
+      // Re-resolve the input — the previous reference belongs to the stale render.
+      inp = await qtWaitForElement(form, 'input[data-testid="legacy-money-input"]:not([type="hidden"])', 1500);
+      if (!inp) { showToast("Trade input not found after recovery", "error"); return false; }
+    }
+
     var onChange = qtFindFiberProp(inp, "onChange");
     if (!onChange) { showToast("Trade input handler not found — Torn UI changed?", "error"); return false; }
 
@@ -3166,9 +3189,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // (compare with commas stripped — Torn formats the rendered value with
     // thousands separators). Resolves immediately if the input is already at
     // the target (e.g. user re-clicks the same amount), so no wasted 2s wait.
-    await qtWaitForCondition(form, function() {
+    // If the value never lands, ABORT — clicking Sell with empty/wrong input
+    // makes Torn default to "all shares" (the Block-2 same-stock disaster).
+    var valueTook = await qtWaitForCondition(form, function() {
       return inp.value.replace(/,/g, "") === sStr;
     }, 2000);
+    if (!valueTook) {
+      showToast("Trade input did not accept " + sStr + " for " + symb +
+                " (got \"" + (inp.value || "") + "\") — click Torn's Back, then retry", "error");
+      return false;
+    }
 
     var stepBtn = form.querySelector('[class*="' + verbClass + '"]');
     if (!stepBtn) { showToast("Submit button not found", "error"); return false; }
