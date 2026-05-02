@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.33
+// @version      2.15.34
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2655,7 +2655,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var wasArmedBefore = (armedSwingRow === row);
           armSwingRow(row);
 
-          var fired = await qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")");
+          var fired = await qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")", { blockMaxShares: shares });
 
           if (fired) {
             // Tap 2 success (or one-step Torn) — trade is done, drop the row.
@@ -3241,6 +3241,27 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return false;
     }
 
+    // Block-sell oversell guard: when called from a swing-trade row, pending
+    // carries `blockMaxShares` (the row's exact block size). The visible input
+    // can read sStr while React's submit state still holds the form's pre-fill
+    // (max owned). Torn renders a hidden mirror input that tracks React state,
+    // so a hidden value > blockMaxShares means submit would ship more than the
+    // block. Abort before stepClick — at this point we have not yet entered
+    // Confirm view, so no money is at risk.
+    if (pending.blockMaxShares != null) {
+      var liveHidden = form.querySelector('input[data-testid="legacy-money-input"][type="hidden"]');
+      if (liveHidden) {
+        var hiddenRaw = (liveHidden.value || "").replace(/,/g, "");
+        var hiddenNum = parseInt(hiddenRaw, 10);
+        if (isFinite(hiddenNum) && hiddenNum > pending.blockMaxShares) {
+          showToast("Block sell aborted: form mirror=" + hiddenNum.toLocaleString("en-US") +
+                    " > block max=" + pending.blockMaxShares.toLocaleString("en-US") +
+                    ". Click Torn's Back, then retry.", "error");
+          return false;
+        }
+      }
+    }
+
     // Snapshot live owned-share count BEFORE clicking. If Torn has the
     // confirmation prompt disabled (or otherwise fires the trade in a single
     // step), the Confirm Transaction button never appears — but the share
@@ -3313,10 +3334,21 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var shareCount = pending.shareCount;
     var action = pending.action;
     var label = pending.label;
+    var blockMaxShares = pending.blockMaxShares;
 
     var sideClass = action === "buyShares" ? "buyBlock___" : "sellBlock___";
     var form = document.querySelector('[class*="' + sideClass + '"] [class*="manageBlock___"]');
     if (!form) { showToast("Trade form closed — restart trade", "error"); return false; }
+
+    // Block-sell post-fire detection: snapshot owned shares before clicking
+    // Confirm so we can flag an oversell after the fact. This is the
+    // last-line backstop if the pre-Sell-click guard in qtUiPrepare somehow
+    // missed (e.g. hidden mirror was in sync at prepare time but React state
+    // regressed between prepare and confirm). Only relevant for swing-block
+    // sells where blockMaxShares is set.
+    var preConfirmOwned = (blockMaxShares != null && action === "sellShares")
+      ? qtGetOwnedShares(symb, true)
+      : null;
 
     var btns = form.querySelectorAll("button");
     var confirmBtn = null;
@@ -3459,6 +3491,19 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return false;
     }
 
+    // Block-sell oversell detection: if a swing-block sell shipped more
+    // shares than the block max, scream loudly so the user can react.
+    // Tolerance of 1 share to absorb DOM-rounding noise.
+    if (preConfirmOwned !== null) {
+      var postConfirmOwned = qtGetOwnedShares(symb, true);
+      var actualSold = preConfirmOwned - postConfirmOwned;
+      if (actualSold > blockMaxShares + 1) {
+        showToast("⚠ OVERSOLD " + symb + ": shipped " + actualSold.toLocaleString("en-US") +
+                  " shares but block max was " + blockMaxShares.toLocaleString("en-US") +
+                  ". Buy back if needed.", "error");
+      }
+    }
+
     qtUpdateLocalCache(symb, action === "buyShares" ? shareCount : -shareCount);
     showToast(label, "success");
     qtClickPostTradeBack(); // fire-and-forget; reset form for the next sell
@@ -3493,10 +3538,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (qtPendingTrade && qtPendingTrade.key === key && qtPendingTrade.shareCount === shares) {
       var p = qtPendingTrade;
       qtPendingTrade = null;
-      return await qtUiExecute({ symb: p.symb, shareCount: p.shareCount, action: p.action, label: p.label });
+      return await qtUiExecute({ symb: p.symb, shareCount: p.shareCount, action: p.action, label: p.label, blockMaxShares: p.blockMaxShares });
     }
 
-    qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label };
+    qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label, blockMaxShares: options && options.blockMaxShares };
     var prepared = await qtUiPrepare(qtPendingTrade);
     if (prepared === "fired") {
       // One-step Torn config: trade already completed inside qtUiPrepare.
