@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.36
+// @version      2.15.37
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3173,37 +3173,62 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var onChange = qtFindFiberProp(inp, "onChange");
     if (!onChange) { showToast("Trade input handler not found — Torn UI changed?", "error"); return false; }
 
-    // Step 1: fiber.onChange updates React's controlled state so the value
-    // renders correctly in the visible input.
     var sStr = String(shareCount);
+    var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+
+    // Apply our share count to the input via three React state paths:
+    //  1. fiber.onChange — updates the controlled state (rendered value).
+    //  2. native value setter — flips React's "user-typed" tracker so the
+    //     submit handler reads our value, not the form's pre-fill.
+    //  3. bubbled "input" event — same path React uses on real keystrokes.
+    // Re-queries the input + fiber every call so a Torn re-mount doesn't
+    // leave us writing to a detached element. No-op when value already
+    // matches sStr (the polling loop below relies on this no-op behaviour).
+    var applyValueOnce = function() {
+      var live = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
+      if (!live) return;
+      if ((live.value || "").replace(/,/g, "") === sStr) return;
+      try {
+        var freshOnChange = qtFindFiberProp(live, "onChange");
+        if (freshOnChange) freshOnChange({ error: false, value: sStr });
+      } catch(e) {}
+      try {
+        nativeSetter.call(live, sStr);
+        live.dispatchEvent(new Event("input", { bubbles: true }));
+      } catch(e) {}
+    };
+
+    // Initial apply (paths 1 + 2/3 inline so we can surface a clear error
+    // toast if onChange itself throws).
     try {
       onChange({ error: false, value: sStr });
     } catch(e) {
       showToast("Trade input rejected: " + e.message, "error");
       return false;
     }
-
-    // Step 2: React-safe native setter + bubbled input event. Torn pre-fills
-    // both buy and sell inputs (buy: max-affordable, sell: max-owned) and
-    // tracks the "user-typed" value separately from the rendered value. If
-    // we only call fiber.onChange, the visible input AND its hidden mirror
-    // both update to sStr, but Torn's submit handler reads from the
-    // user-typed tracker which still holds the pre-fill — so the trade
-    // ships max instead of sStr. The native setter + input event flips that
-    // tracker (the same path React uses when the user actually types).
-    // Previously this was buy-only with a comment that sell destabilized
-    // when "keypress + setter + dispatch" were combined; the destabilizing
-    // factor was the keypress, not the setter pair. Without keypress this
-    // is the proven buy-side pattern, applied uniformly to prevent the
-    // block-2 same-stock sell from oversell-ing the entire holding.
     try {
       var liveInpForSet = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
       if (liveInpForSet) {
-        var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
         nativeSetter.call(liveInpForSet, sStr);
         liveInpForSet.dispatchEvent(new Event("input", { bubbles: true }));
       }
     } catch(e) {}
+
+    // Defensive re-apply loop. After a successful sell + post-trade Back,
+    // Torn re-mounts the form and pre-fills the input with the user's new
+    // max-owned (remaining shares after the sale). Our initial set runs
+    // in the same tick, but Torn's pre-fill effect can race in afterward
+    // and silently overwrite our value back to max-owned. Without this
+    // loop the second block-tap "looks" correct but submit ships max.
+    // Polling at 50 ms re-applies sStr whenever the input drifts; the
+    // helper no-ops when the value already matches, so the cost is one
+    // querySelector per tick. The interval is stopped synchronously right
+    // before stepClick — Torn cannot intervene between clearInterval and
+    // the click since neither yields control.
+    var reApplyTimer = setInterval(applyValueOnce, 50);
+    var stopReApply = function() {
+      if (reApplyTimer) { clearInterval(reApplyTimer); reApplyTimer = null; }
+    };
 
     // Event-driven: proceed as soon as the input reflects the target value
     // (compare with commas stripped — Torn formats the rendered value with
@@ -3217,6 +3242,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     };
     var valueTook = await qtWaitForCondition(form, liveInputValueOk, 2000);
     if (!valueTook) {
+      stopReApply();
       var liveNow = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
       showToast("Trade input did not accept " + sStr + " for " + symb +
                 " (live=\"" + (liveNow ? liveNow.value : "null") + "\") — click Torn's Back, then retry", "error");
@@ -3224,17 +3250,17 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }
 
     var stepBtn = form.querySelector('[class*="' + verbClass + '"]');
-    if (!stepBtn) { showToast("Submit button not found", "error"); return false; }
+    if (!stepBtn) { stopReApply(); showToast("Submit button not found", "error"); return false; }
     var stepClick = qtFindFiberProp(stepBtn, "onClick");
-    if (!stepClick) { showToast("Submit handler not found — Torn UI changed?", "error"); return false; }
+    if (!stepClick) { stopReApply(); showToast("Submit handler not found — Torn UI changed?", "error"); return false; }
 
     // Final pre-submit guard: re-verify the LIVE input value RIGHT before
-    // clicking Sell. Closes the window where Torn's React could re-render
-    // between qtWaitForCondition resolving and stepClick firing — without
-    // this, the Block-2 same-stock case can still ship the wrong amount
-    // because the predicate succeeded against a transient state but the
-    // live element regressed before submit.
+    // clicking Sell. With the polling re-apply running this should rarely
+    // fail, but kept as defense-in-depth — if the polling ever lost a
+    // race against an aggressive Torn re-render, this catches it before
+    // we enter Confirm view (no money at risk yet).
     if (!liveInputValueOk()) {
+      stopReApply();
       var liveAtSubmit = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
       showToast("Trade input drifted before Sell click for " + symb +
                 " (live=\"" + (liveAtSubmit ? liveAtSubmit.value : "null") +
@@ -3253,6 +3279,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (pending.blockMaxShares != null) {
       var liveHidden = form.querySelector('input[data-testid="legacy-money-input"][type="hidden"]');
       if (!liveHidden) {
+        stopReApply();
         showToast("Block sell aborted: form mirror not found for " + symb +
                   " — cannot verify submit value. Click Torn's Back, then retry.", "error");
         return false;
@@ -3260,11 +3287,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var hiddenRaw = (liveHidden.value || "").replace(/,/g, "");
       var hiddenNum = parseInt(hiddenRaw, 10);
       if (!isFinite(hiddenNum)) {
+        stopReApply();
         showToast("Block sell aborted: form mirror unreadable (live=\"" + (liveHidden.value || "") +
                   "\") for " + symb + ". Click Torn's Back, then retry.", "error");
         return false;
       }
       if (hiddenNum > pending.blockMaxShares) {
+        stopReApply();
         showToast("Block sell aborted: form mirror=" + hiddenNum.toLocaleString("en-US") +
                   " > block max=" + pending.blockMaxShares.toLocaleString("en-US") +
                   ". Click Torn's Back, then retry.", "error");
@@ -3277,6 +3306,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // step), the Confirm Transaction button never appears — but the share
     // count changes. We use the count delta as a fallback success signal.
     var preTradeOwned = qtGetOwnedShares(symb, true);
+
+    // Last synchronous sequence: re-apply the value one final time, stop
+    // the polling, and click. No await between these statements — Torn
+    // cannot pre-fill the input again before stepClick reads it.
+    applyValueOnce();
+    stopReApply();
 
     // Call with no args — matches the working console call pattern. Passing a
     // synthetic event arg interfered with sell-side state advancement.
