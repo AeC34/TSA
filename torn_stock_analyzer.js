@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.34
+// @version      2.15.35
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3247,18 +3247,27 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // (max owned). Torn renders a hidden mirror input that tracks React state,
     // so a hidden value > blockMaxShares means submit would ship more than the
     // block. Abort before stepClick — at this point we have not yet entered
-    // Confirm view, so no money is at risk.
+    // Confirm view, so no money is at risk. Fail-closed: any inability to
+    // positively verify the mirror is treated as an abort, not a pass.
     if (pending.blockMaxShares != null) {
       var liveHidden = form.querySelector('input[data-testid="legacy-money-input"][type="hidden"]');
-      if (liveHidden) {
-        var hiddenRaw = (liveHidden.value || "").replace(/,/g, "");
-        var hiddenNum = parseInt(hiddenRaw, 10);
-        if (isFinite(hiddenNum) && hiddenNum > pending.blockMaxShares) {
-          showToast("Block sell aborted: form mirror=" + hiddenNum.toLocaleString("en-US") +
-                    " > block max=" + pending.blockMaxShares.toLocaleString("en-US") +
-                    ". Click Torn's Back, then retry.", "error");
-          return false;
-        }
+      if (!liveHidden) {
+        showToast("Block sell aborted: form mirror not found for " + symb +
+                  " — cannot verify submit value. Click Torn's Back, then retry.", "error");
+        return false;
+      }
+      var hiddenRaw = (liveHidden.value || "").replace(/,/g, "");
+      var hiddenNum = parseInt(hiddenRaw, 10);
+      if (!isFinite(hiddenNum)) {
+        showToast("Block sell aborted: form mirror unreadable (live=\"" + (liveHidden.value || "") +
+                  "\") for " + symb + ". Click Torn's Back, then retry.", "error");
+        return false;
+      }
+      if (hiddenNum > pending.blockMaxShares) {
+        showToast("Block sell aborted: form mirror=" + hiddenNum.toLocaleString("en-US") +
+                  " > block max=" + pending.blockMaxShares.toLocaleString("en-US") +
+                  ". Click Torn's Back, then retry.", "error");
+        return false;
       }
     }
 
