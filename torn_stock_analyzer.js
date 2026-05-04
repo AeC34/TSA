@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.35
+// @version      2.15.36
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3173,10 +3173,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var onChange = qtFindFiberProp(inp, "onChange");
     if (!onChange) { showToast("Trade input handler not found — Torn UI changed?", "error"); return false; }
 
-    // Just fiber.onChange — verified end-to-end in console that this single
-    // call is sufficient to set value cleanly. Adding keypress/setter/dispatch
-    // events triggered extra React re-renders that put sell-side state in a
-    // configuration where the subsequent Confirm onClick took the wrong branch.
+    // Step 1: fiber.onChange updates React's controlled state so the value
+    // renders correctly in the visible input.
     var sStr = String(shareCount);
     try {
       onChange({ error: false, value: sStr });
@@ -3185,24 +3183,27 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return false;
     }
 
-    // BUY-only reinforcement: Torn pre-fills the buy input with the max-
-    // affordable share count (it's already in `data-money` when the form
-    // opens). fiber.onChange updates the displayed value but leaves React's
-    // internal "user-typed" state untouched, so submit can ship with max
-    // instead of our value. Use the React-safe native setter + bubbled
-    // input event to flip that tracker — equivalent to the user typing.
-    // SELL keeps onChange-only because the previous attempt to add this
-    // for sell destabilized state (see comment block above).
-    if (action === "buyShares") {
-      try {
-        var liveInpForSet = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
-        if (liveInpForSet) {
-          var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-          nativeSetter.call(liveInpForSet, sStr);
-          liveInpForSet.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-      } catch(e) {}
-    }
+    // Step 2: React-safe native setter + bubbled input event. Torn pre-fills
+    // both buy and sell inputs (buy: max-affordable, sell: max-owned) and
+    // tracks the "user-typed" value separately from the rendered value. If
+    // we only call fiber.onChange, the visible input AND its hidden mirror
+    // both update to sStr, but Torn's submit handler reads from the
+    // user-typed tracker which still holds the pre-fill — so the trade
+    // ships max instead of sStr. The native setter + input event flips that
+    // tracker (the same path React uses when the user actually types).
+    // Previously this was buy-only with a comment that sell destabilized
+    // when "keypress + setter + dispatch" were combined; the destabilizing
+    // factor was the keypress, not the setter pair. Without keypress this
+    // is the proven buy-side pattern, applied uniformly to prevent the
+    // block-2 same-stock sell from oversell-ing the entire holding.
+    try {
+      var liveInpForSet = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
+      if (liveInpForSet) {
+        var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+        nativeSetter.call(liveInpForSet, sStr);
+        liveInpForSet.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    } catch(e) {}
 
     // Event-driven: proceed as soon as the input reflects the target value
     // (compare with commas stripped — Torn formats the rendered value with
