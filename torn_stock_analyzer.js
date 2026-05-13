@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.37
+// @version      2.15.38
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -22,6 +22,13 @@
   }
   function lsSet(key, value) {
     try { localStorage.setItem(key, value); } catch(e) {}
+  }
+
+  // Active-viewing gate per Torn rule clarification 2026-05-13: only fire
+  // user-attention surfaces (browser notifications) when the user is
+  // actively viewing the page (foreground tab + focused window).
+  function isActivelyViewed() {
+    return document.visibilityState === "visible" && document.hasFocus();
   }
 
   var TORN_API_KEY = lsGet("tsa-torn-apikey", "");
@@ -139,7 +146,7 @@
     // Notify
     fired.forEach(function(f) {
       var msg = f.sym + " is " + (f.dir === "above" ? "above" : "below") + " $" + f.price.toFixed(2) + " (live: $" + f.live.toFixed(2) + ")";
-      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      if (isActivelyViewed() && typeof Notification !== "undefined" && Notification.permission === "granted") {
         try {
           new Notification("Torn Stock Alert", { body: msg, icon: "https://www.torn.com/favicon.ico" });
         } catch(e) {
@@ -2245,7 +2252,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
       // Browser notifications for PROFIT / STOP LOSS signals on swing trades
       (function() {
-        if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+        if (!isActivelyViewed() || typeof Notification === "undefined" || Notification.permission !== "granted") return;
         var notified;
         try { notified = JSON.parse(localStorage.getItem("tsa_notified_signals") || "{}"); } catch(e) { notified = {}; }
         // Remove stale entries for signals that are no longer active
