@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.39
+// @version      2.15.40
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -91,16 +91,20 @@
     if (autoRefreshCountdownInterval) { clearInterval(autoRefreshCountdownInterval); autoRefreshCountdownInterval = null; }
     autoRefreshEndTime = null;
     var mins = getAutoRefreshInterval();
-    if (mins > 0) {
-      autoRefreshEndTime = Date.now() + mins * 60000;
-      autoRefreshCountdownInterval = setInterval(updateCountdownLabel, 1000);
-      autoRefreshTimer = setTimeout(function() {
-        autoRefreshTimer = null;
-        if (autoRefreshCountdownInterval) { clearInterval(autoRefreshCountdownInterval); autoRefreshCountdownInterval = null; }
-        autoRefreshEndTime = null;
-        loadData();
-      }, mins * 60000);
-    }
+    if (mins <= 0) return;
+    // Pause auto-refresh while the tab isn't actively viewed — no point
+    // hitting the API for a panel nobody is looking at. Resumed by the
+    // visibilitychange / focus listener below, which fires one immediate
+    // loadData() that then re-enters this function with a fresh schedule.
+    if (!isActivelyViewed()) return;
+    autoRefreshEndTime = Date.now() + mins * 60000;
+    autoRefreshCountdownInterval = setInterval(updateCountdownLabel, 1000);
+    autoRefreshTimer = setTimeout(function() {
+      autoRefreshTimer = null;
+      if (autoRefreshCountdownInterval) { clearInterval(autoRefreshCountdownInterval); autoRefreshCountdownInterval = null; }
+      autoRefreshEndTime = null;
+      loadData();
+    }, mins * 60000);
   }
   // ── Price Alerts ──────────────────────────────────────────────────────────
   var ALERTS_KEY = "tsa_price_alerts";
@@ -4753,4 +4757,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   } else {
     createUIOnce();
   }
+
+  // Resume auto-refresh when the tab becomes actively viewed again
+  function resumeAutoRefreshIfActive() {
+    if (!isActivelyViewed()) return;
+    if (getAutoRefreshInterval() <= 0) return;
+    if (autoRefreshTimer) return; // already scheduled
+    loadData();
+  }
+  document.addEventListener("visibilitychange", resumeAutoRefreshIfActive);
+  window.addEventListener("focus", resumeAutoRefreshIfActive);
 })();
