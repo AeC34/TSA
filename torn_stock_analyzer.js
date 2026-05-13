@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.38
+// @version      2.15.39
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -24,9 +24,9 @@
     try { localStorage.setItem(key, value); } catch(e) {}
   }
 
-  // Active-viewing gate per Torn rule clarification 2026-05-13: only fire
-  // user-attention surfaces (browser notifications) when the user is
-  // actively viewing the page (foreground tab + focused window).
+  // Skip alert/signal toasts when the tab isn't actively viewed — the toast
+  // TTL would expire before the user returns. Alerts/signals remain
+  // un-consumed and re-fire on the next loadData() when active.
   function isActivelyViewed() {
     return document.visibilityState === "visible" && document.hasFocus();
   }
@@ -140,28 +140,16 @@
       if (triggered) fired.push({ sym: a.sym, price: a.price, dir: a.dir, live: live });
     });
     if (!fired.length) return;
+    // Defer consume + toast until the user is actively viewing — otherwise
+    // the one-shot alert would be consumed silently while the user is away.
+    if (!isActivelyViewed()) return;
     // Remove one-shot fired alerts; keep repeat alerts active
     var firedKeys = fired.map(function(f) { return f.sym + f.dir; });
     saveAlerts(alerts.filter(function(a) { return a.repeat || firedKeys.indexOf(a.sym + a.dir) < 0; }));
-    // Notify
     fired.forEach(function(f) {
       var msg = f.sym + " is " + (f.dir === "above" ? "above" : "below") + " $" + f.price.toFixed(2) + " (live: $" + f.live.toFixed(2) + ")";
-      if (isActivelyViewed() && typeof Notification !== "undefined" && Notification.permission === "granted") {
-        try {
-          new Notification("Torn Stock Alert", { body: msg, icon: "https://www.torn.com/favicon.ico" });
-        } catch(e) {
-          showToast("Price Alert: " + msg, "warn");
-        }
-      } else {
-        showToast("Price Alert: " + msg, "warn");
-      }
+      showToast("Price Alert: " + msg, "warn");
     });
-  }
-
-  function requestNotificationPermission() {
-    if (typeof Notification !== "undefined" && Notification.permission === "default") {
-      Notification.requestPermission();
-    }
   }
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -2250,30 +2238,23 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
       swingTrades.sort(function(a, b) { return (b._swingDisplayPct || -Infinity) - (a._swingDisplayPct || -Infinity); });
 
-      // Browser notifications for PROFIT / STOP LOSS signals on swing trades
+      // Toast PROFIT / STOP LOSS signals on swing trades, deduped per signal
       (function() {
-        if (!isActivelyViewed() || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+        if (!isActivelyViewed()) return;
         var notified;
         try { notified = JSON.parse(localStorage.getItem("tsa_notified_signals") || "{}"); } catch(e) { notified = {}; }
         // Remove stale entries for signals that are no longer active
         var activeKeys = {};
         swingTrades.forEach(function(s) { if (s.sellSignal) activeKeys[s.symbol + "|" + s.sellSignal] = true; });
         Object.keys(notified).forEach(function(k) { if (!activeKeys[k]) delete notified[k]; });
-        // Notify for new signals not yet seen
+        // Toast new signals not yet seen
         swingTrades.forEach(function(s) {
           if (!s.sellSignal) return;
           var key = s.symbol + "|" + s.sellSignal;
           if (notified[key]) return;
           notified[key] = Date.now();
           var pct = (s.netProfitPct !== undefined ? (s.netProfitPct >= 0 ? "+" : "") + s.netProfitPct.toFixed(2) + "%" : "");
-          try {
-            new Notification("Torn Stock Signal", {
-              body: s.symbol + " — " + s.sellSignal + (pct ? " (" + pct + ")" : ""),
-              icon: "https://www.torn.com/favicon.ico"
-            });
-          } catch(e) {
-            showToast(s.symbol + " — " + s.sellSignal + (pct ? " (" + pct + ")" : ""), "warn");
-          }
+          showToast(s.symbol + " — " + s.sellSignal + (pct ? " (" + pct + ")" : ""), "warn");
         });
         lsSet("tsa_notified_signals", JSON.stringify(notified));
       })();
@@ -4631,7 +4612,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     });
 
     document.getElementById("tsa-alerts-btn").addEventListener("click", function() {
-      requestNotificationPermission();
       var content = document.getElementById("tsa-content");
       var isDarkNow = overlay.classList.contains("tsa-dark");
       var bg2 = isDarkNow ? "#1a1a2e" : "#f7f9fc";
