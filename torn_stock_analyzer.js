@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.40
+// @version      2.15.41
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2538,6 +2538,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       }
 
       // Chart button in detail panel
+      // Only the user's single click is propagated to Torn's UI (priceTab.click).
+      // We do NOT auto-switch to weekly view — that was a second script-initiated
+      // request not directly triggered by the user, which violates Torn's
+      // scripting policy. User can manually pick a timeframe in Torn's UI.
       document.querySelectorAll(".tsa-goto-chart").forEach(function(btn) {
         btn.addEventListener("click", function(e) {
           e.stopPropagation();
@@ -2555,19 +2559,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             if (!priceTab) continue;
             priceTab.scrollIntoView({ behavior: "smooth", block: "center" });
             priceTab.click();
-            var stockSection = nameTab.parentElement && nameTab.parentElement.parentElement;
-            if (stockSection) {
-              var obs = new MutationObserver(function() {
-                var weekTab = stockSection.querySelector("[data-name='Last week']");
-                if (weekTab) {
-                  obs.disconnect();
-                  var weekInput = weekTab.querySelector("input[type='radio']");
-                  (weekInput || weekTab).click();
-                }
-              });
-              obs.observe(stockSection, { childList: true, subtree: true, attributes: true });
-              setTimeout(function() { obs.disconnect(); }, 2000);
-            }
             return;
           }
         });
