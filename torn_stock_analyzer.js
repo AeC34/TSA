@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.15.41
+// @version      2.16.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -10,6 +10,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      tornsy.com
 // @connect      api.torn.com
+// @connect      www.torn.com
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js
 // @updateURL    https://greasyfork.org/scripts/570460/code/Torn%20Stock%20Analyzer.meta.js
 // @downloadURL  https://greasyfork.org/scripts/570460/code/Torn%20Stock%20Analyzer.user.js
@@ -2913,7 +2914,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     "PTS","SYM","SYS","TCC","TCI","TCM","TCP","TCT","TGP","THS",
     "TMI","TSB","WLT","WSU","YAZ"];
 
-  var qt_stocks = {}, qt_stockRows = {}, qt_localShareCache = {};
+  var qt_stocks = {}, qt_stockRows = {}, qt_stockId = {}, qt_localShareCache = {};
   var qtPendingTrade = null;
 
   function qtBuildMaps() {
@@ -2921,6 +2922,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var sym = $("img", $(this)).attr("src").split("logos/")[1].split(".svg")[0];
       qt_stocks[sym] = $("div[class^='price_']", $(this));
       qt_stockRows[sym] = $(this);
+      qt_stockId[sym] = $(this).attr("id"); // used by qtPostTrade
     });
   }
 
@@ -2981,577 +2983,77 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return { tier: tier, next: (Math.pow(2, tier + 1) - 1) * data };
   }
 
-  // Trades go through Torn's own UI: open the Owned tab, set the share count
-  // via the input's React fiber onChange, then click the form's submit button
-  // via its fiber onClick. The first click advances Torn's UI to the
-  // "Confirm Transaction" step; the second click executes the trade. The
-  // userscript makes zero non-API HTTP requests — Torn's own React handlers
-  // are what contact api.torn.com.
+  // Trades are submitted directly via POST to Torn's stock-market endpoint,
+  // exactly one HTTP request per user-initiated tap-2. The two-tap state
+  // machine below preserves the "1 user click = 1 trade action" rule:
+  //   Tap 1 → arm pending state. No network request.
+  //   Tap 2 → fire one POST. One user action, one server request.
+  //
+  // Endpoint (verified against three independent public scripts):
+  //   POST https://www.torn.com/page.php?sid=StockMarket
+  //        &step=buyShares|sellShares
+  //        &rfcv=<token from rfc_v cookie>
+  //   Headers: Content-Type=application/x-www-form-urlencoded,
+  //            X-Requested-With=XMLHttpRequest
+  //   Body:    stockId=<DOM id from <ul class="stock_*">>&amount=<shares>
+  //   Response: JSON { success: true } / { success: false, message|text }
+  //
+  // GM_xmlhttpRequest auto-attaches cookies (incl. PHPSESSID), so the user's
+  // session authenticates the call. @connect www.torn.com is set in the
+  // userscript header to allow this.
 
-  function qtFindFiberProp(el, propName) {
-    var fiberKey = Object.keys(el).find(function(k) { return k.indexOf("__reactFiber") === 0; });
-    if (!fiberKey) return null;
-    var f = el[fiberKey];
-    while (f) {
-      if (f.memoizedProps && typeof f.memoizedProps[propName] === "function") {
-        return f.memoizedProps[propName];
-      }
-      f = f.return;
-    }
-    return null;
+  function qtGetRfc() {
+    var m = document.cookie.match(/(?:^|;\s*)rfc_v=([^;]+)/);
+    return m ? m[1] : "";
   }
 
-  function qtWaitForElement(parent, selector, timeoutMs) {
+  function qtPostTrade(stockId, shares, action) {
     return new Promise(function(resolve) {
-      var existing = parent.querySelector(selector);
-      if (existing) return resolve(existing);
-      var obs = new MutationObserver(function() {
-        var el = parent.querySelector(selector);
-        if (el) { obs.disconnect(); resolve(el); }
-      });
-      obs.observe(parent, { childList: true, subtree: true });
-      setTimeout(function() { obs.disconnect(); resolve(null); }, timeoutMs);
-    });
-  }
-
-  // Event-driven wait — resolves as soon as `predicate()` returns truthy after
-  // any DOM mutation under `observeRoot`. Resolves true on success, false on
-  // timeout. If predicate is already true at call time, resolves immediately.
-  // Reacts as fast as Torn's UI is ready, no slower and no faster — replaces
-  // any fixed-delay wait pattern.
-  function qtWaitForCondition(observeRoot, predicate, maxMs) {
-    return new Promise(function(resolve) {
-      if (predicate()) return resolve(true);
-      var done = false;
-      var t;
-      var obs;
-      var finish = function(val) {
-        if (done) return;
-        done = true;
-        try { if (obs) obs.disconnect(); } catch(e) {}
-        try { clearTimeout(t); } catch(e) {}
-        resolve(val);
-      };
-      obs = new MutationObserver(function() {
-        if (predicate()) finish(true);
-      });
-      obs.observe(observeRoot, { childList: true, subtree: true, attributes: true, characterData: true });
-      t = setTimeout(function() { finish(predicate()); }, maxMs);
-    });
-  }
-
-  // Resolves true on the first DOM mutation under `observeRoot`, or false on
-  // timeout. Used to wait for any React re-render after a state-change call.
-  function qtWaitForAnyMutation(observeRoot, maxMs) {
-    return new Promise(function(resolve) {
-      var done = false;
-      var t;
-      var obs;
-      var finish = function(val) {
-        if (done) return;
-        done = true;
-        try { if (obs) obs.disconnect(); } catch(e) {}
-        try { clearTimeout(t); } catch(e) {}
-        resolve(val);
-      };
-      obs = new MutationObserver(function() { finish(true); });
-      obs.observe(observeRoot, { childList: true, subtree: true, attributes: true, characterData: true });
-      t = setTimeout(function() { finish(false); }, maxMs);
-    });
-  }
-
-  // After a successful trade, Torn shows a "transaction complete" view with a
-  // back button (text "Back", class "torn-btn gray" with no per-build hash).
-  // Auto-click it so the next swing-tx Block sell can prepare a fresh form
-  // without manual intervention.
-  async function qtClickPostTradeBack() {
-    var root = document.getElementById('stockmarketroot') || document.body;
-    var backBtn = await new Promise(function(resolve) {
-      var done = false;
-      var t;
-      var obs;
-      var find = function() {
-        var btns = root.querySelectorAll('button');
-        for (var i = 0; i < btns.length; i++) {
-          if (/^back$/i.test((btns[i].textContent || "").trim())) return btns[i];
-        }
-        return null;
-      };
-      var initial = find();
-      if (initial) return resolve(initial);
-      t = setTimeout(function() { if (!done) { done = true; obs.disconnect(); resolve(null); } }, 2000);
-      obs = new MutationObserver(function() {
-        if (done) return;
-        var b = find();
-        if (b) { done = true; clearTimeout(t); obs.disconnect(); resolve(b); }
-      });
-      obs.observe(root, { childList: true, subtree: true, characterData: true });
-    });
-    if (!backBtn) return false;
-    var fiberClick = qtFindFiberProp(backBtn, "onClick");
-    try {
-      if (fiberClick) fiberClick();
-      else backBtn.click();
-      return true;
-    } catch(e) {
-      try { backBtn.click(); return true; } catch { return false; }
-    }
-  }
-
-  // Step 1: scroll, open Owned tab, set value via fiber.onChange, click submit
-  // via fiber.onClick to advance to the "Confirm Transaction" step.
-  async function qtUiPrepare(pending) {
-    var symb = pending.symb;
-    var shareCount = pending.shareCount;
-    var action = pending.action;
-
-    qtBuildMaps();
-    var card$ = qt_stockRows[symb];
-    if (!card$ || !card$[0]) { showToast("Stock card not found for " + symb, "error"); return false; }
-    var cardEl = card$[0];
-
-    cardEl.scrollIntoView({ behavior: "smooth", block: "center" });
-
-    var ownedTab = cardEl.querySelector('[data-name="ownedTab"]');
-    if (!ownedTab) { showToast("Owned tab not found for " + symb, "error"); return false; }
-    if (!/active___/.test(ownedTab.className)) {
-      ownedTab.click();
-    }
-
-    var sideClass = action === "buyShares" ? "buyBlock___" : "sellBlock___";
-    var verbClass = action === "buyShares" ? "buy___"      : "sell___";
-
-    var form = await qtWaitForElement(document.body, '[class*="' + sideClass + '"] [class*="manageBlock___"]', 2000);
-    if (!form) { showToast("Trade form did not open for " + symb, "error"); return false; }
-
-    // Wait for the input — after a previous trade, the form briefly stays in
-    // "Confirm Transaction" state (no input) before resetting. A MutationObserver
-    // catches the moment the input mounts back, instead of erroring instantly.
-    var inp = await qtWaitForElement(form, 'input[data-testid="legacy-money-input"]:not([type="hidden"])', 3000);
-    if (!inp) { showToast("Trade input not found", "error"); return false; }
-
-    // Verify the form is in input view, not stuck on Confirm Transaction from
-    // a previous trade whose post-trade Back-click silently failed. Same class
-    // (sell___/buy___) lives on both states; the differentiator is button text:
-    // "sell"/"buy" in input view, "Confirm Transaction" in confirm view. If
-    // stuck, attempt a self-heal Back-click once before aborting.
-    var verbBtnReady = function() {
-      var b = form.querySelector('[class*="' + verbClass + '"]');
-      if (!b) return false;
-      var txt = (b.textContent || "").trim().toLowerCase();
-      return !!txt && !/confirm/.test(txt);
-    };
-    if (!verbBtnReady()) {
-      await qtClickPostTradeBack();
-      var recovered = await qtWaitForCondition(form, verbBtnReady, 1500);
-      if (!recovered) {
-        showToast("Trade form stuck on Confirm — click Torn's Back, then retry " + symb, "error");
-        return false;
-      }
-      // Re-resolve the input — the previous reference belongs to the stale render.
-      inp = await qtWaitForElement(form, 'input[data-testid="legacy-money-input"]:not([type="hidden"])', 1500);
-      if (!inp) { showToast("Trade input not found after recovery", "error"); return false; }
-    }
-
-    var onChange = qtFindFiberProp(inp, "onChange");
-    if (!onChange) { showToast("Trade input handler not found — Torn UI changed?", "error"); return false; }
-
-    var sStr = String(shareCount);
-    var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-
-    // Apply our share count to the input via three React state paths:
-    //  1. fiber.onChange — updates the controlled state (rendered value).
-    //  2. native value setter — flips React's "user-typed" tracker so the
-    //     submit handler reads our value, not the form's pre-fill.
-    //  3. bubbled "input" event — same path React uses on real keystrokes.
-    // Re-queries the input + fiber every call so a Torn re-mount doesn't
-    // leave us writing to a detached element. No-op when value already
-    // matches sStr (the polling loop below relies on this no-op behaviour).
-    var applyValueOnce = function() {
-      var live = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
-      if (!live) return;
-      if ((live.value || "").replace(/,/g, "") === sStr) return;
+      var rfc = qtGetRfc();
+      if (!rfc) { resolve({ success: false, message: "Missing rfc_v cookie — reload the page and try again" }); return; }
+      if (!stockId) { resolve({ success: false, message: "Missing stockId — DOM not yet built" }); return; }
+      var url = "https://www.torn.com/page.php?sid=StockMarket" +
+                "&step=" + encodeURIComponent(action) +
+                "&rfcv=" + encodeURIComponent(rfc);
+      var body = "stockId=" + encodeURIComponent(stockId) +
+                 "&amount=" + encodeURIComponent(shares);
       try {
-        var freshOnChange = qtFindFiberProp(live, "onChange");
-        if (freshOnChange) freshOnChange({ error: false, value: sStr });
-      } catch(e) {}
-      try {
-        nativeSetter.call(live, sStr);
-        live.dispatchEvent(new Event("input", { bubbles: true }));
-      } catch(e) {}
-    };
-
-    // Initial apply (paths 1 + 2/3 inline so we can surface a clear error
-    // toast if onChange itself throws).
-    try {
-      onChange({ error: false, value: sStr });
-    } catch(e) {
-      showToast("Trade input rejected: " + e.message, "error");
-      return false;
-    }
-    try {
-      var liveInpForSet = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
-      if (liveInpForSet) {
-        nativeSetter.call(liveInpForSet, sStr);
-        liveInpForSet.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-    } catch(e) {}
-
-    // Defensive re-apply loop. After a successful sell + post-trade Back,
-    // Torn re-mounts the form and pre-fills the input with the user's new
-    // max-owned (remaining shares after the sale). Our initial set runs
-    // in the same tick, but Torn's pre-fill effect can race in afterward
-    // and silently overwrite our value back to max-owned. Without this
-    // loop the second block-tap "looks" correct but submit ships max.
-    // Polling at 50 ms re-applies sStr whenever the input drifts; the
-    // helper no-ops when the value already matches, so the cost is one
-    // querySelector per tick. The interval is stopped synchronously right
-    // before stepClick — Torn cannot intervene between clearInterval and
-    // the click since neither yields control.
-    var reApplyTimer = setInterval(applyValueOnce, 50);
-    var stopReApply = function() {
-      if (reApplyTimer) { clearInterval(reApplyTimer); reApplyTimer = null; }
-    };
-
-    // Event-driven: proceed as soon as the input reflects the target value
-    // (compare with commas stripped — Torn formats the rendered value with
-    // thousands separators). Re-query the LIVE input each tick — the captured
-    // `inp` may be stale if Torn re-mounted the input after a previous trade,
-    // and Torn submits based on the LIVE element's React state, not the
-    // detached one. If the live value never reaches sStr, ABORT.
-    var liveInputValueOk = function() {
-      var live = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
-      return !!live && live.value.replace(/,/g, "") === sStr;
-    };
-    var valueTook = await qtWaitForCondition(form, liveInputValueOk, 2000);
-    if (!valueTook) {
-      stopReApply();
-      var liveNow = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
-      showToast("Trade input did not accept " + sStr + " for " + symb +
-                " (live=\"" + (liveNow ? liveNow.value : "null") + "\") — click Torn's Back, then retry", "error");
-      return false;
-    }
-
-    var stepBtn = form.querySelector('[class*="' + verbClass + '"]');
-    if (!stepBtn) { stopReApply(); showToast("Submit button not found", "error"); return false; }
-    var stepClick = qtFindFiberProp(stepBtn, "onClick");
-    if (!stepClick) { stopReApply(); showToast("Submit handler not found — Torn UI changed?", "error"); return false; }
-
-    // Final pre-submit guard: re-verify the LIVE input value RIGHT before
-    // clicking Sell. With the polling re-apply running this should rarely
-    // fail, but kept as defense-in-depth — if the polling ever lost a
-    // race against an aggressive Torn re-render, this catches it before
-    // we enter Confirm view (no money at risk yet).
-    if (!liveInputValueOk()) {
-      stopReApply();
-      var liveAtSubmit = form.querySelector('input[data-testid="legacy-money-input"]:not([type="hidden"])');
-      showToast("Trade input drifted before Sell click for " + symb +
-                " (live=\"" + (liveAtSubmit ? liveAtSubmit.value : "null") +
-                "\", expected=\"" + sStr + "\") — click Torn's Back, then retry", "error");
-      return false;
-    }
-
-    // Block-sell oversell guard: when called from a swing-trade row, pending
-    // carries `blockMaxShares` (the row's exact block size). The visible input
-    // can read sStr while React's submit state still holds the form's pre-fill
-    // (max owned). Torn renders a hidden mirror input that tracks React state,
-    // so a hidden value > blockMaxShares means submit would ship more than the
-    // block. Abort before stepClick — at this point we have not yet entered
-    // Confirm view, so no money is at risk. Fail-closed: any inability to
-    // positively verify the mirror is treated as an abort, not a pass.
-    if (pending.blockMaxShares != null) {
-      var liveHidden = form.querySelector('input[data-testid="legacy-money-input"][type="hidden"]');
-      if (!liveHidden) {
-        stopReApply();
-        showToast("Block sell aborted: form mirror not found for " + symb +
-                  " — cannot verify submit value. Click Torn's Back, then retry.", "error");
-        return false;
-      }
-      var hiddenRaw = (liveHidden.value || "").replace(/,/g, "");
-      var hiddenNum = parseInt(hiddenRaw, 10);
-      if (!isFinite(hiddenNum)) {
-        stopReApply();
-        showToast("Block sell aborted: form mirror unreadable (live=\"" + (liveHidden.value || "") +
-                  "\") for " + symb + ". Click Torn's Back, then retry.", "error");
-        return false;
-      }
-      if (hiddenNum > pending.blockMaxShares) {
-        stopReApply();
-        showToast("Block sell aborted: form mirror=" + hiddenNum.toLocaleString("en-US") +
-                  " > block max=" + pending.blockMaxShares.toLocaleString("en-US") +
-                  ". Click Torn's Back, then retry.", "error");
-        return false;
-      }
-    }
-
-    // Snapshot live owned-share count BEFORE clicking. If Torn has the
-    // confirmation prompt disabled (or otherwise fires the trade in a single
-    // step), the Confirm Transaction button never appears — but the share
-    // count changes. We use the count delta as a fallback success signal.
-    var preTradeOwned = qtGetOwnedShares(symb, true);
-
-    // Last synchronous sequence: re-apply the value one final time, stop
-    // the polling, and click. No await between these statements — Torn
-    // cannot pre-fill the input again before stepClick reads it.
-    applyValueOnce();
-    stopReApply();
-
-    // Call with no args — matches the working console call pattern. Passing a
-    // synthetic event arg interfered with sell-side state advancement.
-    try {
-      stepClick();
-    } catch(e) {
-      showToast("Advance to confirm failed: " + e.message, "error");
-      return false;
-    }
-
-    // Wait for either:
-    //   "confirm" — Confirm Transaction button appears (two-step flow, normal),
-    //   "fired"   — owned shares changed by the FULL shareCount in the expected
-    //               direction (one-step flow only, e.g. Torn confirmation
-    //               prompt disabled). Require the full delta so a UI quirk
-    //               that nudges the displayed count by 1–2 shares can't
-    //               false-positive and steal the "Tap again to fire" prompt.
-    //   null      — neither happens within 5s (real failure).
-    var stockRoot = document.getElementById('stockmarketroot') || document.body;
-    var resolution = await new Promise(function(resolve) {
-      var done = false;
-      var t = setTimeout(function() { if (!done) { done = true; obs.disconnect(); resolve(null); } }, 5000);
-      var check = function() {
-        if (done) return;
-        var btns = form.querySelectorAll("button");
-        for (var i = 0; i < btns.length; i++) {
-          if (/confirm/i.test(btns[i].textContent)) {
-            done = true; clearTimeout(t); obs.disconnect(); resolve("confirm"); return;
-          }
-        }
-        var post = qtGetOwnedShares(symb, true);
-        var fired = action === "buyShares"
-          ? post >= preTradeOwned + shareCount
-          : post <= preTradeOwned - shareCount;
-        if (fired) {
-          done = true; clearTimeout(t); obs.disconnect(); resolve("fired");
-        }
-      };
-      var obs = new MutationObserver(check);
-      obs.observe(stockRoot, { childList: true, subtree: true, characterData: true });
-      check(); // initial
-    });
-
-    if (resolution === "fired") {
-      // Trade completed in one tap — sync local cache, success toast, no
-      // pending second tap needed. Return the "fired" sentinel so qtUiTrade
-      // can tell its caller the trade actually happened (vs a real failure).
-      qtUpdateLocalCache(symb, action === "buyShares" ? shareCount : -shareCount);
-      showToast(pending.label, "success");
-      qtClickPostTradeBack(); // fire-and-forget; reset form for the next sell
-      return "fired";
-    }
-    if (!resolution) {
-      showToast("Confirm Transaction did not appear (amount invalid?)", "error");
-      return false;
-    }
-    return true;
-  }
-
-  // Step 2: re-find the Confirm Transaction button (the actions area gets
-  // replaced when transitioning, so the prepare-time reference is stale) and
-  // fire its fiber onClick to execute the trade.
-  async function qtUiExecute(pending) {
-    var symb = pending.symb;
-    var shareCount = pending.shareCount;
-    var action = pending.action;
-    var label = pending.label;
-    var blockMaxShares = pending.blockMaxShares;
-
-    var sideClass = action === "buyShares" ? "buyBlock___" : "sellBlock___";
-    var form = document.querySelector('[class*="' + sideClass + '"] [class*="manageBlock___"]');
-    if (!form) { showToast("Trade form closed — restart trade", "error"); return false; }
-
-    // Block-sell post-fire detection: snapshot owned shares before clicking
-    // Confirm so we can flag an oversell after the fact. This is the
-    // last-line backstop if the pre-Sell-click guard in qtUiPrepare somehow
-    // missed (e.g. hidden mirror was in sync at prepare time but React state
-    // regressed between prepare and confirm). Only relevant for swing-block
-    // sells where blockMaxShares is set.
-    var preConfirmOwned = (blockMaxShares != null && action === "sellShares")
-      ? qtGetOwnedShares(symb, true)
-      : null;
-
-    var btns = form.querySelectorAll("button");
-    var confirmBtn = null;
-    for (var i = 0; i < btns.length; i++) {
-      if (/confirm/i.test(btns[i].textContent)) { confirmBtn = btns[i]; break; }
-    }
-    if (!confirmBtn) { showToast("Confirm Transaction not visible — restart trade", "error"); return false; }
-
-    var finalClick = qtFindFiberProp(confirmBtn, "onClick");
-    if (!finalClick) { showToast("Confirm handler not found", "error"); return false; }
-
-    if (action === "buyShares") {
-      var intentPrice = qtGetPrice(symb);
-      if (intentPrice > 0) {
-        lsSet("qt_intent_" + symb, JSON.stringify({ price: intentPrice, ts: Math.floor(Date.now() / 1000) }));
-      }
-    }
-
-    // Helper: is Confirm Transaction still visible? If not, trade fired.
-    var stillStuck = function() {
-      var f = document.querySelector('[class*="' + sideClass + '"] [class*="manageBlock___"]');
-      if (!f) return false;
-      var bs = f.querySelectorAll("button");
-      for (var i = 0; i < bs.length; i++) {
-        if (/confirm/i.test(bs[i].textContent)) return true;
-      }
-      return false;
-    };
-
-    // Re-find confirm button right before clicking — handler closures depend
-    // on the latest render's state.
-    var refind = function() {
-      var f = document.querySelector('[class*="' + sideClass + '"] [class*="manageBlock___"]');
-      if (!f) return null;
-      var bs = f.querySelectorAll("button");
-      for (var i = 0; i < bs.length; i++) {
-        if (/confirm/i.test(bs[i].textContent)) return bs[i];
-      }
-      return null;
-    };
-
-    var stockRoot = document.getElementById('stockmarketroot') || document.body;
-    var notStuck = function() { return !stillStuck(); };
-
-    // Each method waits via MutationObserver — exits as soon as the form
-    // transitions away from Confirm Transaction (trade fired) OR after 3s
-    // of no relevant change (try next method). No fixed sleeps.
-
-    // Method 1: fiber.onClick (proven to work for sells when called from a
-    // post-real-interaction state).
-    try { finalClick(); } catch(e) {}
-    await qtWaitForCondition(stockRoot, notStuck, 3000);
-
-    // Method 2: DOM .click() on the (re-found) confirm button.
-    if (stillStuck()) {
-      var b2 = refind();
-      if (b2) try { b2.click(); } catch(e) {}
-      await qtWaitForCondition(stockRoot, notStuck, 3000);
-    }
-
-    // Method 3: Full PointerEvent + MouseEvent sequence on a fresh button.
-    if (stillStuck()) {
-      var b3 = refind();
-      if (b3) {
-        try {
-          b3.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window, button: 0, isPrimary: true }));
-          b3.dispatchEvent(new MouseEvent('mousedown',     { bubbles: true, cancelable: true, view: window, button: 0 }));
-          b3.dispatchEvent(new PointerEvent('pointerup',   { bubbles: true, cancelable: true, view: window, button: 0, isPrimary: true }));
-          b3.dispatchEvent(new MouseEvent('mouseup',       { bubbles: true, cancelable: true, view: window, button: 0 }));
-          b3.dispatchEvent(new MouseEvent('click',         { bubbles: true, cancelable: true, view: window, button: 0 }));
-        } catch(e) {}
-      }
-      await qtWaitForCondition(stockRoot, notStuck, 3000);
-    }
-
-    // Method 4: Re-find fiber.onClick on the now-current button.
-    if (stillStuck()) {
-      var b4 = refind();
-      if (b4) {
-        var freshFiberClick = qtFindFiberProp(b4, "onClick");
-        if (freshFiberClick) try { freshFiberClick(); } catch(e) {}
-      }
-      await qtWaitForCondition(stockRoot, notStuck, 3000);
-    }
-
-    // Method 5: focus + Enter keypress.
-    if (stillStuck()) {
-      var b5 = refind();
-      if (b5) {
-        try { b5.focus(); } catch(e) {}
-        try {
-          var ek = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-          b5.dispatchEvent(new KeyboardEvent('keydown',  ek));
-          b5.dispatchEvent(new KeyboardEvent('keypress', ek));
-          b5.dispatchEvent(new KeyboardEvent('keyup',    ek));
-        } catch(e) {}
-      }
-      await qtWaitForCondition(stockRoot, notStuck, 3000);
-    }
-
-    // Method 6: focus + DOM .click() on a freshly-focused button.
-    if (stillStuck()) {
-      var b6 = refind();
-      if (b6) {
-        try { b6.focus(); } catch(e) {}
-        try { b6.click(); } catch(e) {}
-      }
-      await qtWaitForCondition(stockRoot, notStuck, 3000);
-    }
-
-    // Method 7: walk React fiber state hooks and force boolean state to true,
-    // wait for the resulting re-render, then call onClick on the fresh button.
-    if (stillStuck()) {
-      var b7 = refind();
-      if (b7) {
-        try {
-          var fk = Object.keys(b7).find(function(k){return k.indexOf("__reactFiber")===0;});
-          var f7 = b7[fk];
-          while (f7) {
-            var hook = f7.memoizedState;
-            while (hook) {
-              if (typeof hook.memoizedState === 'boolean' && hook.queue && typeof hook.queue.dispatch === 'function') {
-                try { hook.queue.dispatch(true); } catch(e) {}
-              }
-              hook = hook.next;
+        GM_xmlhttpRequest({
+          method: "POST",
+          url: url,
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest"
+          },
+          data: body,
+          timeout: 15000,
+          onload: function(resp) {
+            var text = (resp && resp.responseText) || "";
+            var data;
+            try { data = JSON.parse(text); }
+            catch(e) {
+              // Some Torn paths wrap JSON in a string; try once more.
+              try { data = JSON.parse(JSON.parse(text)); }
+              catch(_) { resolve({ success: false, message: "Unparseable response: " + text.slice(0, 200) }); return; }
             }
-            f7 = f7.return;
-          }
-        } catch(e) {}
-        // Wait for the dispatched state changes to commit before re-finding & clicking.
-        await qtWaitForAnyMutation(stockRoot, 500);
-        var freshFiberClick7 = qtFindFiberProp(refind() || b7, "onClick");
-        if (freshFiberClick7) try { freshFiberClick7(); } catch(e) {}
+            resolve(data);
+          },
+          onerror: function() { resolve({ success: false, message: "Network error" }); },
+          ontimeout: function() { resolve({ success: false, message: "Request timed out" }); }
+        });
+      } catch(e) {
+        resolve({ success: false, message: "POST failed to dispatch: " + e.message });
       }
-      await qtWaitForCondition(stockRoot, notStuck, 3000);
-    }
-
-    if (stillStuck()) {
-      showToast("Auto-fire didn't take — tap Torn's 'Confirm Transaction' to complete: " + label, "warn");
-      return false;
-    }
-
-    // Block-sell oversell detection: if a swing-block sell shipped more
-    // shares than the block max, scream loudly so the user can react.
-    // Tolerance of 1 share to absorb DOM-rounding noise.
-    if (preConfirmOwned !== null) {
-      var postConfirmOwned = qtGetOwnedShares(symb, true);
-      var actualSold = preConfirmOwned - postConfirmOwned;
-      if (actualSold > blockMaxShares + 1) {
-        showToast("⚠ OVERSOLD " + symb + ": shipped " + actualSold.toLocaleString("en-US") +
-                  " shares but block max was " + blockMaxShares.toLocaleString("en-US") +
-                  ". Buy back if needed.", "error");
-      }
-    }
-
-    qtUpdateLocalCache(symb, action === "buyShares" ? shareCount : -shareCount);
-    showToast(label, "success");
-    qtClickPostTradeBack(); // fire-and-forget; reset form for the next sell
-
-    var execBtn = document.getElementById("qt-exec");
-    if (execBtn) {
-      execBtn.textContent = "✓ " + label;
-      setTimeout(function() { qtUpdateExec(); }, 3000);
-    }
-
-    return true;
+    });
   }
 
-  // Public entry. Two-tap to comply with Torn's "1 user click = 1 action" rule:
-  //   Tap 1 → qtUiPrepare (open Owned tab, set value, advance to Confirm
-  //           Transaction state). One initiation, one preparation action.
-  //   Tap 2 → qtUiExecute (fire Confirm Transaction). Second initiation,
-  //           one trade-firing action.
-  // Returns true if the trade was actually fired (tap 2 success), false on
-  // tap 1 prepare or any failure — callers can use this to remove the row /
+  // Public entry. Two-tap to comply with Torn's "1 user click = 1 action":
+  //   Tap 1 → arm pending state. ZERO HTTP requests — just stage and toast.
+  //   Tap 2 → match by `key + shareCount`; on match, qtFireTrade dispatches
+  //           one POST to Torn's stock-market endpoint. One user click, one
+  //           request.
+  // Returns true only on tap-2 success (trade fired). False on tap-1 arm,
+  // invalid input, or any failure — callers use this to remove rows /
   // re-render after a successful trade.
   async function qtUiTrade(symb, shares, action, label, options) {
     if (!shares || !isFinite(shares) || shares < 1) {
@@ -3559,30 +3061,88 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return false;
     }
     var key = symb + "|" + action;
+    var blockMaxShares = options && options.blockMaxShares;
 
-    // Two-tap match: same key AND same shareCount. If shares differ, the user
-    // is re-aiming — fall through to a fresh prepare with the new amount. No
-    // time expiry: pending lives until fired, overwritten, or page reload.
+    // Tap 2: same key AND same shareCount → fire. Mismatched shares re-arm
+    // as tap 1 (user is re-aiming with a new amount). No time expiry.
     if (qtPendingTrade && qtPendingTrade.key === key && qtPendingTrade.shareCount === shares) {
       var p = qtPendingTrade;
       qtPendingTrade = null;
-      return await qtUiExecute({ symb: p.symb, shareCount: p.shareCount, action: p.action, label: p.label, blockMaxShares: p.blockMaxShares });
+      return await qtFireTrade(p);
     }
 
-    qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label, blockMaxShares: options && options.blockMaxShares };
-    var prepared = await qtUiPrepare(qtPendingTrade);
-    if (prepared === "fired") {
-      // One-step Torn config: trade already completed inside qtUiPrepare.
-      // Tell the caller so it can clean up (e.g. remove a swing-tx row).
-      qtPendingTrade = null;
-      return true;
-    }
-    if (prepared === true) {
-      showToast("Tap again to fire: " + label, "warn");
-    } else {
-      qtPendingTrade = null;
-    }
+    // Tap 1: arm. No HTTP request, no DOM side-effect — toast tells the user
+    // to tap again to actually fire the trade.
+    qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label, blockMaxShares: blockMaxShares };
+    showToast("Tap again to fire: " + label, "warn");
     return false;
+  }
+
+  // Fires exactly one POST to Torn's stock endpoint. Only called from the
+  // tap-2 path of qtUiTrade, so the request is directly user-initiated.
+  async function qtFireTrade(pending) {
+    var symb = pending.symb;
+    var shares = pending.shareCount;
+    var action = pending.action;
+    var label = pending.label;
+    var blockMaxShares = pending.blockMaxShares;
+
+    // Defense-in-depth: refresh DOM maps so qt_stockId is populated even if
+    // qtBuildMaps hasn't run since the page loaded.
+    qtBuildMaps();
+    var stockId = qt_stockId[symb];
+    if (!stockId) { showToast("Stock card not found for " + symb + " — reload the page", "error"); return false; }
+
+    // Block-sell guard: cheap pre-flight. The share count we send IS what
+    // gets traded — no DOM mirror to drift against, so a single comparison
+    // is sufficient. (Replaces the multi-stage mirror-verification dance
+    // the old DOM-clicking path needed.)
+    if (blockMaxShares != null && shares > blockMaxShares) {
+      showToast("Block sell aborted: requested " + shares.toLocaleString("en-US") +
+                " > block max " + blockMaxShares.toLocaleString("en-US"), "error");
+      return false;
+    }
+
+    // Capture the live price BEFORE the POST — Torn may have shifted by the
+    // time the response comes back, so we snapshot the price the user
+    // actually clicked at. Persisted only on success (see below) to avoid
+    // leaving a stale intent for a failed buy, which would spuriously
+    // trigger the slippage detector against the user's existing position.
+    var intentPrice = null;
+    if (action === "buyShares") {
+      var p = qtGetPrice(symb);
+      if (p > 0) intentPrice = p;
+    }
+
+    var resp = await qtPostTrade(stockId, shares, action);
+
+    // First 3 responses go to console.log so a fresh install can verify the
+    // response shape matches what we coded against. Self-disables after 3.
+    // (Remove localStorage key `tsa_post_logged_count` to re-arm.)
+    var logged = parseInt(lsGet("tsa_post_logged_count", "0"), 10) || 0;
+    if (logged < 3) {
+      try { console.log("[TSA] POST response #" + (logged + 1), resp); } catch(e) {}
+      lsSet("tsa_post_logged_count", String(logged + 1));
+    }
+
+    if (!resp || !resp.success) {
+      var rawMsg = (resp && (resp.message || resp.text)) || "unknown error";
+      showToast("Trade failed: " + rawMsg, "error");
+      return false;
+    }
+
+    if (intentPrice !== null) {
+      lsSet("qt_intent_" + symb, JSON.stringify({ price: intentPrice, ts: Math.floor(Date.now() / 1000) }));
+    }
+    qtUpdateLocalCache(symb, action === "buyShares" ? shares : -shares);
+    showToast(label, "success");
+
+    var execBtn = document.getElementById("qt-exec");
+    if (execBtn) {
+      execBtn.textContent = "✓ " + label;
+      setTimeout(function() { qtUpdateExec(); }, 3000);
+    }
+    return true;
   }
 
   // ── TheALFA's exact vault() ──
