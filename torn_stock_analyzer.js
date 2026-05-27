@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.16.0
+// @version      2.16.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2642,18 +2642,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var fired = await qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")", { blockMaxShares: shares });
 
           if (fired) {
-            // Tap 2 success (or one-step Torn) — trade is done, drop the row.
+            // Trade succeeded — drop the row.
             clearSwingRowHighlight();
             var parent = row.parentNode;
             if (parent) parent.removeChild(row);
             return;
           }
-          // Tap 1: keep the armed visual ONLY if qtUiTrade actually queued the
-          // trade (qtPendingTrade still set). If prepare failed and pending was
-          // cleared, drop the armed visual so we don't lie about the state.
-          var key = sym + "|sellShares";
-          var stillPending = qtPendingTrade && qtPendingTrade.key === key && qtPendingTrade.shareCount === shares;
-          if (!stillPending && !wasArmedBefore) clearSwingRowHighlight();
+          // Trade failed — clear armed visual unless it was already armed before this click.
+          if (!wasArmedBefore) clearSwingRowHighlight();
         });
       });
 
@@ -2915,7 +2911,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     "TMI","TSB","WLT","WSU","YAZ"];
 
   var qt_stocks = {}, qt_stockRows = {}, qt_stockId = {}, qt_localShareCache = {};
-  var qtPendingTrade = null;
 
   function qtBuildMaps() {
     $("ul[class^='stock_']").each(function() {
@@ -2983,24 +2978,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return { tier: tier, next: (Math.pow(2, tier + 1) - 1) * data };
   }
 
-  // Trades are submitted directly via POST to Torn's stock-market endpoint,
-  // exactly one HTTP request per user-initiated tap-2. The two-tap state
-  // machine below preserves the "1 user click = 1 trade action" rule:
-  //   Tap 1 → arm pending state. No network request.
-  //   Tap 2 → fire one POST. One user action, one server request.
+  // Trades are submitted directly via POST to Torn's stock-market endpoint.
+  // One user click fires one POST — $.ajax runs same-origin so the browser
+  // attaches session cookies automatically.
   //
   // Endpoint (verified against three independent public scripts):
   //   POST https://www.torn.com/page.php?sid=StockMarket
   //        &step=buyShares|sellShares
   //        &rfcv=<token from rfc_v cookie>
-  //   Headers: Content-Type=application/x-www-form-urlencoded,
-  //            X-Requested-With=XMLHttpRequest
   //   Body:    stockId=<DOM id from <ul class="stock_*">>&amount=<shares>
   //   Response: JSON { success: true } / { success: false, message|text }
-  //
-  // GM_xmlhttpRequest auto-attaches cookies (incl. PHPSESSID), so the user's
-  // session authenticates the call. @connect www.torn.com is set in the
-  // userscript header to allow this.
 
   function qtGetRfc() {
     var m = document.cookie.match(/(?:^|;\s*)rfc_v=([^;]+)/);
@@ -3017,69 +3004,52 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
                 "&rfcv=" + encodeURIComponent(rfc);
       var body = "stockId=" + encodeURIComponent(stockId) +
                  "&amount=" + encodeURIComponent(shares);
-      try {
-        GM_xmlhttpRequest({
-          method: "POST",
-          url: url,
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "X-Requested-With": "XMLHttpRequest"
-          },
-          data: body,
-          timeout: 15000,
-          onload: function(resp) {
-            var text = (resp && resp.responseText) || "";
-            var data;
-            try { data = JSON.parse(text); }
+      // Use jQuery $.ajax (same-origin XHR from the page) rather than
+      // GM_xmlhttpRequest. The extension context doesn't carry session cookies
+      // reliably for torn.com, causing Torn to return the full HTML page.
+      // $.ajax matches how all reference scripts (Stock Manager & Advisor v7.6,
+      // Smart Stock Vault) make this call.
+      $.ajax({
+        type: "POST",
+        url: url,
+        data: body,
+        timeout: 15000,
+        success: function(data) {
+          if (typeof data === "string") {
+            try { data = JSON.parse(data); }
             catch(e) {
-              // Some Torn paths wrap JSON in a string; try once more.
-              try { data = JSON.parse(JSON.parse(text)); }
-              catch(_) { resolve({ success: false, message: "Unparseable response: " + text.slice(0, 200) }); return; }
+              try { data = JSON.parse(JSON.parse(data)); }
+              catch(_) { resolve({ success: false, message: "Unparseable response: " + data.slice(0, 200) }); return; }
             }
-            resolve(data);
-          },
-          onerror: function() { resolve({ success: false, message: "Network error" }); },
-          ontimeout: function() { resolve({ success: false, message: "Request timed out" }); }
-        });
-      } catch(e) {
-        resolve({ success: false, message: "POST failed to dispatch: " + e.message });
-      }
+          }
+          resolve(data);
+        },
+        error: function(jqXHR, textStatus) {
+          resolve({ success: false, message: textStatus === "timeout" ? "Request timed out" : "Network error: " + jqXHR.status });
+        }
+      });
     });
   }
 
-  // Public entry. Two-tap to comply with Torn's "1 user click = 1 action":
-  //   Tap 1 → arm pending state. ZERO HTTP requests — just stage and toast.
-  //   Tap 2 → match by `key + shareCount`; on match, qtFireTrade dispatches
-  //           one POST to Torn's stock-market endpoint. One user click, one
-  //           request.
-  // Returns true only on tap-2 success (trade fired). False on tap-1 arm,
-  // invalid input, or any failure — callers use this to remove rows /
-  // re-render after a successful trade.
+  // Public entry. One user click → one POST. Matches the pattern used by all
+  // three reference scripts (Stock Manager & Advisor, Smart Stock Vault,
+  // Smart Stock Vault Panic Navbar). Torn's rule requires that non-API
+  // requests be directly user-initiated, which a button-triggered POST is.
   async function qtUiTrade(symb, shares, action, label, options) {
     if (!shares || !isFinite(shares) || shares < 1) {
       showToast("Invalid share count for " + symb, "error");
       return false;
     }
-    var key = symb + "|" + action;
-    var blockMaxShares = options && options.blockMaxShares;
-
-    // Tap 2: same key AND same shareCount → fire. Mismatched shares re-arm
-    // as tap 1 (user is re-aiming with a new amount). No time expiry.
-    if (qtPendingTrade && qtPendingTrade.key === key && qtPendingTrade.shareCount === shares) {
-      var p = qtPendingTrade;
-      qtPendingTrade = null;
-      return await qtFireTrade(p);
-    }
-
-    // Tap 1: arm. No HTTP request, no DOM side-effect — toast tells the user
-    // to tap again to actually fire the trade.
-    qtPendingTrade = { key: key, symb: symb, shareCount: shares, action: action, label: label, blockMaxShares: blockMaxShares };
-    showToast("Tap again to fire: " + label, "warn");
-    return false;
+    return await qtFireTrade({
+      symb: symb,
+      shareCount: shares,
+      action: action,
+      label: label,
+      blockMaxShares: options && options.blockMaxShares
+    });
   }
 
-  // Fires exactly one POST to Torn's stock endpoint. Only called from the
-  // tap-2 path of qtUiTrade, so the request is directly user-initiated.
+  // Fires exactly one POST to Torn's stock endpoint per user click.
   async function qtFireTrade(pending) {
     var symb = pending.symb;
     var shares = pending.shareCount;
