@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.16.1
+// @version      2.17.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -680,12 +680,44 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return Math.ceil(needed / dailyIncome);
   }
 
+  // Full snowball roadmap: every real benefit tier across all payout stocks,
+  // ranked by payback (days for the block to earn back its own price). Cost
+  // uses live share price; income uses live item value when available, else the
+  // baked-in baseline payout. Owned tiers are flagged (kept as income, not
+  // re-bought). Incremental shares for a single tier n = 2^(n-1) * requirement.
+  function computeRoadmap(ownedMap, raw) {
+    var rows = [];
+    ROI_TABLE.forEach(function(entry) {
+      var req = BENEFIT_REQ[entry.sym];
+      if (!req) return;
+      var liveEntry = raw ? raw.find(function(x) { return x.stock === entry.sym; }) : null;
+      var livePrice = liveEntry ? (parseFloat(liveEntry.price) || 0) : 0;
+      if (livePrice <= 0) return;
+      var tierNum = parseInt(entry.tier.replace("T", ""), 10);
+      if (!tierNum) return;
+      var incShares = Math.pow(2, tierNum - 1) * req;
+      var cost = incShares * livePrice;
+      var itemVal = getItemValue(entry);
+      var perCycle = (entry.item && itemVal > 0) ? itemVal : entry.payout;
+      if (!perCycle || cost <= 0) return;
+      var dailyInc = perCycle / entry.freq;
+      var o = ownedMap[entry.sym];
+      rows.push({
+        sym: entry.sym, tier: entry.tier, tierNum: tierNum,
+        cost: cost, sharesNeeded: incShares, perCycle: perCycle, freq: entry.freq,
+        roi: perCycle / cost * (365 / entry.freq) * 100,
+        payback: dailyInc > 0 ? Math.round(cost / dailyInc) : Infinity,
+        owned: o ? (tierNum <= (o.dividend_increment || 0)) : false
+      });
+    });
+    rows.sort(function(a, b) { return a.payback - b.payback; });
+    return rows;
+  }
+
   function renderROIPlanner(ownedMap, raw, cashBalance, armoryFunds) {
-    if (!ownedMap || Object.keys(ownedMap).length === 0) {
-      return '<div style="padding:20px;text-align:center;color:#888;font-size:11px;line-height:1.5">' +
-             'No stocks owned yet.<br><br>' +
-             'Buy shares of a benefit stock to see ROI rankings here.</div>';
-    }
+    // From-zero support: planner works with no owned benefit blocks — capital
+    // comes from cash + armory, income starts at 0 and bootstraps via buys.
+    ownedMap = ownedMap || {};
     if (!armoryFunds) armoryFunds = 0;
     // Calculate swing capital
     var swingCapital = 0;
@@ -900,6 +932,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var shortBy = Math.max(0, target.cost - totalCapital);
       var targetTier = target.tier || ("T" + target.tierInfo.nextIncrement);
       html += nmRow("Target", target.sym + " " + targetTier + " · " + (target.roi || 0).toFixed(2) + "% ROI", c.blue);
+      html += nmRow("Payback", target.roi > 0 ? Math.round(36500 / target.roi).toLocaleString("en-US") + " days" : "—");
       html += nmRow("Cost", fmRoi(target.cost) + (shortBy > 0 ? " · short " + fmRoi(shortBy) : " ✓"), shortBy > 0 ? c.red : c.green);
       html += nmRow("Available", fmRoi(totalCapital), c.text);
 
@@ -1053,8 +1086,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         nextPayoutStr = row.daysLeft === 0 ? " · next <1d" : " · next " + row.daysLeft + "d";
       }
       var nextPayoutColor = (row.isOwned && row.daysLeft >= 0 && row.daysLeft <= 1) ? c.yellow : c.muted;
+      var paybackDays = (!row.isOwned && row.roi > 0) ? Math.round(36500 / row.roi) : 0;
       var costLine = row.isOwned ? "Owned" :
-        row.sharesNeeded.toLocaleString("en-US") + " shares · " + fmRoi(row.cost);
+        row.sharesNeeded.toLocaleString("en-US") + " shares · " + fmRoi(row.cost) +
+        (paybackDays > 0 ? " · pb " + paybackDays.toLocaleString("en-US") + "d" : "");
       var skipBtnStyle = 'width:28px;height:28px;border-radius:50%;border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:10px;color:' + c.muted + ';display:flex;align-items:center;justify-content:center;justify-self:center;' + (row.isOwned ? 'opacity:0.2;pointer-events:none;' : '');
       var skipLabel = row.isSkipped ? "↩" : "✕";
       var key = row.key || (row.sym + row.tier);
@@ -1073,6 +1108,43 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         '<button class="tsa-roi-skip" data-key="' + key + '" data-owned="' + (row.isOwned?1:0) + '" style="' + skipBtnStyle + '">' + skipLabel + '</button>' +
         '</div>';
     });
+
+    // Full snowball roadmap (collapsible): every benefit tier ranked by payback.
+    // Owned tiers flagged ✓; for unowned tiers a running "cum" shows the total
+    // capital needed to reach that rung. Buying in this order = best ROI first.
+    var roadmap = computeRoadmap(ownedMap, raw);
+    if (roadmap.length > 0) {
+      var rmCum = 0;
+      var rmRows = roadmap.map(function(r) {
+        var pbStr = (r.payback === Infinity) ? "—" : r.payback.toLocaleString("en-US") + "d";
+        var detail;
+        if (r.owned) {
+          detail = "Owned";
+        } else {
+          rmCum += r.cost;
+          detail = fmRoi(r.cost) + " · cum " + fmRoi(rmCum);
+        }
+        return '<div style="display:grid;grid-template-columns:42px 26px 1fr 60px;gap:4px;align-items:center;padding:6px 14px;border-bottom:1px solid ' + c.row_border + ';' + (r.owned ? 'background:' + c.owned_bg + ';' : '') + '">' +
+          '<span style="' + s + ';font-weight:700;font-size:12px;color:' + (r.owned ? c.green : c.text) + '">' + r.sym + '</span>' +
+          '<span style="' + s + ';font-size:9px;color:' + c.muted + '">' + r.tier + '</span>' +
+          '<div style="display:flex;flex-direction:column;gap:1px;overflow:hidden;min-width:0">' +
+            '<span style="' + s + ';font-size:10px;color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (r.owned ? "✓ owned" : detail) + '</span>' +
+            '<span style="font-size:9px;color:' + c.muted + '">ROI ' + r.roi.toFixed(2) + '%</span>' +
+          '</div>' +
+          '<span style="' + s + ';font-size:10px;font-weight:700;text-align:right;color:' + (r.owned ? c.green : c.blue) + '">' + pbStr + '</span>' +
+          '</div>';
+      }).join("");
+      html += '<div style="border-bottom:1px solid ' + c.divider + ';background:' + c.bg2 + '">' +
+        '<button id="tsa-roadmap-toggle" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:none;border:none;cursor:pointer;font-family:' + c.mono + '">' +
+          '<span style="font-size:10px;color:' + c.blue + ';font-weight:700;letter-spacing:0.08em;text-transform:uppercase">📋 Full snowball roadmap (' + roadmap.length + ')</span>' +
+          '<span id="tsa-roadmap-caret" style="font-size:10px;color:' + c.muted + '">▶</span>' +
+        '</button>' +
+        '<div id="tsa-roadmap-list" style="display:none">' +
+          '<div style="display:grid;grid-template-columns:42px 26px 1fr 60px;gap:4px;padding:5px 14px;font-size:9px;letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;border-bottom:1px solid ' + c.divider + ';' + s + '"><span>Stock</span><span>Tier</span><span>Cost / cumulative</span><span style="text-align:right">Payback</span></div>' +
+          rmRows +
+        '</div>' +
+      '</div>';
+    }
 
     return html;
   }
@@ -1104,6 +1176,18 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         toggleBtn.addEventListener("click", function() {
           var list = content.querySelector("#tsa-hidden-stocks-list");
           var caret = content.querySelector("#tsa-hidden-stocks-caret");
+          if (!list) return;
+          var open = list.style.display !== "none";
+          list.style.display = open ? "none" : "block";
+          if (caret) caret.textContent = open ? "▶" : "▼";
+        });
+      }
+
+      var roadmapBtn = content.querySelector("#tsa-roadmap-toggle");
+      if (roadmapBtn) {
+        roadmapBtn.addEventListener("click", function() {
+          var list = content.querySelector("#tsa-roadmap-list");
+          var caret = content.querySelector("#tsa-roadmap-caret");
           if (!list) return;
           var open = list.style.display !== "none";
           list.style.display = open ? "none" : "block";
