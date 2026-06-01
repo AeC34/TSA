@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.17.0
+// @version      2.18.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1309,8 +1309,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
       var avg_price = validCostShares > 0 ? totalCost / validCostShares : 0;
 
-      // Use Torn API's increment field — it is the active/confirmed tier
-      var apiIncrement = (s.dividend && s.dividend.increment) || 0;
+      // Active (money/item) stocks expose the active increment under `dividend`;
+      // passive perk stocks (WSU, IST, etc.) expose it under `benefit`. Read
+      // whichever is present so passive benefit blocks are detected too.
+      var bonus = s.dividend || s.benefit;
+      var apiIncrement = (bonus && bonus.increment) || 0;
 
       // benefit_shares and swing_shares will be calculated by enrichOwnedMap
       // after live prices are available — store raw data only for now
@@ -1322,8 +1325,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         time_bought: earliestTime === Infinity ? null : earliestTime,
         has_dividend: apiIncrement > 0,
         has_swing: false,        // recalculated in enrichOwnedMap
-        dividend_progress: (s.dividend && s.dividend.progress) || 0,
-        dividend_frequency: (s.dividend && s.dividend.frequency) || 0,
+        dividend_progress: (bonus && bonus.progress) || 0,
+        dividend_frequency: (bonus && bonus.frequency) || 0,
         dividend_increment: apiIncrement,
         dividend_next: 0, // not exposed by API — calculated from progress/frequency
         transactions: transactions.sort(function(a, b) { return b.time_bought - a.time_bought; })
@@ -1352,16 +1355,25 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       }
 
       var req = BENEFIT_REQ[sym] || 0;
-      // If user has bought enough shares for a higher tier (pending next dividend day),
-      // treat those extra shares as BB rather than swing.
-      var effectiveIncrement = increment;
-      if (req > 0) {
-        while (totalShares >= (Math.pow(2, effectiveIncrement + 1) - 1) * req) {
-          effectiveIncrement++;
+      var benefitShares;
+      if (PASSIVE_STOCKS.indexOf(sym) >= 0) {
+        // Passive perk stocks (WSU, IST, etc.) are single-tier — one block of
+        // `req` shares, they never stack. Cap at req so any extra shares stay
+        // swing/sellable instead of being locked by the 2^n tier formula.
+        benefitShares = req > 0 ? Math.min(req, totalShares) : 0;
+      } else {
+        // Active (money/item) stocks stack. If the user has bought enough shares
+        // for a higher tier (pending next dividend day), treat those extra shares
+        // as BB rather than swing.
+        var effectiveIncrement = increment;
+        if (req > 0) {
+          while (totalShares >= (Math.pow(2, effectiveIncrement + 1) - 1) * req) {
+            effectiveIncrement++;
+          }
         }
+        benefitShares = req > 0 ? (Math.pow(2, effectiveIncrement) - 1) * req : 0;
+        benefitShares = Math.min(benefitShares, totalShares);
       }
-      var benefitShares = req > 0 ? (Math.pow(2, effectiveIncrement) - 1) * req : 0;
-      benefitShares = Math.min(benefitShares, totalShares);
       var swingShares = Math.max(0, totalShares - benefitShares);
 
       o.benefit_shares = benefitShares;
