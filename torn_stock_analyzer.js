@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.19.0
+// @version      2.19.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
 // @run-at       document-end
 // @license      MIT
 // @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
 // @connect      tornsy.com
 // @connect      api.torn.com
 // @connect      www.torn.com
@@ -23,6 +24,30 @@
   }
   function lsSet(key, value) {
     try { localStorage.setItem(key, value); } catch(e) {}
+  }
+
+  // Cross-manager XHR adapter. Prefers the legacy GM_xmlhttpRequest (Tampermonkey/
+  // Violentmonkey), falls back to the GM4-style GM.xmlHttpRequest (some TornPDA /
+  // manager builds expose only this), then a best-effort native fetch (works only
+  // for hosts that send permissive CORS headers, e.g. api.torn.com). typeof guards
+  // avoid the ReferenceError of touching an undefined bare symbol. Same options
+  // object {method,url,onload,onerror} passes straight through to either GM API.
+  var gmXhrWarned = false;
+  function gmXhr(opts) {
+    if (typeof GM_xmlhttpRequest !== "undefined") { return GM_xmlhttpRequest(opts); }
+    if (typeof GM !== "undefined" && GM && typeof GM.xmlHttpRequest === "function") { return GM.xmlHttpRequest(opts); }
+    if (!gmXhrWarned) {
+      gmXhrWarned = true;
+      try { showToast("GM_xmlhttpRequest and GM.xmlHttpRequest both unavailable — update your script manager / TornPDA", "error"); } catch (e) {}
+    }
+    if (typeof fetch === "function") {
+      fetch(opts.url, { method: opts.method || "GET" })
+        .then(function (res) { return res.text().then(function (t) { return { status: res.status, text: t }; }); })
+        .then(function (o) { if (opts.onload) opts.onload({ responseText: o.text, status: o.status }); })
+        .catch(function (err) { if (opts.onerror) opts.onerror({ error: String(err) }); });
+      return;
+    }
+    if (opts.onerror) opts.onerror({ error: "No XHR API available" });
   }
 
   // Skip alert/signal toasts when the tab isn't actively viewed — the toast
@@ -345,7 +370,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function fetchItemPrice(itemId, cb) {
     if (itemPrices[itemId] !== undefined) { cb(itemPrices[itemId]); return; }
     var url = "https://api.torn.com/market/" + itemId + "?selections=itemmarket&key=" + getTornKey();
-    GM_xmlhttpRequest({
+    gmXhr({
       method: "GET", url: url,
       onload: function(r) {
         try {
@@ -366,7 +391,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function fetchItemName(itemId, cb) {
     if (itemNames[itemId]) { cb(itemNames[itemId]); return; }
     var url = "https://api.torn.com/torn/" + itemId + "?selections=items&key=" + getTornKey();
-    GM_xmlhttpRequest({
+    gmXhr({
       method: "GET", url: url,
       onload: function(r) {
         try {
@@ -392,7 +417,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     });
     if (allKnown) { cb(); return; }
     var url = "https://api.torn.com/torn/?selections=items&key=" + getTornKey();
-    GM_xmlhttpRequest({
+    gmXhr({
       method: "GET", url: url,
       onload: function(r) {
         try {
@@ -1264,7 +1289,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (retries === undefined) retries = 3;
     return new Promise(function(resolve, reject) {
       var attempt = function(n) {
-        GM_xmlhttpRequest({
+        gmXhr({
           method: "GET", url: url,
           onload: function(r) {
             try { resolve(JSON.parse(r.responseText)); }
