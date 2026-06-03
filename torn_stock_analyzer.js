@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.19.2
+// @version      2.19.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -36,10 +36,22 @@
   function gmXhr(opts) {
     if (typeof GM_xmlhttpRequest !== "undefined") { return GM_xmlhttpRequest(opts); }
     if (typeof GM !== "undefined" && GM && typeof GM.xmlHttpRequest === "function") { return GM.xmlHttpRequest(opts); }
-    // No GM XHR API in this environment (e.g. this TornPDA build). Fall back to
-    // native fetch silently — verified to work because api.torn.com and
-    // tornsy.com both send Access-Control-Allow-Origin: *, so the cross-origin
-    // reads succeed. This is a working path, not a failure, so no toast here.
+    // TornPDA exposes no GM API, but provides PDA_httpGet, which forwards the
+    // request to native code OUTSIDE the WebView's Content Security Policy. This
+    // is required for tornsy.com — the Torn page CSP's connect-src allows
+    // api.torn.com but blocks tornsy.com, so a page-context fetch to tornsy is
+    // refused. PDA_httpGet returns a Promise resolving to
+    // {responseText, status, statusText, responseHeaders}.
+    // GET only — every TSA call site is a GET. Add PDA_httpPost if a POST site is ever introduced.
+    if (typeof PDA_httpGet === "function") {
+      PDA_httpGet(opts.url)
+        .then(function (r) { if (opts.onload) opts.onload({ responseText: r.responseText, status: r.status }); })
+        .catch(function (err) { if (opts.onerror) opts.onerror({ error: String(err) }); });
+      return;
+    }
+    // Last resort: native fetch. Works for api.torn.com (allowed by the page
+    // CSP) but is CSP-blocked for tornsy.com, so this only fully works in a
+    // regular browser, not inside PDA without PDA_httpGet.
     if (typeof fetch === "function") {
       fetch(opts.url, { method: opts.method || "GET" })
         .then(function (res) { return res.text().then(function (t) { return { status: res.status, text: t }; }); })
@@ -50,7 +62,7 @@
     // Truly nothing available to make the request — surface it once.
     if (!gmXhrWarned) {
       gmXhrWarned = true;
-      try { showToast("No network API available (GM_xmlhttpRequest, GM.xmlHttpRequest and fetch all missing)", "error"); } catch (e) {}
+      try { showToast("No network API available (GM_xmlhttpRequest, GM.xmlHttpRequest, PDA_httpGet and fetch all missing)", "error"); } catch (e) {}
     }
     if (opts.onerror) opts.onerror({ error: "No XHR API available" });
   }
