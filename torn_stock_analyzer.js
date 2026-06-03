@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.18.0
+// @version      2.19.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1776,6 +1776,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
   function getShowQtChart() {
     return lsGet("tsa_show_qt_chart", "true") !== "false";
+  }
+  function getShowQtBar() {
+    return lsGet("tsa_show_qt_bar", "true") !== "false";
   }
   function getTop5MinScore() {
     var v = parseInt(lsGet("tsa_top5_min_score", "35"), 10);
@@ -3827,6 +3830,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var bar = document.createElement("div");
     bar.id = "qt-bar";
     bar.style.cssText = "background:#0c0c14;border-bottom:2px solid #3a3a6a;padding:8px 12px;box-shadow:0 4px 16px rgba(0,0,0,0.5);font-family:JetBrains Mono,monospace;position:sticky;top:0;z-index:9999;";
+    if (!getShowQtBar()) bar.style.display = "none";
     bar.innerHTML =
       // Row 1: Minimize button + Stock searchable combobox + edit + lock
       "<div style='display:flex;gap:7px;margin-bottom:6px;align-items:center'>" +
@@ -4105,6 +4109,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           "<input type=\"checkbox\" id=\"tsa-setting-show-qt-chart\"" + (getShowQtChart() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
           "<span style=\"font-size:12px;color:" + text + "\">Show Quick Trade chart</span>" +
         "</label>" +
+        "<label style=\"" + checkLabel + "\">" +
+          "<input type=\"checkbox\" id=\"tsa-setting-show-qt-bar\"" + (getShowQtBar() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
+          "<span style=\"font-size:12px;color:" + text + "\">Show Quick Trade bar</span>" +
+        "</label>" +
         "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">Min score for Top 5 (0–160)</div>" +
           "<input id=\"tsa-setting-top5-min\" type=\"number\" step=\"1\" min=\"0\" max=\"160\" value=\"" + getTop5MinScore() + "\" style=\"" + inputStyle + "\">" +
@@ -4179,6 +4187,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var showRealized = document.getElementById("tsa-setting-show-realized").checked;
         var showWatch = document.getElementById("tsa-setting-show-watch").checked;
         var showQtChart = document.getElementById("tsa-setting-show-qt-chart").checked;
+        var showQtBar = document.getElementById("tsa-setting-show-qt-bar").checked;
         var top5Min = parseInt(document.getElementById("tsa-setting-top5-min").value, 10);
         var reqInv = document.getElementById("tsa-setting-req-investors").checked;
         var rd = parseInt((document.getElementById("tsa-setting-realized-days") || {}).value || "7", 10);
@@ -4198,6 +4207,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         lsSet("tsa_profit_swing_only", swingOnly ? "true" : "false");
         lsSet("tsa_show_watch", showWatch ? "true" : "false");
         lsSet("tsa_show_qt_chart", showQtChart ? "true" : "false");
+        lsSet("tsa_show_qt_bar", showQtBar ? "true" : "false");
+        var qtBarEl = document.getElementById("qt-bar");
+        if (qtBarEl) qtBarEl.style.display = showQtBar ? "" : "none";
         lsSet("tsa_top5_min_score", top5Min.toString());
         lsSet("tsa_show_realized", showRealized ? "true" : "false");
         lsSet("tsa_require_positive_investors", reqInv ? "true" : "false");
