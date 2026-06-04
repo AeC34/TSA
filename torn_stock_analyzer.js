@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.20.0
+// @version      2.21.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -205,6 +205,7 @@
   var lastBestRec = null; // Best ROI recommendation from last data load
   var lastBuySymbols = []; // Symbols currently in the Top-5 buy list (drives Quick Buy pills)
   var lastSwingPills = []; // [{sym, shares, profit}] snapshot for the Swing sell pills
+  var _firstLoadKicked = false; // guards the on-load first full loadData against double-fire
 
   var STOCK_ID_MAP = {
     1:"TSB",  2:"TCI",  3:"SYS",  4:"LAG",  5:"IOU",
@@ -1823,6 +1824,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
   function getShowQtBar() {
     return lsGet("tsa_show_qt_bar", "true") !== "false";
+  }
+  function getPillsAlways() {
+    return lsGet("tsa_pills_always", "false") === "true";
   }
   function getTop5MinScore() {
     var v = parseInt(lsGet("tsa_top5_min_score", "35"), 10);
@@ -3530,8 +3534,44 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         "text-transform:uppercase;letter-spacing:.03em;}" +
       ".qt-pill-group-label{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;" +
         "font-family:JetBrains Mono,monospace;margin:0 0 5px 2px;display:block;}" +
-      ".qt-pill-row{display:flex;flex-wrap:wrap;gap:6px;}";
+      ".qt-pill-row{display:flex;flex-wrap:wrap;gap:6px;}" +
+      // "Bar hidden but pills always on" mode: strip the bar chrome so only pills remain
+      "#qt-bar.qt-bar-pills-only{background:transparent !important;border:none !important;box-shadow:none !important;padding:4px 12px !important;}";
     document.head.appendChild(st);
+  }
+
+  // Centralizes #qt-bar / row1 / body / pills visibility. Rules:
+  //  - bar shown:                full bar (body respects minimize) + pills
+  //  - bar shown, minimized:     row1 + pills, body hidden (pills survive minimize)
+  //  - bar hidden + pills-always + has pills: slim chrome-less strip with only pills
+  //  - otherwise:                bar fully hidden
+  function applyQtBarVisibility() {
+    var bar = document.getElementById("qt-bar");
+    if (!bar) return;
+    var row1 = document.getElementById("qt-row1");
+    var body = document.getElementById("qt-body");
+    var pills = document.getElementById("qt-pills");
+    var showBar = getShowQtBar();
+    var hasPills = (lastBuySymbols && lastBuySymbols.length > 0) || (lastSwingPills && lastSwingPills.length > 0);
+    var pillsVisible = hasPills && (showBar || getPillsAlways());
+    var minimized = lsGet("qt_minimized", "false") === "true";
+
+    if (pills) pills.style.display = pillsVisible ? "block" : "none";
+
+    if (showBar) {
+      bar.style.display = "";
+      bar.classList.remove("qt-bar-pills-only");
+      if (row1) row1.style.display = "";
+      if (body) body.style.display = minimized ? "none" : "block";
+    } else if (pillsVisible) {
+      bar.style.display = "";
+      bar.classList.add("qt-bar-pills-only");
+      if (row1) row1.style.display = "none";
+      if (body) body.style.display = "none";
+    } else {
+      bar.style.display = "none";
+      bar.classList.remove("qt-bar-pills-only");
+    }
   }
 
   function qtFmtSignedDollar(n) {
@@ -3592,9 +3632,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     var hasBuy = lastBuySymbols && lastBuySymbols.length > 0;
     var hasSwing = lastSwingPills && lastSwingPills.length > 0;
-    if (!hasBuy && !hasSwing) { container.style.display = "none"; return; }
-    container.style.display = "block";
-
     var labelColor = isDark ? "#7a7a9a" : "#666666";
 
     if (hasBuy) {
@@ -3648,6 +3685,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       swWrap.appendChild(swRow);
       container.appendChild(swWrap);
     }
+
+    applyQtBarVisibility();
   }
 
   function qtDrawChart(sym) {
@@ -4031,7 +4070,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (!getShowQtBar()) bar.style.display = "none";
     bar.innerHTML =
       // Row 1: Minimize button + Stock searchable combobox + edit + lock
-      "<div style='display:flex;gap:7px;margin-bottom:6px;align-items:center'>" +
+      "<div id='qt-row1' style='display:flex;gap:7px;margin-bottom:6px;align-items:center'>" +
         "<button id='qt-min-btn' title='Minimize Quick Trade bar' style='padding:4px 7px;border-radius:7px;border:1px solid #2a2a4a;background:transparent;color:#6a6a9a;font-family:JetBrains Mono,monospace;font-size:10px;cursor:pointer;flex-shrink:0;'>&#9660;</button>" +
         "<div id='qt-stock-wrap' style='position:relative;flex:1'>" +
           "<input id='qt-stock-search' type='text' placeholder='Search stock…' autocomplete='off' style='width:100%;box-sizing:border-box;background:#13131f;border:1px solid #2a2a4a;border-radius:7px;color:#e0e0ff;font-family:JetBrains Mono,monospace;font-size:12px;font-weight:700;padding:7px 26px 7px 10px;outline:none;'>" +
@@ -4077,9 +4116,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             "<button class='qt-tf-btn' data-tf='all' style='flex:1;min-height:32px;padding:7px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:10px;font-family:JetBrains Mono,monospace;cursor:pointer;'>All</button>" +
           "</div>" +
         "</div>" +
-        // torn-stock-pocket-style Quick Buy / Swing pills (filled by renderQtPills)
-        "<div id='qt-pills' style='display:none;margin-top:8px;'></div>" +
-      "</div>";
+      "</div>" +
+      // torn-stock-pocket-style Quick Buy / Swing pills — sibling of #qt-body so
+      // they survive minimize and can show standalone when the bar is hidden
+      "<div id='qt-pills' style='display:none;margin-top:8px;'></div>";
 
     var target = document.getElementById("stockmarketroot") ||
                  document.querySelector(".content-wrapper") ||
@@ -4093,13 +4133,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     setTimeout(function() { updateQtRecommendation(null); }, 1500);
     // Apply initial theme
     applyQtTheme(lsGet("tsa_dark", "false") === "true");
-    // Apply initial minimized state
+    // Apply initial bar / pills / minimize visibility
     (function() {
       var minimized = lsGet("qt_minimized", "false") === "true";
-      var qtBody = document.getElementById("qt-body");
       var qtMinBtn = document.getElementById("qt-min-btn");
-      if (qtBody) qtBody.style.display = minimized ? "none" : "block";
       if (qtMinBtn) qtMinBtn.textContent = minimized ? "\u25B6" : "\u25BC";
+      applyQtBarVisibility();
     })();
 
     // Timeframe button click handlers
@@ -4180,9 +4219,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var minimized = lsGet("qt_minimized", "false") === "true";
       minimized = !minimized;
       lsSet("qt_minimized", String(minimized));
-      var body = document.getElementById("qt-body");
-      if (body) body.style.display = minimized ? "none" : "block";
       this.textContent = minimized ? "\u25B6" : "\u25BC";
+      applyQtBarVisibility();
     });
   }
 
@@ -4313,6 +4351,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           "<input type=\"checkbox\" id=\"tsa-setting-show-qt-bar\"" + (getShowQtBar() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
           "<span style=\"font-size:12px;color:" + text + "\">Show Quick Trade bar</span>" +
         "</label>" +
+        "<label style=\"" + checkLabel + "\">" +
+          "<input type=\"checkbox\" id=\"tsa-setting-pills-always\"" + (getPillsAlways() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
+          "<span style=\"font-size:12px;color:" + text + "\">Always show Quick pills (even when bar is hidden)</span>" +
+        "</label>" +
         "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">Min score for Top 5 (0–160)</div>" +
           "<input id=\"tsa-setting-top5-min\" type=\"number\" step=\"1\" min=\"0\" max=\"160\" value=\"" + getTop5MinScore() + "\" style=\"" + inputStyle + "\">" +
@@ -4388,6 +4430,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var showWatch = document.getElementById("tsa-setting-show-watch").checked;
         var showQtChart = document.getElementById("tsa-setting-show-qt-chart").checked;
         var showQtBar = document.getElementById("tsa-setting-show-qt-bar").checked;
+        var pillsAlways = document.getElementById("tsa-setting-pills-always").checked;
         var top5Min = parseInt(document.getElementById("tsa-setting-top5-min").value, 10);
         var reqInv = document.getElementById("tsa-setting-req-investors").checked;
         var rd = parseInt((document.getElementById("tsa-setting-realized-days") || {}).value || "7", 10);
@@ -4408,8 +4451,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         lsSet("tsa_show_watch", showWatch ? "true" : "false");
         lsSet("tsa_show_qt_chart", showQtChart ? "true" : "false");
         lsSet("tsa_show_qt_bar", showQtBar ? "true" : "false");
-        var qtBarEl = document.getElementById("qt-bar");
-        if (qtBarEl) qtBarEl.style.display = showQtBar ? "" : "none";
+        lsSet("tsa_pills_always", pillsAlways ? "true" : "false");
+        applyQtBarVisibility();
         lsSet("tsa_top5_min_score", top5Min.toString());
         lsSet("tsa_show_realized", showRealized ? "true" : "false");
         lsSet("tsa_require_positive_investors", reqInv ? "true" : "false");
@@ -4562,11 +4605,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (_uiCreated) return;
     _uiCreated = true;
     createUI();
-    // Silently prefetch owned stock data on load so benefit lock, swing shares
-    // label, and all sell guards work immediately without opening the TSA panel.
-    (function prefetchOwnedMap() {
+    // Populate the panel + Quick pills on load so they appear without opening
+    // TSA. Full load only when the tab is actively viewed (Torn rule: don't
+    // fetch for a backgrounded tab); otherwise a light owned-only prefetch so
+    // benefit lock / swing labels still work, with the full load deferred to
+    // the focus / visibility handler below.
+    (function initialLoad() {
       var key = getTornKey();
       if (!key || key === "###PDA-APIKEY###") return;
+      if (isActivelyViewed()) { _firstLoadKicked = true; loadData(); return; }
       fetchJSON("https://api.torn.com/user/?selections=stocks&key=" + key)
         .then(function(tornData) {
           if (!tornData || tornData.error) return;
@@ -4590,6 +4637,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // Resume auto-refresh when the tab becomes actively viewed again
   function resumeAutoRefreshIfActive() {
     if (!isActivelyViewed()) return;
+    if (!_firstLoadKicked) { _firstLoadKicked = true; loadData(); return; } // first full load (e.g. tab opened in background)
     if (getAutoRefreshInterval() <= 0) return;
     if (autoRefreshTimer) return; // already scheduled
     loadData();
