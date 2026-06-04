@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.19.3
+// @version      2.20.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -203,6 +203,8 @@
   var lastOwnedMap = null;
   var lastRaw = null;
   var lastBestRec = null; // Best ROI recommendation from last data load
+  var lastBuySymbols = []; // Symbols currently in the Top-5 buy list (drives Quick Buy pills)
+  var lastSwingPills = []; // [{sym, shares, profit}] snapshot for the Swing sell pills
 
   var STOCK_ID_MAP = {
     1:"TSB",  2:"TCI",  3:"SYS",  4:"LAG",  5:"IOU",
@@ -2034,6 +2036,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         return b.score - a.score;
       });
       var top5Buy = top5BuyAll.slice(0, 5);
+      lastBuySymbols = top5Buy.map(function(s) { return s.symbol; });
 
       // WATCH: all owned stocks with score 45-74 not already in top5Buy.
       // Hard filters are now expressed via the signal label, not exclusion.
@@ -2368,6 +2371,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       swingTrades.forEach(function(s) {
         var owned = ownedMap[s.symbol];
         var swingPct = s.netProfitPct;
+        var swShares = (owned && owned.swing_shares > 0) ? owned.swing_shares : s.shares;
+        var swAvg = s.avg_price;
         if (owned && owned.benefit_shares > 0 && owned.swing_shares > 0 && s.p_live > 0 && s.transactions && s.transactions.length > 0) {
           var swRem = owned.swing_shares;
           var swCost = 0, swCount = 0;
@@ -2378,11 +2383,17 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             if (price > 0) { swCost += take * price; swCount += take; }
             swRem -= (t.shares || 0);
           });
-          if (swCount > 0) { swingPct = (s.p_live * 0.999 - swCost / swCount) / (swCost / swCount) * 100; }
+          if (swCount > 0) { swAvg = swCost / swCount; swingPct = (s.p_live * 0.999 - swAvg) / swAvg * 100; }
         }
         s._swingDisplayPct = swingPct;
+        s._swingShares = swShares;
+        // Profit if sold now, net of Torn's 0.1% sales fee
+        s._swingProfit = (s.p_live > 0 && swAvg > 0) ? swShares * (s.p_live * 0.999 - swAvg) : null;
       });
       swingTrades.sort(function(a, b) { return (b._swingDisplayPct || -Infinity) - (a._swingDisplayPct || -Infinity); });
+      lastSwingPills = swingTrades.map(function(s) {
+        return { sym: s.symbol, shares: s._swingShares, profit: s._swingProfit };
+      });
 
       // Toast PROFIT / STOP LOSS signals on swing trades, deduped per signal
       (function() {
@@ -2799,6 +2810,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         lsSet("tsa_benefit_collapsed", String(lsGet("tsa_benefit_collapsed", "false") !== "true"));
         loadData();
       });
+
+      // Refresh the torn-stock-pocket-style Quick Buy / Swing pills under the QT bar
+      renderQtPills();
 
     }).catch(function(e) {
       content.innerHTML = "<div class=\"tsa-error\">Error: " + escHtml(e.message) + "</div>" +
@@ -3495,6 +3509,147 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }
   }
 
+  // ── torn-stock-pocket-style Quick pills ──────────────────────────────────
+  // Buy pills (one per Top-5 buy stock, vault all cash) and Swing sell pills
+  // (one per swing holding, showing profit-if-sold-now net of the 0.1% fee).
+  // Same one-click POST flow as the rest of the QT bar — no new mechanism.
+  var qtPillCssInjected = false;
+  function injectQtPillCss() {
+    if (qtPillCssInjected) return;
+    qtPillCssInjected = true;
+    var st = document.createElement("style");
+    st.textContent =
+      ".qt-pill{display:inline-flex;align-items:center;gap:6px;border-radius:7px;border:1px solid;padding:5px 8px;" +
+        "font-family:Inter,'Segoe UI',sans-serif;font-size:12px;font-weight:600;line-height:1;cursor:pointer;" +
+        "user-select:none;transition:filter .12s,transform .05s;white-space:nowrap;}" +
+      ".qt-pill:active{transform:scale(0.96);}" +
+      ".qt-pills-light .qt-pill:hover{filter:brightness(0.95);}" +
+      ".qt-pills-dark .qt-pill:hover{filter:brightness(1.12);}" +
+      ".qt-pill img{width:18px;height:18px;display:block;margin:-2px 0;flex-shrink:0;}" +
+      ".qt-pill .qt-pill-badge{color:#fff;border-radius:4px;padding:2px 5px;font-size:10px;font-weight:800;" +
+        "text-transform:uppercase;letter-spacing:.03em;}" +
+      ".qt-pill-group-label{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;" +
+        "font-family:JetBrains Mono,monospace;margin:0 0 5px 2px;display:block;}" +
+      ".qt-pill-row{display:flex;flex-wrap:wrap;gap:6px;}";
+    document.head.appendChild(st);
+  }
+
+  function qtFmtSignedDollar(n) {
+    var sign = n < 0 ? "-" : "+", a = Math.abs(n || 0), s;
+    if (a >= 1e9) s = (a / 1e9).toFixed(2) + "B";
+    else if (a >= 1e6) s = (a / 1e6).toFixed(2) + "M";
+    else if (a >= 1e3) s = (a / 1e3).toFixed(1) + "K";
+    else s = String(Math.round(a));
+    return sign + "$" + s;
+  }
+
+  // Tailwind-derived green/red palette (matches torn-stock-pocket), theme-aware
+  function qtPillPalette(positive, isDark) {
+    if (positive) {
+      return isDark
+        ? { border: "rgba(20,83,45,0.75)", bg: "rgba(5,46,22,0.75)", text: "#86efac", badge: "#16a34a" }
+        : { border: "#4ade80", bg: "#dcfce7", text: "#15803d", badge: "#22c55e" };
+    }
+    return isDark
+      ? { border: "rgba(127,29,29,0.75)", bg: "rgba(69,10,10,0.75)", text: "#fca5a5", badge: "#dc2626" }
+      : { border: "#f87171", bg: "#fee2e2", text: "#b91c1c", badge: "#ef4444" };
+  }
+
+  function makeQtPill(sym, positive, labelText, isDark, onClick) {
+    var pal = qtPillPalette(positive, isDark);
+    var btn = document.createElement("button");
+    btn.className = "qt-pill";
+    btn.style.border = "1px solid " + pal.border;
+    btn.style.background = pal.bg;
+    btn.style.color = pal.text;
+    var img = document.createElement("img");
+    img.src = "https://www.torn.com/images/v2/stock-market/dark-mode/logos/" + sym + ".svg";
+    img.alt = sym;
+    img.onerror = function() { this.style.display = "none"; };
+    btn.appendChild(img);
+    var badge = document.createElement("span");
+    badge.className = "qt-pill-badge";
+    badge.style.background = pal.badge;
+    badge.textContent = sym;
+    btn.appendChild(badge);
+    var lbl = document.createElement("span");
+    lbl.textContent = labelText;
+    btn.appendChild(lbl);
+    btn.onclick = onClick;
+    return btn;
+  }
+
+  // Builds the Quick Buy / Swing pill panel under the QT bar. Driven by the
+  // last data load's Top-5 buy list and swing holdings; re-run on every
+  // loadData and on theme change.
+  function renderQtPills() {
+    var container = document.getElementById("qt-pills");
+    if (!container) return;
+    injectQtPillCss();
+    var isDark = lsGet("tsa_dark", "false") === "true";
+    container.className = isDark ? "qt-pills-dark" : "qt-pills-light";
+    container.innerHTML = "";
+
+    var hasBuy = lastBuySymbols && lastBuySymbols.length > 0;
+    var hasSwing = lastSwingPills && lastSwingPills.length > 0;
+    if (!hasBuy && !hasSwing) { container.style.display = "none"; return; }
+    container.style.display = "block";
+
+    var labelColor = isDark ? "#7a7a9a" : "#666666";
+
+    if (hasBuy) {
+      var buyWrap = document.createElement("div");
+      buyWrap.style.marginBottom = hasSwing ? "10px" : "0";
+      var buyLbl = document.createElement("span");
+      buyLbl.className = "qt-pill-group-label";
+      buyLbl.style.color = labelColor;
+      buyLbl.textContent = "▲ Quick Buy — Top " + lastBuySymbols.length;
+      buyWrap.appendChild(buyLbl);
+      var buyRow = document.createElement("div");
+      buyRow.className = "qt-pill-row";
+      lastBuySymbols.forEach(function(sym) {
+        buyRow.appendChild(makeQtPill(sym, true, "Buy", isDark, function() {
+          qtBuildMaps();
+          qtVault(sym); // buy max shares with all available cash
+        }));
+      });
+      buyWrap.appendChild(buyRow);
+      container.appendChild(buyWrap);
+    }
+
+    if (hasSwing) {
+      var swWrap = document.createElement("div");
+      var swLbl = document.createElement("span");
+      swLbl.className = "qt-pill-group-label";
+      swLbl.style.color = labelColor;
+      swLbl.textContent = "▼ Swing — sell now (net of fee)";
+      swWrap.appendChild(swLbl);
+      var swRow = document.createElement("div");
+      swRow.className = "qt-pill-row";
+      lastSwingPills.forEach(function(p) {
+        var positive = (p.profit || 0) >= 0;
+        var label = (p.profit === null || p.profit === undefined) ? "Sell" : qtFmtSignedDollar(p.profit);
+        var pill = makeQtPill(p.sym, positive, label, isDark, function() {
+          qtBuildMaps();
+          var owned = qtGetOwnedShares(p.sym);
+          if (owned <= 0) { showToast("You have no shares of " + p.sym, "warn"); return; }
+          var shares = p.shares;
+          if (shares > owned) shares = owned;
+          shares = qtApplyBenefitLock(p.sym, shares);
+          if (shares === null) return;
+          qtUiTrade(p.sym, shares, "sellShares",
+            "Sold " + shares.toLocaleString("en-US") + " " + p.sym + " (swing)",
+            { blockMaxShares: shares }).then(function(fired) {
+              if (fired && pill.parentNode) pill.parentNode.removeChild(pill);
+            });
+        });
+        swRow.appendChild(pill);
+      });
+      swWrap.appendChild(swRow);
+      container.appendChild(swWrap);
+    }
+  }
+
   function qtDrawChart(sym) {
     var container = document.getElementById("qt-chart-container");
     var canvas = document.getElementById("qt-chart-canvas");
@@ -3866,6 +4021,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }
     // Re-render buttons with new theme colors
     renderQtRows();
+    renderQtPills();
   }
 
   function createQuickTradeBar() {
@@ -3921,6 +4077,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             "<button class='qt-tf-btn' data-tf='all' style='flex:1;min-height:32px;padding:7px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:10px;font-family:JetBrains Mono,monospace;cursor:pointer;'>All</button>" +
           "</div>" +
         "</div>" +
+        // torn-stock-pocket-style Quick Buy / Swing pills (filled by renderQtPills)
+        "<div id='qt-pills' style='display:none;margin-top:8px;'></div>" +
       "</div>";
 
     var target = document.getElementById("stockmarketroot") ||
