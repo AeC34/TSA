@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.21.3
+// @version      2.22.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3568,7 +3568,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var body = document.getElementById("qt-body");
     var pills = document.getElementById("qt-pills");
     var showBar = getShowQtBar();
-    var hasPills = (lastBuySymbols && lastBuySymbols.length > 0) || (lastSwingPills && lastSwingPills.length > 0);
+    var hasPills = (lastBuySymbols && lastBuySymbols.length > 0) || (lastSwingPills && lastSwingPills.length > 0) || !!lastBestRec;
     var pillsVisible = hasPills && (showBar || getPillsAlways());
     var minimized = lsGet("qt_minimized", "false") === "true";
 
@@ -3590,13 +3590,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }
   }
 
-  function qtFmtDollar(n) {
+  function qtFmtNum(n) {
     var a = Math.abs(n || 0), s;
     if (a >= 1e9) s = (a / 1e9).toFixed(2) + "B";
     else if (a >= 1e6) s = (a / 1e6).toFixed(2) + "M";
     else if (a >= 1e3) s = (a / 1e3).toFixed(1) + "K";
     else s = String(Math.round(a));
-    return "$" + s;
+    return s;
+  }
+  function qtFmtDollar(n) {
+    return "$" + qtFmtNum(n);
   }
   function qtFmtSignedDollar(n) {
     return (n < 0 ? "-" : "+") + qtFmtDollar(n);
@@ -3614,8 +3617,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       : { border: "#f87171", bg: "#fee2e2", text: "#b91c1c", badge: "#ef4444" };
   }
 
-  function makeQtPill(sym, positive, labelText, isDark, onClick, subText) {
-    var pal = qtPillPalette(positive, isDark);
+  // Blue palette for the ROI "bank" pill (distinct from green buy / red sell)
+  function qtPillPaletteBank(isDark) {
+    return isDark
+      ? { border: "rgba(30,58,138,0.75)", bg: "rgba(23,37,84,0.75)", text: "#93c5fd", badge: "#2563eb" }
+      : { border: "#60a5fa", bg: "#dbeafe", text: "#1d4ed8", badge: "#3b82f6" };
+  }
+
+  function makeQtPill(sym, positive, labelText, isDark, onClick, subText, palOverride) {
+    var pal = palOverride || qtPillPalette(positive, isDark);
     var btn = document.createElement("button");
     btn.className = "qt-pill";
     btn.style.border = "1px solid " + pal.border;
@@ -3658,6 +3668,39 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var hasBuy = lastBuySymbols && lastBuySymbols.length > 0;
     var hasSwing = lastSwingPills && lastSwingPills.length > 0;
     var labelColor = isDark ? "#7a7a9a" : "#666666";
+
+    // ROI "bank" pill — deposit cash into the next recommended benefit increment,
+    // building up to the block over time. Caps each buy at the shares still
+    // needed so it never overshoots. Follows lastBestRec dynamically.
+    if (lastBestRec && lastBestRec.tierInfo) {
+      var ti = lastBestRec.tierInfo;
+      var ownedSh = Math.max(0, ti.totalSharesNeeded - ti.sharesNeeded);
+      var bankWrap = document.createElement("div");
+      bankWrap.style.marginBottom = (hasBuy || hasSwing) ? "10px" : "0";
+      var bankLbl = document.createElement("span");
+      bankLbl.className = "qt-pill-group-label";
+      bankLbl.style.color = labelColor;
+      bankLbl.textContent = "🏦 ROI Bank → benefit block";
+      bankWrap.appendChild(bankLbl);
+      var bankRow = document.createElement("div");
+      bankRow.className = "qt-pill-row";
+      var bankLabel = qtFmtNum(ownedSh) + "/" + qtFmtNum(ti.totalSharesNeeded);
+      bankRow.appendChild(makeQtPill(lastBestRec.sym, true, bankLabel, isDark, function() {
+        qtBuildMaps();
+        var r = lastBestRec;
+        if (!r || !r.tierInfo) { showToast("No ROI recommendation yet", "warn"); return; }
+        var sym = r.sym;
+        var price = qtGetPrice(sym) || r.tierInfo.livePrice || 0;
+        if (price <= 0) { showToast("Could not read price for " + sym, "error"); return; }
+        var money = qtGetMoneyFast();
+        if (money <= 0) { showToast("No money found", "warn"); return; }
+        var shares = Math.min(Math.floor(money / price), r.tierInfo.sharesNeeded);
+        if (shares < 1) { showToast("Not enough cash for 1 share of " + sym, "warn"); return; }
+        qtUiTrade(sym, shares, "buyShares", "Banked " + shares.toLocaleString("en-US") + " " + sym + " → T" + r.tierInfo.nextIncrement);
+      }, "", qtPillPaletteBank(isDark)));
+      bankWrap.appendChild(bankRow);
+      container.appendChild(bankWrap);
+    }
 
     if (hasBuy) {
       var buyWrap = document.createElement("div");
