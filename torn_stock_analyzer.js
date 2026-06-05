@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.21.2
+// @version      2.21.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -4632,14 +4632,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     _uiCreated = true;
     createUI();
     // Populate the panel + Quick pills on load so they appear without opening
-    // TSA. Full load only when the tab is actively viewed (Torn rule: don't
-    // fetch for a backgrounded tab); otherwise a light owned-only prefetch so
-    // benefit lock / swing labels still work, with the full load deferred to
-    // the focus / visibility handler below.
+    // TSA. Full load whenever the page isn't a hidden/background tab — we gate
+    // on visibilityState only (NOT isActivelyViewed) because TornPDA's webview
+    // reports document.hasFocus()===false even when the page is on-screen, which
+    // would otherwise block the on-load fetch on PDA. A genuinely backgrounded
+    // tab (visibilityState "hidden") falls through to the light owned-only
+    // prefetch and defers the full load to the focus / visibility handler.
     (function initialLoad() {
       var key = getTornKey();
       if (!key || key === "###PDA-APIKEY###") return;
-      if (isActivelyViewed()) { _firstLoadKicked = true; loadData(); return; }
+      if (document.visibilityState !== "hidden") { _firstLoadKicked = true; loadData(); return; }
       fetchJSON("https://api.torn.com/user/?selections=stocks&key=" + key)
         .then(function(tornData) {
           if (!tornData || tornData.error) return;
