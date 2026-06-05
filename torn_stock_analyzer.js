@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.21.0
+// @version      2.21.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2040,7 +2040,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         return b.score - a.score;
       });
       var top5Buy = top5BuyAll.slice(0, 5);
-      lastBuySymbols = top5Buy.map(function(s) { return s.symbol; });
+      // Buy pills are ordered by 24h investor growth (most new investors first),
+      // stocks without enough history last. Doesn't affect the buy-section order.
+      lastBuySymbols = top5Buy.slice().sort(function(a, b) {
+        var da = (a.invDelta == null) ? -Infinity : a.invDelta;
+        var db = (b.invDelta == null) ? -Infinity : b.invDelta;
+        return db - da;
+      }).map(function(s) { return s.symbol; });
 
       // WATCH: all owned stocks with score 45-74 not already in top5Buy.
       // Hard filters are now expressed via the signal label, not exclusion.
@@ -2395,8 +2401,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         s._swingProfit = (s.p_live > 0 && swAvg > 0) ? swShares * (s.p_live * 0.999 - swAvg) : null;
       });
       swingTrades.sort(function(a, b) { return (b._swingDisplayPct || -Infinity) - (a._swingDisplayPct || -Infinity); });
+      // Sell pills are ordered by dollar profit-if-sold-now (biggest first),
+      // matching the $ value shown on each pill. Independent of the swing
+      // section's own (profit-%) sort.
       lastSwingPills = swingTrades.map(function(s) {
         return { sym: s.symbol, shares: s._swingShares, profit: s._swingProfit };
+      }).sort(function(a, b) {
+        var pa = (a.profit == null) ? -Infinity : a.profit;
+        var pb = (b.profit == null) ? -Infinity : b.profit;
+        return pb - pa;
       });
 
       // Toast PROFIT / STOP LOSS signals on swing trades, deduped per signal
