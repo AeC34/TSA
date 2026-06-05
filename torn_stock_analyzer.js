@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.21.1
+// @version      2.21.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2399,13 +2399,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         s._swingShares = swShares;
         // Profit if sold now, net of Torn's 0.1% sales fee
         s._swingProfit = (s.p_live > 0 && swAvg > 0) ? swShares * (s.p_live * 0.999 - swAvg) : null;
+        // Total position value (gross market value: shares × live price)
+        s._swingValue = (s.p_live > 0 && swShares > 0) ? swShares * s.p_live : null;
       });
       swingTrades.sort(function(a, b) { return (b._swingDisplayPct || -Infinity) - (a._swingDisplayPct || -Infinity); });
       // Sell pills are ordered by dollar profit-if-sold-now (biggest first),
       // matching the $ value shown on each pill. Independent of the swing
       // section's own (profit-%) sort.
       lastSwingPills = swingTrades.map(function(s) {
-        return { sym: s.symbol, shares: s._swingShares, profit: s._swingProfit };
+        return { sym: s.symbol, shares: s._swingShares, profit: s._swingProfit, value: s._swingValue };
       }).sort(function(a, b) {
         var pa = (a.profit == null) ? -Infinity : a.profit;
         var pb = (b.profit == null) ? -Infinity : b.profit;
@@ -3547,6 +3549,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         "text-transform:uppercase;letter-spacing:.03em;}" +
       ".qt-pill-group-label{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;" +
         "font-family:JetBrains Mono,monospace;margin:0 0 5px 2px;display:block;}" +
+      ".qt-pill .qt-pill-sub{font-size:11px;opacity:0.65;}" +
       ".qt-pill-row{display:flex;flex-wrap:wrap;gap:6px;}" +
       // "Bar hidden but pills always on" mode: strip the bar chrome so only pills remain
       "#qt-bar.qt-bar-pills-only{background:transparent !important;border:none !important;box-shadow:none !important;padding:4px 12px !important;}";
@@ -3587,13 +3590,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }
   }
 
-  function qtFmtSignedDollar(n) {
-    var sign = n < 0 ? "-" : "+", a = Math.abs(n || 0), s;
+  function qtFmtDollar(n) {
+    var a = Math.abs(n || 0), s;
     if (a >= 1e9) s = (a / 1e9).toFixed(2) + "B";
     else if (a >= 1e6) s = (a / 1e6).toFixed(2) + "M";
     else if (a >= 1e3) s = (a / 1e3).toFixed(1) + "K";
     else s = String(Math.round(a));
-    return sign + "$" + s;
+    return "$" + s;
+  }
+  function qtFmtSignedDollar(n) {
+    return (n < 0 ? "-" : "+") + qtFmtDollar(n);
   }
 
   // Tailwind-derived green/red palette (matches torn-stock-pocket), theme-aware
@@ -3608,7 +3614,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       : { border: "#f87171", bg: "#fee2e2", text: "#b91c1c", badge: "#ef4444" };
   }
 
-  function makeQtPill(sym, positive, labelText, isDark, onClick) {
+  function makeQtPill(sym, positive, labelText, isDark, onClick, subText) {
     var pal = qtPillPalette(positive, isDark);
     var btn = document.createElement("button");
     btn.className = "qt-pill";
@@ -3628,6 +3634,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var lbl = document.createElement("span");
     lbl.textContent = labelText;
     btn.appendChild(lbl);
+    if (subText) {
+      var sub = document.createElement("span");
+      sub.className = "qt-pill-sub";
+      sub.textContent = subText;
+      btn.appendChild(sub);
+    }
     btn.onclick = onClick;
     return btn;
   }
@@ -3679,6 +3691,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       lastSwingPills.forEach(function(p) {
         var positive = (p.profit || 0) >= 0;
         var label = (p.profit === null || p.profit === undefined) ? "Sell" : qtFmtSignedDollar(p.profit);
+        var subText = (p.value === null || p.value === undefined) ? "" : qtFmtDollar(p.value);
         var pill = makeQtPill(p.sym, positive, label, isDark, function() {
           qtBuildMaps();
           var owned = qtGetOwnedShares(p.sym);
@@ -3692,7 +3705,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             { blockMaxShares: shares }).then(function(fired) {
               if (fired && pill.parentNode) pill.parentNode.removeChild(pill);
             });
-        });
+        }, subText);
         swRow.appendChild(pill);
       });
       swWrap.appendChild(swRow);
