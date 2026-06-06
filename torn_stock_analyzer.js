@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.22.0
+// @version      2.22.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -204,6 +204,7 @@
   var lastRaw = null;
   var lastBestRec = null; // Best ROI recommendation from last data load
   var lastBuySymbols = []; // Symbols currently in the Top-5 buy list (drives Quick Buy pills)
+  var lastBuyInvDelta = {}; // {sym: 24h investor delta} for the Quick Buy pill sub-text
   var lastSwingPills = []; // [{sym, shares, profit}] snapshot for the Swing sell pills
   var _firstLoadKicked = false; // guards the on-load first full loadData against double-fire
 
@@ -2047,6 +2048,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var db = (b.invDelta == null) ? -Infinity : b.invDelta;
         return db - da;
       }).map(function(s) { return s.symbol; });
+      // 24h investor delta per buy stock, shown as the pill sub-text.
+      // s.invDelta was computed above; null means not enough history yet.
+      lastBuyInvDelta = {};
+      top5Buy.forEach(function(s) {
+        if (s.invDelta != null) lastBuyInvDelta[s.symbol] = s.invDelta;
+      });
 
       // WATCH: all owned stocks with score 45-74 not already in top5Buy.
       // Hard filters are now expressed via the signal label, not exclusion.
@@ -3713,10 +3720,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var buyRow = document.createElement("div");
       buyRow.className = "qt-pill-row";
       lastBuySymbols.forEach(function(sym) {
+        var d = lastBuyInvDelta[sym];
+        var subText = (d == null) ? "" : "👥 " + (d >= 0 ? "+" : "") + d.toLocaleString("en-US") + " /24h";
         buyRow.appendChild(makeQtPill(sym, true, "Buy", isDark, function() {
           qtBuildMaps();
           qtVault(sym); // buy max shares with all available cash
-        }));
+        }, subText));
       });
       buyWrap.appendChild(buyRow);
       container.appendChild(buyWrap);
