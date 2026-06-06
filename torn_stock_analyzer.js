@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.22.1
+// @version      2.22.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3692,6 +3692,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var bankRow = document.createElement("div");
       bankRow.className = "qt-pill-row";
       var bankLabel = qtFmtNum(ownedSh) + "/" + qtFmtNum(ti.totalSharesNeeded);
+      // Money sub-text: owned-share value / full cost of the target tier, at live price
+      var bankPrice = ti.livePrice || 0;
+      var bankMoney = bankPrice > 0
+        ? fmRoi(ownedSh * bankPrice) + "/" + fmRoi(ti.totalSharesNeeded * bankPrice)
+        : "";
       bankRow.appendChild(makeQtPill(lastBestRec.sym, true, bankLabel, isDark, function() {
         qtBuildMaps();
         var r = lastBestRec;
@@ -3704,7 +3709,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var shares = Math.min(Math.floor(money / price), r.tierInfo.sharesNeeded);
         if (shares < 1) { showToast("Not enough cash for 1 share of " + sym, "warn"); return; }
         qtUiTrade(sym, shares, "buyShares", "Banked " + shares.toLocaleString("en-US") + " " + sym + " → T" + r.tierInfo.nextIncrement);
-      }, "", qtPillPaletteBank(isDark)));
+      }, bankMoney, qtPillPaletteBank(isDark)));
       bankWrap.appendChild(bankRow);
       container.appendChild(bankWrap);
     }
