@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.22.2
+// @version      2.22.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3287,12 +3287,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }
     qtUpdateLocalCache(symb, action === "buyShares" ? shares : -shares);
     showToast(label, "success");
-
-    var execBtn = document.getElementById("qt-exec");
-    if (execBtn) {
-      execBtn.textContent = "✓ " + label;
-      setTimeout(function() { qtUpdateExec(); }, 3000);
-    }
     return true;
   }
 
@@ -3381,17 +3375,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function saveQtAmounts() { lsSet("qt_amounts", JSON.stringify(qtAmounts)); }
 
   function qtUpdateExec() {
-    var btn = document.getElementById("qt-exec");
     var stock = document.getElementById("qt-stock") ? document.getElementById("qt-stock").value : "";
-    if (!btn) return;
-    btn.disabled = false;
-    btn.style.background = qtMode === "buy" ? "rgba(76,255,145,0.15)" : "rgba(255,76,106,0.12)";
-    btn.style.color = qtMode === "buy" ? "#4cff91" : "#ff4c6a";
-    btn.style.borderColor = qtMode === "buy" ? "rgba(76,255,145,0.25)" : "rgba(255,76,106,0.25)";
-    btn.style.opacity = (!stock || !qtSelAmt) ? "0.4" : "1";
-    btn.textContent = (qtMode === "buy" ? "▲ Buy " : "▼ Sell ") +
-      (qtSelAmt ? fmtQtAmt(qtSelAmt) : "?") +
-      (stock ? " of " + stock : " — select stock");
     // Swing shares available label (only when lock is on + stock is a benefit stock)
     var swingLabel = document.getElementById("qt-swing-available");
     var swingInfo  = document.getElementById("qt-benefit-info");
