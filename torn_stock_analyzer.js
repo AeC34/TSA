@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.22.3
+// @version      2.22.4
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2772,32 +2772,32 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         loadData();
       });
 
-      // Per-row "armed" feedback: when the user taps a Block row to sell, we
-      // show a red highlight + "TAP AGAIN TO SELL" badge on the row IMMEDIATELY,
-      // before any async trade prep — that way the user sees confirmation
-      // they're on tap 1 even if the corner toast is hidden behind the panel
-      // or otherwise missed. Cleared after the async outcome:
-      //   - tap 2 fires the trade  → row removed (success path),
-      //   - prepare fails outright → highlight cleared (no fake armed state).
-      var armedSwingRow = null;
+      // Per-row in-flight feedback: a sell fires on a single click (one click =
+      // one POST). The instant the user taps a Block row we show a red highlight
+      // + "SELLING…" badge on the row, before awaiting the async POST — so the
+      // user sees the action registered even if the corner toast is hidden
+      // behind the panel. Cleared after the async outcome:
+      //   - POST succeeds → row removed (success path),
+      //   - POST fails     → highlight cleared (no stale in-flight state).
+      var activeSwingRow = null;
       function clearSwingRowHighlight() {
-        if (!armedSwingRow) return;
-        armedSwingRow.style.background = "";
-        armedSwingRow.style.boxShadow = "";
-        var oldBadge = armedSwingRow.querySelector(".tsa-swing-armed-badge");
+        if (!activeSwingRow) return;
+        activeSwingRow.style.background = "";
+        activeSwingRow.style.boxShadow = "";
+        var oldBadge = activeSwingRow.querySelector(".tsa-swing-selling-badge");
         if (oldBadge && oldBadge.parentNode) oldBadge.parentNode.removeChild(oldBadge);
-        armedSwingRow = null;
+        activeSwingRow = null;
       }
-      function armSwingRow(row) {
+      function markSwingRowSelling(row) {
         clearSwingRowHighlight();
         row.style.background = "rgba(255,76,106,0.20)";
         row.style.boxShadow = "inset 0 0 0 2px #ff4c6a";
-        var armBadge = document.createElement("span");
-        armBadge.className = "tsa-swing-armed-badge";
-        armBadge.textContent = "↻ TAP AGAIN TO SELL";
-        armBadge.style.cssText = "margin-left:8px;font-size:10px;font-weight:800;color:#ff4c6a;text-transform:uppercase;letter-spacing:0.06em";
-        row.appendChild(armBadge);
-        armedSwingRow = row;
+        var sellingBadge = document.createElement("span");
+        sellingBadge.className = "tsa-swing-selling-badge";
+        sellingBadge.textContent = "↻ SELLING…";
+        sellingBadge.style.cssText = "margin-left:8px;font-size:10px;font-weight:800;color:#ff4c6a;text-transform:uppercase;letter-spacing:0.06em";
+        row.appendChild(sellingBadge);
+        activeSwingRow = row;
       }
       content.querySelectorAll(".tsa-swing-tx-row").forEach(function(row) {
         row.addEventListener("click", async function(e) {
@@ -2812,10 +2812,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           shares = qtApplyBenefitLock(sym, shares);
           if (shares === null) return;
 
-          // Show armed visual immediately — independent of the async qtUiTrade
-          // outcome. We'll clean it up after based on what happened.
-          var wasArmedBefore = (armedSwingRow === row);
-          armSwingRow(row);
+          // Show the in-flight visual immediately, then await the single POST.
+          markSwingRowSelling(row);
 
           var fired = await qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym + " (" + label + ")", { blockMaxShares: shares });
 
@@ -2826,8 +2824,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             if (parent) parent.removeChild(row);
             return;
           }
-          // Trade failed — clear armed visual unless it was already armed before this click.
-          if (!wasArmedBefore) clearSwingRowHighlight();
+          // Trade failed — clear the in-flight visual.
+          clearSwingRowHighlight();
         });
       });
 
