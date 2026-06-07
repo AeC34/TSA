@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.22.4
+// @version      2.22.5
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3093,7 +3093,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
   function qtBuildMaps() {
     $("ul[class^='stock_']").each(function() {
-      var sym = $("img", $(this)).attr("src").split("logos/")[1].split(".svg")[0];
+      // Guard the logo parse: a card missing its <img> or a src without
+      // "logos/" must skip (return = continue the .each) rather than throw,
+      // which would abort the loop and leave the trade maps half-built.
+      var src = $("img", $(this)).attr("src") || "";
+      if (src.indexOf("logos/") < 0) return;
+      var sym = src.split("logos/")[1].split(".svg")[0];
       qt_stocks[sym] = $("div[class^='price_']", $(this));
       qt_stockRows[sym] = $(this);
       qt_stockId[sym] = $(this).attr("id"); // used by qtPostTrade
@@ -3296,7 +3301,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (price <= 0) { showToast("Could not read price for " + symb, "error"); return; }
     var amt = Math.floor(money / price);
     if (amt <= 0) { showToast("Amount too small", "warn"); return; }
-    qtUiTrade(symb, amt, "buyShares", "Vaulted $" + (amt*price).toLocaleString() + " (" + amt + " shares)");
+    qtUiTrade(symb, amt, "buyShares", "Vaulted $" + (amt*price).toLocaleString("en-US") + " (" + amt + " shares)");
   }
 
   // ── TheALFA's exact withdraw() ──
@@ -3348,7 +3353,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return null;
     }
     if (maxSell !== Infinity && shares > maxSell) {
-      showToast("Benefit Lock: Capped to " + maxSell.toLocaleString() + " swing shares", "warn");
+      showToast("Benefit Lock: Capped to " + maxSell.toLocaleString("en-US") + " swing shares", "warn");
       return maxSell;
     }
     return shares;
@@ -3359,7 +3364,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (owned <= 0) { showToast("You have no shares of " + symb, "warn"); return; }
     var sellAmt = qtApplyBenefitLock(symb, owned);
     if (sellAmt === null) return;
-    qtUiTrade(symb, sellAmt, "sellShares", "Sold all " + sellAmt.toLocaleString() + " shares");
+    qtUiTrade(symb, sellAmt, "sellShares", "Sold all " + sellAmt.toLocaleString("en-US") + " shares");
   }
 
   function fmtQtAmt(n) {
@@ -3401,7 +3406,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var spend = (money > 0 && dollarAmt > money) ? money : dollarAmt;
     var amt = Math.floor(spend / price);
     if (amt <= 0) { showToast("Amount too small.", "warn"); return; }
-    qtUiTrade(sym, amt, "buyShares", "Bought " + amt.toLocaleString() + " " + sym);
+    qtUiTrade(sym, amt, "buyShares", "Bought " + amt.toLocaleString("en-US") + " " + sym);
   }
 
   function qtExecuteSell(sym, dollarAmt) {
@@ -3415,7 +3420,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (shares > owned) shares = owned;
     shares = qtApplyBenefitLock(sym, shares);
     if (shares === null) return;
-    qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString() + " " + sym);
+    qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym);
   }
 
   function createAmountBtn(label, amt, mode, idx) {
