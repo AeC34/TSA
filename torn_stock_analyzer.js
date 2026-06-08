@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.23.2
+// @version      2.24.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3425,6 +3425,27 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
   function saveQtAmounts() { lsSet("qt_amounts", JSON.stringify(qtAmounts)); }
 
+  // Quick Buy pill budget: a single optional $ amount applied to every Quick Buy
+  // pill click. 0 / unset = buy with all available cash (qtVault), preserving the
+  // original behaviour. Set via the ⚙ in the Quick Buy pill header.
+  function getQtBuyPillAmt() {
+    var n = parseInt(lsGet("qt_buy_pill_amount", "0"), 10);
+    return (isFinite(n) && n > 0) ? n : 0;
+  }
+  // Parse a money string like "25m", "1.5b", "500k", "25000000", "$25,000,000".
+  // Returns 0 for blank/invalid (→ all-cash fallback).
+  function parseQtMoney(str) {
+    if (str == null) return 0;
+    str = String(str).trim().toLowerCase().replace(/[$,\s]/g, "");
+    if (!str) return 0;
+    var mult = 1, last = str.charAt(str.length - 1);
+    if (last === "k") { mult = 1e3; str = str.slice(0, -1); }
+    else if (last === "m") { mult = 1e6; str = str.slice(0, -1); }
+    else if (last === "b") { mult = 1e9; str = str.slice(0, -1); }
+    var n = parseFloat(str);
+    return (isFinite(n) && n > 0) ? Math.floor(n * mult) : 0;
+  }
+
   function qtUpdateExec() {
     var stock = document.getElementById("qt-stock") ? document.getElementById("qt-stock").value : "";
     // Swing shares available label (only when lock is on + stock is a benefit stock)
@@ -3752,19 +3773,39 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (hasBuy) {
       var buyWrap = document.createElement("div");
       buyWrap.style.marginBottom = hasSwing ? "10px" : "0";
+      // Header row: group label on the left, ⚙ buy-budget setter on the right.
+      var buyHead = document.createElement("div");
+      buyHead.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;";
       var buyLbl = document.createElement("span");
       buyLbl.className = "qt-pill-group-label";
       buyLbl.style.color = labelColor;
       buyLbl.textContent = "▲ Quick Buy — Top " + lastBuySymbols.length;
-      buyWrap.appendChild(buyLbl);
+      buyHead.appendChild(buyLbl);
+      var pillAmt = getQtBuyPillAmt();
+      var gearBtn = document.createElement("button");
+      gearBtn.textContent = pillAmt > 0 ? "⚙ " + fmtQtAmt(pillAmt) : "⚙";
+      gearBtn.title = "Set buy amount per Quick Buy pill (blank = all available cash)";
+      gearBtn.style.cssText = "padding:2px 8px;border-radius:7px;border:1px solid " + (isDark ? "rgba(122,159,212,0.4)" : "#c0d0ff") + ";background:" + (isDark ? "rgba(122,159,212,0.12)" : "#f0f4ff") + ";color:" + (isDark ? "#7a9fd4" : "#4a6fa5") + ";font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
+      gearBtn.onclick = function() {
+        var cur = getQtBuyPillAmt();
+        var input = prompt("Buy amount per Quick Buy pill (e.g. 25m — blank = all available cash):", cur > 0 ? fmtQtAmt(cur) : "");
+        if (input === null) return; // cancelled
+        lsSet("qt_buy_pill_amount", String(parseQtMoney(input)));
+        renderQtPills();
+      };
+      buyHead.appendChild(gearBtn);
+      buyWrap.appendChild(buyHead);
       var buyRow = document.createElement("div");
       buyRow.className = "qt-pill-row";
+      var buyPillLabel = pillAmt > 0 ? "Buy " + fmtQtAmt(pillAmt) : "Buy";
       lastBuySymbols.forEach(function(sym) {
         var d = lastBuyInvDelta[sym];
         var subText = (d == null) ? "" : "👥 " + (d >= 0 ? "+" : "") + d.toLocaleString("en-US") + " /24h";
-        buyRow.appendChild(makeQtPill(sym, true, "Buy", isDark, function() {
+        buyRow.appendChild(makeQtPill(sym, true, buyPillLabel, isDark, function() {
           qtBuildMaps();
-          qtVault(sym); // buy max shares with all available cash
+          var amt = getQtBuyPillAmt();
+          if (amt > 0) qtExecuteBuy(sym, amt); // buy for the set $ budget (capped at available cash)
+          else qtVault(sym);                   // buy max shares with all available cash
         }, subText));
       });
       buyWrap.appendChild(buyRow);
