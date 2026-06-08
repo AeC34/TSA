@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.24.0
+// @version      2.24.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3775,7 +3775,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       buyWrap.style.marginBottom = hasSwing ? "10px" : "0";
       // Header row: group label on the left, ⚙ buy-budget setter on the right.
       var buyHead = document.createElement("div");
-      buyHead.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;";
+      buyHead.style.cssText = "display:flex;align-items:center;gap:8px;";
       var buyLbl = document.createElement("span");
       buyLbl.className = "qt-pill-group-label";
       buyLbl.style.color = labelColor;
