@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.23.1
+// @version      2.23.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1418,6 +1418,22 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var o = ownedMap[sym];
       var increment = o.dividend_increment || 0;
       var totalShares = o.shares || 0;
+
+      // ROI-skipped stocks are released from benefit-block treatment entirely:
+      // the user opted them out via the planner's ✕ skip, so the WHOLE position
+      // counts as swing (sellable) and no shares are held back as a benefit
+      // block. benefit_shares/swing_shares here fold in the skip preference (not
+      // just the Torn game mechanic) — this is what makes the sell pill show the
+      // full position, drops the stock out of the benefit section, and keeps the
+      // capital / scoring / Benefit Lock all consistent. Restore (un-skip)
+      // recomputes the normal split on the next enrich run.
+      if (roiSymSkipped(sym)) {
+        o.benefit_shares = 0;
+        o.swing_shares = totalShares;
+        o.has_dividend = false;
+        o.has_swing = totalShares > 0;
+        return;
+      }
 
       if (increment <= 0) {
         o.benefit_shares = 0;
