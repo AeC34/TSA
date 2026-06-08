@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.23.0
+// @version      2.23.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -360,12 +360,28 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     "BAG": { itemName: "Ammunition Pack", freq: 7, type: "variable" }
   };
 
-  var roiSkipped = (function() { try { return JSON.parse(localStorage.getItem("tsa_roi_skipped") || "[]") || []; } catch(e) { return []; } })();
-  // A stock skipped in the ROI Planner is also excluded from the Benefit Lock
-  // (qtBenefitLockMax) — the ✕ skip both hides it from the planner AND unlocks
-  // its shares for selling. Mapping is per-symbol: the lock has no per-tier
-  // granularity, so any skipped tier of a symbol unlocks that whole symbol.
-  // roiSkipped keys are "<SYM>T<n>" (e.g. "CBDT2"); strip the trailing tier.
+  // roiSkipped holds SYMBOL-level skip keys (e.g. "CBD"), not per-tier. Skipping
+  // any tier row of a stock skips the WHOLE stock: it is hidden from the ROI
+  // Planner AND excluded from the Benefit Lock (qtBenefitLockMax) so its shares
+  // become fully sellable. The lock has no per-tier granularity, so symbol-level
+  // is the only coherent mapping. Legacy per-tier keys ("CBDT2") written by older
+  // versions are normalized to symbol-level on load (and re-persisted) so the two
+  // representations can't drift apart.
+  var roiSkipped = (function() {
+    try {
+      var arr = JSON.parse(localStorage.getItem("tsa_roi_skipped") || "[]") || [];
+      var seen = {}, out = [];
+      arr.forEach(function(k) {
+        var sym = String(k).replace(/T\d+$/, "");
+        if (sym && !seen[sym]) { seen[sym] = 1; out.push(sym); }
+      });
+      // Re-persist if normalization changed anything (legacy tier keys / dupes).
+      if (out.length !== arr.length || out.some(function(s, i) { return s !== arr[i]; })) {
+        lsSet("tsa_roi_skipped", JSON.stringify(out));
+      }
+      return out;
+    } catch(e) { return []; }
+  })();
   function roiSymSkipped(sym) {
     var up = String(sym).toUpperCase();
     return roiSkipped.some(function(k) { return k.replace(/T\d+$/, "") === up; });
@@ -820,10 +836,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
     });
 
-    // Sort by ROI descending, filter out skipped
+    // Sort by ROI descending, filter out skipped (symbol-level)
     dynamicNextTiers = dynamicNextTiers.filter(function(e) {
-      var key = e.sym + "T" + e.tierInfo.nextIncrement;
-      return roiSkipped.indexOf(key) < 0;
+      return !roiSymSkipped(e.sym);
     });
     dynamicNextTiers.sort(function(a, b) { return b.roi - a.roi; });
 
@@ -843,8 +858,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
       // Candidates: not the target itself, not skipped, must have dividend income
       var allBridgeCandidates = dynamicNextTiers.filter(function(e) {
-        var key = e.sym + "T" + e.tierInfo.nextIncrement;
-        if (roiSkipped.indexOf(key) >= 0) return false;
+        if (roiSymSkipped(e.sym)) return false;
         if (e.sym === target.sym && e.tierInfo.nextIncrement === target.tierInfo.nextIncrement) return false;
         if (!e.payoutEntry) return false;
         var fItemVal = getItemValue(e.payoutEntry);
@@ -1078,13 +1092,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           '<span id="tsa-hidden-stocks-caret" style="font-size:10px;color:' + c.muted + '">▶</span>' +
         '</button>' +
         '<div id="tsa-hidden-stocks-list" style="display:none">' +
-          roiSkipped.map(function(key) {
-            var sym = key.replace(/T\d+$/, "");
-            var tier = key.match(/T\d+$/);
-            tier = tier ? tier[0] : "";
+          roiSkipped.map(function(sym) {
             return '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 14px;border-top:1px solid ' + c.divider + '">' +
-              '<span style="' + s + ';font-size:12px;font-weight:700;color:' + c.red + '">' + sym + ' <span style="font-size:10px;font-weight:400;color:' + c.muted + '">' + tier + '</span></span>' +
-              '<button class="tsa-roi-skip" data-key="' + key + '" data-owned="0" title="Restore — show in planner &amp; re-lock benefit shares" style="width:28px;height:28px;border-radius:50%;border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:12px;color:' + c.muted + ';display:flex;align-items:center;justify-content:center">↩</button>' +
+              '<span style="' + s + ';font-size:12px;font-weight:700;color:' + c.red + '">' + sym + '</span>' +
+              '<button class="tsa-roi-skip" data-key="' + sym + '" data-owned="0" title="Restore — show in planner &amp; re-lock benefit shares" style="width:28px;height:28px;border-radius:50%;border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:12px;color:' + c.muted + ';display:flex;align-items:center;justify-content:center">↩</button>' +
             '</div>';
           }).join("") +
         '</div>' +
@@ -1221,7 +1232,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         btn.addEventListener("click", function(e) {
           e.stopPropagation();
           if (btn.dataset.owned === "1") return;
-          var k = btn.dataset.key;
+          // Skip is symbol-level: strip any trailing tier so toggling one CBD
+          // row skips/restores the whole stock. Idempotent on already-stripped
+          // keys (Hidden-list restore buttons carry the bare symbol).
+          var k = (btn.dataset.key || "").replace(/T\d+$/, "");
+          if (!k) return;
           var idx = roiSkipped.indexOf(k);
           if (idx >= 0) roiSkipped.splice(idx, 1);
           else roiSkipped.push(k);
