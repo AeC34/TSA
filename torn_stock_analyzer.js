@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.24.1
+// @version      2.25.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3432,6 +3432,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var n = parseInt(lsGet("qt_buy_pill_amount", "0"), 10);
     return (isFinite(n) && n > 0) ? n : 0;
   }
+  // Swing sell pill budget: a single optional $ amount applied to every Swing
+  // pill click. 0 / unset = sell the whole swing position (original behaviour).
+  // Set via the ⚙ in the Swing pill header.
+  function getQtSellPillAmt() {
+    var n = parseInt(lsGet("qt_sell_pill_amount", "0"), 10);
+    return (isFinite(n) && n > 0) ? n : 0;
+  }
   // Parse a money string like "25m", "1.5b", "500k", "25000000", "$25,000,000".
   // Returns 0 for blank/invalid (→ all-cash fallback).
   function parseQtMoney(str) {
@@ -3814,29 +3821,58 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     if (hasSwing) {
       var swWrap = document.createElement("div");
+      // Header row: group label on the left, ⚙ sell-budget setter next to it.
+      var swHead = document.createElement("div");
+      swHead.style.cssText = "display:flex;align-items:center;gap:8px;";
       var swLbl = document.createElement("span");
       swLbl.className = "qt-pill-group-label";
       swLbl.style.color = labelColor;
       swLbl.textContent = "▼ Swing — sell now (net of fee)";
-      swWrap.appendChild(swLbl);
+      swHead.appendChild(swLbl);
+      var sellPillAmt = getQtSellPillAmt();
+      var sellGear = document.createElement("button");
+      sellGear.textContent = sellPillAmt > 0 ? "⚙ " + fmtQtAmt(sellPillAmt) : "⚙";
+      sellGear.title = "Set sell amount per Swing pill (blank = sell the whole swing position)";
+      sellGear.style.cssText = "padding:2px 8px;border-radius:7px;border:1px solid " + (isDark ? "rgba(255,76,106,0.4)" : "#ffb3b3") + ";background:" + (isDark ? "rgba(255,76,106,0.12)" : "#fff0f0") + ";color:" + (isDark ? "#ff4c6a" : "#cc2222") + ";font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
+      sellGear.onclick = function() {
+        var cur = getQtSellPillAmt();
+        var input = prompt("Sell amount per Swing pill (e.g. 25m — blank = sell the whole swing position):", cur > 0 ? fmtQtAmt(cur) : "");
+        if (input === null) return; // cancelled
+        lsSet("qt_sell_pill_amount", String(parseQtMoney(input)));
+        renderQtPills();
+      };
+      swHead.appendChild(sellGear);
+      swWrap.appendChild(swHead);
       var swRow = document.createElement("div");
       swRow.className = "qt-pill-row";
       lastSwingPills.forEach(function(p) {
         var positive = (p.profit || 0) >= 0;
-        var label = (p.profit === null || p.profit === undefined) ? "Sell" : qtFmtSignedDollar(p.profit);
+        var label = sellPillAmt > 0 ? "Sell " + fmtQtAmt(sellPillAmt)
+                  : (p.profit === null || p.profit === undefined) ? "Sell" : qtFmtSignedDollar(p.profit);
         var subText = (p.value === null || p.value === undefined) ? "" : qtFmtDollar(p.value);
         var pill = makeQtPill(p.sym, positive, label, isDark, function() {
           qtBuildMaps();
           var owned = qtGetOwnedShares(p.sym);
           if (owned <= 0) { showToast("You have no shares of " + p.sym, "warn"); return; }
-          var shares = p.shares;
+          var sellAmt = getQtSellPillAmt();
+          var partial = sellAmt > 0;
+          var shares;
+          if (partial) {
+            var price = qtGetPrice(p.sym);
+            if (price <= 0) { showToast("Could not read price for " + p.sym, "error"); return; }
+            shares = Math.ceil((sellAmt / 0.999) / price); // shares worth ~$sellAmt net of the 0.1% fee
+          } else {
+            shares = p.shares; // whole swing position
+          }
           if (shares > owned) shares = owned;
           shares = qtApplyBenefitLock(p.sym, shares);
           if (shares === null) return;
           qtUiTrade(p.sym, shares, "sellShares",
             "Sold " + shares.toLocaleString("en-US") + " " + p.sym + " (swing)",
             { blockMaxShares: shares }).then(function(fired) {
-              if (fired && pill.parentNode) pill.parentNode.removeChild(pill);
+              // Only remove the pill when the whole swing position was sold; a
+              // partial $-amount sell leaves shares, so keep the pill.
+              if (fired && !partial && pill.parentNode) pill.parentNode.removeChild(pill);
             });
         }, subText);
         swRow.appendChild(pill);
