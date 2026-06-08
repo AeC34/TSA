@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.22.5
+// @version      2.23.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -361,6 +361,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   };
 
   var roiSkipped = (function() { try { return JSON.parse(localStorage.getItem("tsa_roi_skipped") || "[]") || []; } catch(e) { return []; } })();
+  // A stock skipped in the ROI Planner is also excluded from the Benefit Lock
+  // (qtBenefitLockMax) — the ✕ skip both hides it from the planner AND unlocks
+  // its shares for selling. Mapping is per-symbol: the lock has no per-tier
+  // granularity, so any skipped tier of a symbol unlocks that whole symbol.
+  // roiSkipped keys are "<SYM>T<n>" (e.g. "CBDT2"); strip the trailing tier.
+  function roiSymSkipped(sym) {
+    var up = String(sym).toUpperCase();
+    return roiSkipped.some(function(k) { return k.replace(/T\d+$/, "") === up; });
+  }
   var itemPrices = {}; // cache: itemId -> price
   // itemNames are stable, persist them — saves an API call per id every reload.
   var itemNames = (function() {
@@ -1065,7 +1074,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (roiSkipped.length > 0) {
       html += '<div id="tsa-hidden-stocks-bar" style="border-bottom:1px solid ' + c.divider + ';background:' + c.bg2 + '">' +
         '<button id="tsa-hidden-stocks-toggle" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:7px 14px;background:none;border:none;cursor:pointer;font-family:' + c.mono + '">' +
-          '<span style="font-size:10px;color:' + c.red + ';font-weight:600;letter-spacing:0.06em;text-transform:uppercase">Hidden stocks (' + roiSkipped.length + ')</span>' +
+          '<span style="font-size:10px;color:' + c.red + ';font-weight:600;letter-spacing:0.06em;text-transform:uppercase">Hidden &amp; unlocked (' + roiSkipped.length + ')</span>' +
           '<span id="tsa-hidden-stocks-caret" style="font-size:10px;color:' + c.muted + '">▶</span>' +
         '</button>' +
         '<div id="tsa-hidden-stocks-list" style="display:none">' +
@@ -1075,7 +1084,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             tier = tier ? tier[0] : "";
             return '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 14px;border-top:1px solid ' + c.divider + '">' +
               '<span style="' + s + ';font-size:12px;font-weight:700;color:' + c.red + '">' + sym + ' <span style="font-size:10px;font-weight:400;color:' + c.muted + '">' + tier + '</span></span>' +
-              '<button class="tsa-roi-skip" data-key="' + key + '" data-owned="0" title="Restore" style="width:28px;height:28px;border-radius:50%;border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:12px;color:' + c.muted + ';display:flex;align-items:center;justify-content:center">↩</button>' +
+              '<button class="tsa-roi-skip" data-key="' + key + '" data-owned="0" title="Restore — show in planner &amp; re-lock benefit shares" style="width:28px;height:28px;border-radius:50%;border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:12px;color:' + c.muted + ';display:flex;align-items:center;justify-content:center">↩</button>' +
             '</div>';
           }).join("") +
         '</div>' +
@@ -1138,6 +1147,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         (paybackDays > 0 ? " · pb " + paybackDays.toLocaleString("en-US") + "d" : "");
       var skipBtnStyle = 'width:28px;height:28px;border-radius:50%;border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:10px;color:' + c.muted + ';display:flex;align-items:center;justify-content:center;justify-self:center;' + (row.isOwned ? 'opacity:0.2;pointer-events:none;' : '');
       var skipLabel = row.isSkipped ? "↩" : "✕";
+      var skipTitle = row.isSkipped
+        ? "Restore — show in planner &amp; re-lock benefit shares"
+        : "Skip — hide from planner &amp; unlock shares for selling (Benefit Lock off for this stock)";
       var key = row.key || (row.sym + row.tier);
 
       var buyAttrs = (!row.isOwned && row.sharesNeeded > 0)
@@ -1151,7 +1163,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           '<span style="font-size:9px;color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + fmRoi(row.payout) + " / " + row.freq + "d" + (itemVal > 0 ? " · live " + fmRoi(itemVal) : "") + "</span>" +
         '</div>' +
         '<span style="' + s + ';font-size:11px;font-weight:700;text-align:right;color:' + symColor + '">' + roiPct + '</span>' +
-        '<button class="tsa-roi-skip" data-key="' + key + '" data-owned="' + (row.isOwned?1:0) + '" style="' + skipBtnStyle + '">' + skipLabel + '</button>' +
+        '<button class="tsa-roi-skip" data-key="' + key + '" data-owned="' + (row.isOwned?1:0) + '" title="' + skipTitle + '" style="' + skipBtnStyle + '">' + skipLabel + '</button>' +
         '</div>';
     });
 
@@ -1271,7 +1283,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var footerBg      = isDarkFooter ? "#0f0f1a" : "#ffffff";
         content.insertAdjacentHTML("beforeend",
           '<div style="padding:7px 14px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid ' + footerDivider + ';background:' + footerBg + '">' +
-            '<span style="font-size:9px;color:#555">✕ skip &nbsp;·&nbsp; ↩ unskip</span>' +
+            '<span style="font-size:9px;color:#555">✕ skip + unlock &nbsp;·&nbsp; ↩ restore</span>' +
             '<span style="font-size:9px;color:#555;font-family:monospace">Updated ' + new Date().toLocaleTimeString("en-GB") + '</span>' +
           '</div>'
         );
@@ -3309,6 +3321,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // Returns max shares that can be safely sold (Infinity = no restriction).
   // Blocks by returning 0 when all shares are locked or count is unverifiable.
   function qtBenefitLockMax(symb) {
+    // ROI-skipped stocks are excluded from the Benefit Lock entirely — the user
+    // explicitly opted them out via the planner's ✕ skip, so treat them as
+    // having no benefit restriction (fully sellable). Must sit ABOVE both the
+    // precise benefit_shares path and the BENEFIT_REQ fallback.
+    if (roiSymSkipped(symb)) return Infinity;
     var currentOwned = qtGetOwnedShares(symb);
     var oe = lastOwnedMap ? lastOwnedMap[symb.toUpperCase()] : null;
     if (oe && oe.benefit_shares > 0) {
