@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.25.1
+// @version      2.26.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1490,13 +1490,31 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return Object.values(merged);
   }
 
+  // Average buy price of the SWING portion of a mixed (benefit block + swing)
+  // position. Transactions are sorted newest-first and swing shares are the
+  // newest blocks on top of the benefit block, so walk from the top until
+  // swing_shares are consumed. Returns null when there is no mixed position
+  // or no usable prices — callers fall back to the blended avg_price.
+  function calcSwingAvgPrice(owned, transactions, fallbackAvg) {
+    if (!owned || !(owned.benefit_shares > 0) || !(owned.swing_shares > 0)) return null;
+    if (!transactions || transactions.length === 0) return null;
+    var swRem = owned.swing_shares, swCost = 0, swCount = 0;
+    transactions.forEach(function(t) {
+      if (swRem <= 0) return;
+      var take = Math.min(t.shares || 0, swRem);
+      var price = (t.bought_price && t.bought_price > 0) ? t.bought_price : (fallbackAvg || 0);
+      if (price > 0) { swCost += take * price; swCount += take; }
+      swRem -= (t.shares || 0);
+    });
+    return swCount > 0 ? swCost / swCount : null;
+  }
+
   function calcScore(stock, raw, ownedMap, priceHistory) {
     var s = stock.toUpperCase();
     var r = raw ? raw.find(function(x) { return x.stock === s; }) : null;
     if (!r) return null;
 
     var owned = ownedMap[s];
-    var isInBenefitCategory = owned && owned.has_dividend && owned.benefit_shares > 0;
     var p_live = parseFloat(r.price) || 0;
 
     // Extract all intervals
@@ -1531,6 +1549,32 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var downtrendCount  = (trendDownShort ? 1 : 0) + (trendDownMedium ? 1 : 0) + (trendDownLong ? 1 : 0);
     var sustainedDowntrend = downtrendCount >= 2;
 
+    // ── SELL LOGIC (owner-side; computed before any buy-filter early return
+    // so PROFIT/STOP LOSS badges survive the above-weekly-peak state) ──
+    // Signals apply ONLY to the swing portion of a position: the threshold is
+    // evaluated against the swing-specific avg (FIFO newest transactions) so a
+    // benefit block underneath never triggers or masks one. Pure benefit
+    // blocks (swing_shares = 0) never get signals.
+    var sellSignal = null, netProfitPct = null, hoursHeld = null;
+
+    // Profit % for ALL owned stocks — include 0.1% sell fee for accurate P/L
+    if (owned && owned.avg_price > 0) {
+      netProfitPct = ((p_live * 0.999 - owned.avg_price) / owned.avg_price * 100);
+      hoursHeld = owned.time_bought
+        ? ((Date.now() / 1000 - owned.time_bought) / 3600).toFixed(0)
+        : null;
+    }
+
+    if (owned && owned.swing_shares > 0 && p_live > 0) {
+      var swingAvg = calcSwingAvgPrice(owned, owned.transactions, owned.avg_price);
+      var sellBaseAvg = (swingAvg !== null) ? swingAvg : owned.avg_price;
+      if (sellBaseAvg > 0) {
+        var swingNetPct = (p_live * 0.999 - sellBaseAvg) / sellBaseAvg * 100;
+        if (swingNetPct >= getProfitTarget())     sellSignal = "PROFIT";
+        else if (swingNetPct <= -getStopLoss())   sellSignal = "STOP LOSS";
+      }
+    }
+
     // Pre-compute weekly peak (used by both the hard filter and indicator 1)
     var weekPrices = [p_d1,p_d2,p_d3,p_d4,p_d5,p_d7,p_w1].filter(function(x){ return x > 0; });
     var weekPeak = weekPrices.length > 0 ? Math.max.apply(null, weekPrices) : 0;
@@ -1539,9 +1583,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // Live must be below the recent weekly peak — blocks scoring once the
     // opportunity has passed. Uses the actual highest price seen this week
     // (max of d1-d7/w1), NOT just w1, so mid-week peaks are captured correctly.
+    // Only short-circuits BUY scoring — sellSignal/netProfitPct above are
+    // included so owner-side P/L display and badges stay correct.
     if (weekPeak > 0 && p_live >= weekPeak) {
       return {
-        symbol: s, score: 0, signal: "WAIT", sellSignal: null,
+        symbol: s, score: 0, signal: "WAIT", sellSignal: sellSignal,
         scoreBreakdown: { drop: 0, position: 0, reversal: 0 },
         owned: !!owned, alreadyRallied: false, priceAboveWeek: true,
         has_swing: (owned && owned.has_swing) || false,
@@ -1550,8 +1596,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         dividendProgress: (owned && owned.dividend_progress) || 0,
         dividendFrequency: (owned && owned.dividend_frequency) || 0,
         p_live, reasons: "Above weekly peak",
-        netProfitPct: (owned && owned.avg_price > 0) ? ((p_live * 0.999 - owned.avg_price) / owned.avg_price * 100) : null,
-        hoursHeld: (owned && owned.time_bought) ? ((Date.now()/1000 - owned.time_bought)/3600).toFixed(0) : null,
+        netProfitPct: netProfitPct,
+        hoursHeld: hoursHeld,
         shares: (owned && owned.shares) || 0,
         avg_price: (owned && owned.avg_price) || 0,
         transactions: (owned && owned.transactions) || []
@@ -1735,26 +1781,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (signal === "STRONG BUY" || signal === "BUY") signal = "CONSIDER";
     }
 
-    // SELL LOGIC
-    var sellSignal = null, netProfitPct = null, hoursHeld = null;
-    var isBenefitBlock = isInBenefitCategory;
-
-    // Calculate profit % for ALL owned stocks — include 0.1% sell fee for accurate P/L
-    if (owned && owned.avg_price > 0) {
-      netProfitPct = ((p_live * 0.999 - owned.avg_price) / owned.avg_price * 100);
-      hoursHeld = owned.time_bought
-        ? ((Date.now() / 1000 - owned.time_bought) / 3600).toFixed(0)
-        : null;
-    }
-
-    // Sell signal ONLY for swing trades
-    if (owned && owned.avg_price > 0 && !isBenefitBlock) {
-      var profitTarget = getProfitTarget();
-      var stopLossThreshold = getStopLoss();
-      if (netProfitPct >= profitTarget)              sellSignal = "PROFIT";
-      else if (netProfitPct <= -stopLossThreshold)   sellSignal = "STOP LOSS";
-    }
-
+    // (sellSignal / netProfitPct / hoursHeld computed at the top of the
+    // function, before the weekly-peak early return.)
     return {
       symbol: s, score, signal, sellSignal,
       scoreBreakdown: scoreBreakdown,
@@ -1928,6 +1956,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function cleanOldIntents() {
     var cutoff = Math.floor(Date.now() / 1000) - 86400;
     try {
+      // Orphaned since the PROFIT/STOP LOSS toasts were removed (v2.26.0)
+      localStorage.removeItem("tsa_notified_signals");
       Object.keys(localStorage).forEach(function(key) {
         if (key.indexOf("qt_intent_") !== 0) return;
         var v = JSON.parse(localStorage.getItem(key) || "null");
@@ -2433,17 +2463,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var swingPct = s.netProfitPct;
         var swShares = (owned && owned.swing_shares > 0) ? owned.swing_shares : s.shares;
         var swAvg = s.avg_price;
-        if (owned && owned.benefit_shares > 0 && owned.swing_shares > 0 && s.p_live > 0 && s.transactions && s.transactions.length > 0) {
-          var swRem = owned.swing_shares;
-          var swCost = 0, swCount = 0;
-          s.transactions.forEach(function(t) {
-            if (swRem <= 0) return;
-            var take = Math.min(t.shares || 0, swRem);
-            var price = (t.bought_price && t.bought_price > 0) ? t.bought_price : (s.avg_price || 0);
-            if (price > 0) { swCost += take * price; swCount += take; }
-            swRem -= (t.shares || 0);
-          });
-          if (swCount > 0) { swAvg = swCost / swCount; swingPct = (s.p_live * 0.999 - swAvg) / swAvg * 100; }
+        if (s.p_live > 0) {
+          var fifoAvg = calcSwingAvgPrice(owned, s.transactions, s.avg_price);
+          if (fifoAvg !== null) { swAvg = fifoAvg; swingPct = (s.p_live * 0.999 - swAvg) / swAvg * 100; }
         }
         s._swingDisplayPct = swingPct;
         s._swingShares = swShares;
@@ -2464,26 +2486,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         return pb - pa;
       });
 
-      // Toast PROFIT / STOP LOSS signals on swing trades, deduped per signal
-      (function() {
-        if (!isActivelyViewed()) return;
-        var notified;
-        try { notified = JSON.parse(localStorage.getItem("tsa_notified_signals") || "{}"); } catch(e) { notified = {}; }
-        // Remove stale entries for signals that are no longer active
-        var activeKeys = {};
-        swingTrades.forEach(function(s) { if (s.sellSignal) activeKeys[s.symbol + "|" + s.sellSignal] = true; });
-        Object.keys(notified).forEach(function(k) { if (!activeKeys[k]) delete notified[k]; });
-        // Toast new signals not yet seen
-        swingTrades.forEach(function(s) {
-          if (!s.sellSignal) return;
-          var key = s.symbol + "|" + s.sellSignal;
-          if (notified[key]) return;
-          notified[key] = Date.now();
-          var pct = (s.netProfitPct !== undefined ? (s.netProfitPct >= 0 ? "+" : "") + s.netProfitPct.toFixed(2) + "%" : "");
-          showToast(s.symbol + " — " + s.sellSignal + (pct ? " (" + pct + ")" : ""), "warn");
-        });
-        lsSet("tsa_notified_signals", JSON.stringify(notified));
-      })();
+      // PROFIT / STOP LOSS is shown in the row badge and the 🎯 pill marker
+      // only — no toast notifications (toasts are reserved for trade
+      // confirmations and errors).
 
       var benefitBlocks = allOwned.filter(function(s) { return isBenefitCategory(s.symbol); });
       benefitBlocks.sort(function(a, b) { return (b.dividendProgress || 0) - (a.dividendProgress || 0); });
@@ -2499,18 +2504,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         // Transactions are sorted newest-first; swing shares come from newest blocks
         var swingNetProfitPct = null;
         var swingAvgPrice = null;
-        if (!isBenefit && owned && owned.benefit_shares > 0 && owned.swing_shares > 0 && s.p_live > 0 && s.transactions && s.transactions.length > 0) {
-          var swRem = owned.swing_shares;
-          var swCost = 0, swCount = 0;
-          s.transactions.forEach(function(t) {
-            if (swRem <= 0) return;
-            var take = Math.min(t.shares || 0, swRem);
-            var price = (t.bought_price && t.bought_price > 0) ? t.bought_price : (s.avg_price || 0);
-            if (price > 0) { swCost += take * price; swCount += take; }
-            swRem -= (t.shares || 0);
-          });
-          if (swCount > 0) {
-            swingAvgPrice = swCost / swCount;
+        if (!isBenefit && s.p_live > 0) {
+          swingAvgPrice = calcSwingAvgPrice(owned, s.transactions, s.avg_price);
+          if (swingAvgPrice !== null) {
             swingNetProfitPct = (s.p_live * 0.999 - swingAvgPrice) / swingAvgPrice * 100;
           }
         }
