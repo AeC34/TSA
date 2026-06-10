@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.28.5
+// @version      2.28.6
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -203,6 +203,8 @@
   var lastOwnedMap = null;
   var lastRaw = null;
   var lastMissingBatches = 0; // tornsy batches missing at last load (drives the partial-data banner on cached re-renders)
+  var prevLoadPrices = {}; // price baseline from the PREVIOUS real load (trend arrows); cached re-renders must not touch it
+  var lastLoadTs = 0; // wall-clock of the last successful fetch — footer "Updated:" stamp (render time would mislabel cached data as fresh)
   var lastBestRec = null; // Best ROI recommendation from last data load
   var lastBuySymbols = []; // Symbols currently in the Top-5 buy list (drives Quick Buy pills)
   var lastBuyInvDelta = {}; // {sym: 24h investor delta} for the Quick Buy pill sub-text
@@ -1283,9 +1285,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           qtBuildMaps();
           var price  = qtGetPrice(sym);
           var cash   = qtGetMoneyFast();
+          // Never fire a full-tier buy blind: refuse when price or cash is
+          // unreadable (matches the 💡 rec button / bank pill / qtVault).
+          if (price <= 0) { showToast("Could not read price for " + sym, "error"); return; }
+          if (cash <= 0) { showToast("No money found", "warn"); return; }
           // Tier buys must hit the exact share count to unlock the benefit
           // block — refuse rather than partial-buy wasted shares.
-          if (price > 0 && cash > 0 && shares * price > cash) {
+          if (shares * price > cash) {
             showToast("Need $" + (shares * price - cash).toLocaleString("en-US") + " more for " + sym + " " + tier, "warn");
             return;
           }
@@ -2018,7 +2024,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // tracking (realized P/L, alerts, price recording, holdings snapshot)
   // stays in loadData — this only computes scores and renders. recordSignals
   // (inside) dedupes per symbol+minute, so re-rendering is safe.
-  function renderFromData(ownedMap, raw, missingBatches) {
+  function renderFromData(ownedMap, raw, missingBatches, fromCache) {
     var content = document.getElementById("tsa-content");
     if (!content) return;
     var ownedSymbols = Object.keys(ownedMap);
@@ -2030,13 +2036,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         .filter(Boolean)
         .sort(function(a, b) { return b.score - a.score; });
 
-      // Log buy signals to history
-      recordSignals(stockResults);
+      // Log buy signals to history — only on real loads. The sym+minute
+      // dedupe doesn't protect a cached re-render >1 min after the fetch,
+      // which would append a duplicate entry with a stale price.
+      if (!fromCache) recordSignals(stockResults);
 
-      // Snapshot prices for trend arrows on next load
-      var prevPrices = {};
-      Object.keys(lastLoadPrices).forEach(function(k) { prevPrices[k] = lastLoadPrices[k]; });
-      stockResults.forEach(function(s) { if (s.p_live > 0) lastLoadPrices[s.symbol] = s.p_live; });
+      // Trend-arrow baseline from the previous real load (maintained in
+      // loadData; cached re-renders reuse it unchanged)
+      var prevPrices = prevLoadPrices;
 
       var top5MinScore = getTop5MinScore();
       var cachedInvHistory = loadInvestorHistory();
@@ -2624,11 +2631,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
       var histLabel = histSyms.length > 0 ? " · " + histSyms.length + " stocks · " + maxHistHours + "h hist" : "";
       html += "<div style=\"padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid " + d.divider + ";background:" + d.bg + "\">" +
-        "<span style=\"font-size:10px;color:" + d.muted + "\">Updated: " + new Date().toLocaleTimeString("en-GB") + autoRefreshLabel + "<span id='tsa-countdown'></span></span>" +
+        "<span style=\"font-size:10px;color:" + d.muted + "\">Updated: " + new Date(lastLoadTs || Date.now()).toLocaleTimeString("en-GB") + autoRefreshLabel + "<span id='tsa-countdown'></span></span>" +
         "<span style=\"font-size:10px;color:" + d.muted + "\">Storage: " + getTsaStorageSize() + histLabel + "</span>" +
         "</div>" +
         "<button id='tsa-scroll-top' title='Scroll to top'>↑</button>";
-      scheduleAutoRefresh();
+      // (scheduleAutoRefresh deliberately NOT called here: a cached re-render
+      // must not reset the pending fetch timer. loadData re-arms it after
+      // calling this function — which also covers the roiPlannerActive
+      // early-return above, where this point is never reached.)
 
       // Partial-data banner: scores/signals below are computed from
       // incomplete interval data — say so instead of rendering as if full.
@@ -2844,7 +2854,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // loadData when no cache exists yet (e.g. the light owned-only prefetch
   // sets lastOwnedMap but not lastRaw).
   function renderCached() {
-    if (lastOwnedMap && lastRaw) renderFromData(lastOwnedMap, lastRaw, lastMissingBatches);
+    if (lastOwnedMap && lastRaw) renderFromData(lastOwnedMap, lastRaw, lastMissingBatches, true);
     else loadData();
   }
 
@@ -2894,7 +2904,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (missingBatches === 4) { throw new Error("tornsy.com unreachable — no price data"); }
 
       var ownedMap = buildOwnedMap(tornData);
-      var ownedSymbols = Object.keys(ownedMap);
       var raw = mergeIntervals([t1, t2, t3, t4]);
 
       // Enrich ownedMap with correct benefit_shares/swing_shares using live prices
@@ -2947,6 +2956,17 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       lastOwnedMap = ownedMap;
       lastRaw = raw;
       lastMissingBatches = missingBatches;
+      lastLoadTs = Date.now();
+      // Trend-arrow baseline: snapshot the previous load's prices, then
+      // update lastLoadPrices from this load. Maintained here (per FETCH,
+      // not per render) so cached re-renders reuse the same baseline
+      // instead of wiping the arrows.
+      prevLoadPrices = {};
+      Object.keys(lastLoadPrices).forEach(function(k) { prevLoadPrices[k] = lastLoadPrices[k]; });
+      raw.forEach(function(r) {
+        var p = parseFloat(r.price) || 0;
+        if (r.stock && p > 0) lastLoadPrices[r.stock] = p;
+      });
 
       // Calculate best ROI recommendation for Quick Trade bar
       var benefitSymsForRec = Object.keys(BENEFIT_REQ);
@@ -2979,6 +2999,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (currentStock) qtDrawChart(currentStock);
 
       renderFromData(ownedMap, raw, missingBatches);
+
+      // Re-arm the auto-refresh AFTER rendering, from the fetch path only —
+      // cached re-renders never reset the timer, and the ROI-planner branch
+      // inside renderFromData can't skip it.
+      scheduleAutoRefresh();
 
     }).catch(function(e) {
       content.innerHTML = "<div class=\"tsa-error\">Error: " + escHtml(e.message) + "</div>" +
@@ -3302,8 +3327,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
 
   function qtGetMoneyFast() {
-    var dataMoney = $("#user-money").attr("data-money");
-    if (dataMoney) return parseFloat(dataMoney);
+    // Guard against a non-numeric data-money attribute: NaN slips past every
+    // caller's <= 0 / cost-comparison guard (NaN compares false to anything),
+    // so an unreadable value must collapse to the text fallback / 0 instead.
+    var n = parseFloat($("#user-money").attr("data-money"));
+    if (isFinite(n) && n > 0) return n;
     var textMoney = $("#user-money").text();
     return textMoney ? qtParseTornNumber(textMoney) : 0;
   }
@@ -3532,7 +3560,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (owned <= 0) { showToast("You have no shares of " + symb, "warn"); return; }
     var sellAmt = qtApplyBenefitLock(symb, owned);
     if (sellAmt === null) return;
-    qtUiTrade(symb, sellAmt, "sellShares", "Sold all " + sellAmt.toLocaleString("en-US") + " shares");
+    qtUiTrade(symb, sellAmt, "sellShares", "Sold all " + sellAmt.toLocaleString("en-US") + " shares", { blockMaxShares: sellAmt });
   }
 
   function fmtQtAmt(n) {
@@ -3616,7 +3644,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (shares > owned) shares = owned;
     shares = qtApplyBenefitLock(sym, shares);
     if (shares === null) return;
-    qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym);
+    qtUiTrade(sym, shares, "sellShares", "Sold " + shares.toLocaleString("en-US") + " " + sym, { blockMaxShares: shares });
   }
 
   function createAmountBtn(label, amt, mode, idx) {
