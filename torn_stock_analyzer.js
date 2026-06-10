@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.28.3
+// @version      2.28.4
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -658,10 +658,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var current = bbWidthFromSlice(prices);
     if (current === null) return null;
 
-    // Historical sample: one BB width every 4 prices
+    // Historical sample: one BB width every 4 prices.
+    // bbWidthFromSlice only ever looks at the trailing 20 elements, so slice
+    // exactly that window instead of copying the whole prefix (O(n) vs O(n²)).
     var historicalWidths = [];
     for (var i = 20; i <= prices.length; i += 4) {
-      var w = bbWidthFromSlice(prices.slice(0, i));
+      var w = bbWidthFromSlice(prices.slice(i - 20, i));
       if (w !== null) historicalWidths.push(w);
     }
 
