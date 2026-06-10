@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.26.4
+// @version      2.27.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1479,6 +1479,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function mergeIntervals(calls) {
     var merged = {};
     calls.forEach(function(call) {
+      if (!call) return; // failed tornsy batch (fetch .catch'ed to null)
       var stocks = call.data || call;
       if (!Array.isArray(stocks)) return;
       stocks.forEach(function(s) {
@@ -1984,12 +1985,20 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     content.innerHTML = "<div class=\"tsa-loading\">Fetching data...</div>";
 
+    // A failed tornsy batch resolves to null instead of rejecting the whole
+    // Promise.all — the panel renders from whatever arrived (every batch
+    // carries the live price) with a visible "partial data" banner. Only a
+    // failed Torn call, or ALL four tornsy batches failing, shows the error UI.
+    var tornsyFetch = function(url) {
+      return fetchJSON(url).catch(function() { return null; });
+    };
+
     Promise.all([
       fetchJSON("https://api.torn.com/user/?selections=stocks&key=" + getTornKey()),
-      fetchJSON("https://tornsy.com/api/stocks?interval=m30,h1,h2,h3,h4"),
-      fetchJSON("https://tornsy.com/api/stocks?interval=h6,h8,h10,h12,h16"),
-      fetchJSON("https://tornsy.com/api/stocks?interval=h20,d1,d2,d3,d4"),
-      fetchJSON("https://tornsy.com/api/stocks?interval=d5,d6,d7,w1,h5")
+      tornsyFetch("https://tornsy.com/api/stocks?interval=m30,h1,h2,h3,h4"),
+      tornsyFetch("https://tornsy.com/api/stocks?interval=h6,h8,h10,h12,h16"),
+      tornsyFetch("https://tornsy.com/api/stocks?interval=h20,d1,d2,d3,d4"),
+      tornsyFetch("https://tornsy.com/api/stocks?interval=d5,d6,d7,w1,h5")
     ]).then(function(results) {
       var tornData = results[0];
       var t1 = results[1];
@@ -1998,6 +2007,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var t4 = results[4];
 
       if (tornData.error) { throw new Error(friendlyApiError(tornData.error.error)); }
+
+      // Count unusable batches (failed fetch, or a JSON error body that
+      // carries no stock array) so the banner reflects what's really missing.
+      var missingBatches = [t1, t2, t3, t4].filter(function(t) {
+        return !t || !Array.isArray(t.data || t);
+      }).length;
+      if (missingBatches === 4) { throw new Error("tornsy.com unreachable — no price data"); }
 
       var ownedMap = buildOwnedMap(tornData);
       var ownedSymbols = Object.keys(ownedMap);
@@ -2685,6 +2701,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         "</div>" +
         "<button id='tsa-scroll-top' title='Scroll to top'>↑</button>";
       scheduleAutoRefresh();
+
+      // Partial-data banner: scores/signals below are computed from
+      // incomplete interval data — say so instead of rendering as if full.
+      if (missingBatches > 0) {
+        html = "<div style=\"padding:8px 14px;font-size:11px;font-weight:700;color:" + (isDark2 ? "#ffc107" : "#7a5c00") + ";background:rgba(255,193,7," + (isDark2 ? "0.12" : "0.18") + ");border-bottom:1px solid rgba(255,193,7,0.45)\">" +
+          "⚠ tornsy partial — " + missingBatches + "/4 interval batches missing, signals degraded</div>" + html;
+      }
 
       content.innerHTML = html;
 
