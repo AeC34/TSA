@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.26.1
+// @version      2.26.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2882,9 +2882,17 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     }).catch(function(e) {
       content.innerHTML = "<div class=\"tsa-error\">Error: " + escHtml(e.message) + "</div>" +
-        "<div class=\"tsa-footer\"><span></span><button class=\"tsa-refresh\" id=\"tsa-refresh-btn\">Retry</button></div>";
+        "<div class=\"tsa-footer\"><span id=\"tsa-error-next\" style=\"font-size:10px\"><span id='tsa-countdown'></span></span><button class=\"tsa-refresh\" id=\"tsa-refresh-btn\">Retry</button></div>";
       var retryBtn = document.getElementById("tsa-refresh-btn");
       if (retryBtn) retryBtn.addEventListener("click", loadData);
+      // A failed load must NOT kill the auto-refresh loop — re-arm it so a
+      // transient API/tornsy error only skips one cycle. Safe no-op when
+      // auto-refresh is off or the tab isn't actively viewed.
+      scheduleAutoRefresh();
+      if (autoRefreshEndTime) {
+        var nextEl = document.getElementById("tsa-error-next");
+        if (nextEl) nextEl.insertAdjacentText("afterbegin", "Auto-retry");
+      }
     });
   }
 
