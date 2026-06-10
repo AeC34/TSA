@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.27.3
+// @version      2.28.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -202,6 +202,7 @@
 
   var lastOwnedMap = null;
   var lastRaw = null;
+  var lastMissingBatches = 0; // tornsy batches missing at last load (drives the partial-data banner on cached re-renders)
   var lastBestRec = null; // Best ROI recommendation from last data load
   var lastBuySymbols = []; // Symbols currently in the Top-5 buy list (drives Quick Buy pills)
   var lastBuyInvDelta = {}; // {sym: 24h investor delta} for the Quick Buy pill sub-text
@@ -1984,138 +1985,19 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     } catch(e) {}
   }
 
-  function loadData() {
-    cleanOldIntents();
+  // Render the overlay from already-fetched data. Extracted from loadData so
+  // panel exits (settings Cancel, alerts Back, ROI planner close) can redraw
+  // instantly from lastOwnedMap/lastRaw without refetching. Side-effect
+  // tracking (realized P/L, alerts, price recording, holdings snapshot)
+  // stays in loadData — this only computes scores and renders. recordSignals
+  // (inside) dedupes per symbol+minute, so re-rendering is safe.
+  function renderFromData(ownedMap, raw, missingBatches) {
     var content = document.getElementById("tsa-content");
-    var isDarkMode = document.getElementById("tsa-overlay").classList.contains("tsa-dark");
-    content.style.background = isDarkMode ? "#0f0f1a" : "#ffffff";
-
-    // Check for API key
-    var key = getTornKey();
-    if (!key || key === "###PDA-APIKEY###") {
-      showKeyOnboarding(content, function() { loadData(); });
-      return;
-    }
-
-    content.innerHTML = "<div class=\"tsa-loading\">Fetching data...</div>";
-
-    // A failed tornsy batch resolves to null instead of rejecting the whole
-    // Promise.all — the panel renders from whatever arrived (every batch
-    // carries the live price) with a visible "partial data" banner. Only a
-    // failed Torn call, or ALL four tornsy batches failing, shows the error UI.
-    var tornsyFetch = function(url) {
-      return fetchJSON(url).catch(function() { return null; });
-    };
-
-    Promise.all([
-      fetchJSON("https://api.torn.com/user/?selections=stocks&key=" + getTornKey()),
-      tornsyFetch("https://tornsy.com/api/stocks?interval=m30,h1,h2,h3,h4"),
-      tornsyFetch("https://tornsy.com/api/stocks?interval=h6,h8,h10,h12,h16"),
-      tornsyFetch("https://tornsy.com/api/stocks?interval=h20,d1,d2,d3,d4"),
-      tornsyFetch("https://tornsy.com/api/stocks?interval=d5,d6,d7,w1,h5")
-    ]).then(function(results) {
-      var tornData = results[0];
-      var t1 = results[1];
-      var t2 = results[2];
-      var t3 = results[3];
-      var t4 = results[4];
-
-      if (tornData.error) { throw new Error(friendlyApiError(tornData.error.error)); }
-
-      // Count unusable batches (failed fetch, or a JSON error body that
-      // carries no stock array) so the banner reflects what's really missing.
-      var missingBatches = [t1, t2, t3, t4].filter(function(t) {
-        return !t || !Array.isArray(t.data || t);
-      }).length;
-      if (missingBatches === 4) { throw new Error("tornsy.com unreachable — no price data"); }
-
-      var ownedMap = buildOwnedMap(tornData);
-      var ownedSymbols = Object.keys(ownedMap);
-      var raw = mergeIntervals([t1, t2, t3, t4]);
-
-      // Enrich ownedMap with correct benefit_shares/swing_shares using live prices
-      enrichOwnedMap(ownedMap, raw);
-
-      // Track realized profit from sold positions
-      if (getShowRealized()) {
-        try {
-          var prevHoldings = JSON.parse(localStorage.getItem("tsa_prev_holdings") || "{}");
-          var realizedEvents = getRealizedEvents();
-          var nowTs = Math.floor(Date.now() / 1000);
-          var prevSyms = Object.keys(prevHoldings);
-          for (var rpi = 0; rpi < prevSyms.length; rpi++) {
-            var rpSym = prevSyms[rpi];
-            var prevEntry = prevHoldings[rpSym];
-            if (!prevEntry) continue;
-            var curEntry = ownedMap[rpSym];
-            var prevShares = prevEntry.shares || 0;
-            var curShares = curEntry ? (curEntry.shares || 0) : 0;
-            var soldShares = prevShares - curShares;
-            if (soldShares <= 0) continue;
-            var rpRaw = raw ? raw.find(function(x) { return x.stock === rpSym; }) : null;
-            var liveP = rpRaw ? (parseFloat(rpRaw.price) || 0) : 0;
-            var costP = prevEntry.avg_price || 0;
-            if (liveP <= 0 || costP <= 0) continue;
-            var realizedProfit = (liveP * 0.999 - costP) * soldShares;
-            realizedEvents.push({ ts: nowTs, profit: realizedProfit, sym: rpSym, sell_price: liveP });
-          }
-          // Trim events older than 90 days. Keep entries that are missing `ts`
-          // (legacy data from older TSA versions that didn't record a timestamp)
-          // — discarding them silently would lose the user's realized-P/L history.
-          var trim90 = nowTs - 90 * 86400;
-          realizedEvents = realizedEvents.filter(function(e) { return !e.ts || e.ts >= trim90; });
-          localStorage.setItem("tsa_realized_events", JSON.stringify(realizedEvents));
-        } catch(e) {}
-      }
-      // Save the holdings snapshot on EVERY load, regardless of the
-      // show-realized toggle. If it only updated while the toggle was on,
-      // re-enabling it later would diff against a stale snapshot and book
-      // every interim sale as realized profit at TODAY'S price instead of
-      // the actual sale price. Sales made while the toggle was off are
-      // simply not recorded (their sale price is unknowable).
-      var holdingsSnap = {};
-      Object.keys(ownedMap).forEach(function(s) {
-        holdingsSnap[s] = { shares: ownedMap[s].shares || 0, avg_price: ownedMap[s].avg_price || 0 };
-      });
-      lsSet("tsa_prev_holdings", JSON.stringify(holdingsSnap));
-
-      // Store for ROI planner
-      lastOwnedMap = ownedMap;
-      lastRaw = raw;
-
-      // Calculate best ROI recommendation for Quick Trade bar
-      var benefitSymsForRec = Object.keys(BENEFIT_REQ);
-      var recCandidates = [];
-      benefitSymsForRec.forEach(function(sym) {
-        var tierInfo = calcNextTier(sym, ownedMap, raw);
-        if (!tierInfo || tierInfo.sharesNeeded <= 0) return;
-        var payoutEntry = ROI_MAP[sym + "|T" + tierInfo.nextIncrement] || null;
-        if (!payoutEntry) {
-          // Fallback: find highest available tier for this sym
-          for (var ri2 = ROI_TABLE.length - 1; ri2 >= 0; ri2--) {
-            if (ROI_TABLE[ri2].sym === sym) { payoutEntry = ROI_TABLE[ri2]; break; }
-          }
-        }
-        var roi = payoutEntry ? (payoutEntry.payout / tierInfo.cost * (365 / payoutEntry.freq) * 100) : 0;
-        recCandidates.push({ sym: sym, tierInfo: tierInfo, cost: tierInfo.cost, roi: roi });
-      });
-      recCandidates.sort(function(a, b) { return b.roi - a.roi; });
-      lastBestRec = recCandidates[0] || null;
-      updateQtRecommendation(null);
-
-      // Check price alerts
-      checkAlerts(raw);
-
-      // Record live prices to history — returns saved object to avoid re-parsing
-      var _savedHistory = recordPrices(raw);
-
-      // Update chart with selected stock
-      var currentStock = lsGet("qt_last_stock", "");
-      if (currentStock) qtDrawChart(currentStock);
-
+    if (!content) return;
+    var ownedSymbols = Object.keys(ownedMap);
       // If ROI planner is active, show it instead
       if (roiPlannerActive) { showROIPlanner(ownedMap, raw); return; }
-      var cachedPriceHistory = _savedHistory || loadHistory();
+      var cachedPriceHistory = loadHistory();
       var stockResults = STOCKS_LIST
         .map(function(s) { return calcScore(s, raw, ownedMap, cachedPriceHistory); })
         .filter(Boolean)
@@ -2928,6 +2810,148 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
       // Refresh the torn-stock-pocket-style Quick Buy / Swing pills under the QT bar
       renderQtPills();
+
+  }
+
+  // Re-render from the last load's cached data; falls back to a full
+  // loadData when no cache exists yet (e.g. the light owned-only prefetch
+  // sets lastOwnedMap but not lastRaw).
+  function renderCached() {
+    if (lastOwnedMap && lastRaw) renderFromData(lastOwnedMap, lastRaw, lastMissingBatches);
+    else loadData();
+  }
+
+  function loadData() {
+    cleanOldIntents();
+    var content = document.getElementById("tsa-content");
+    var isDarkMode = document.getElementById("tsa-overlay").classList.contains("tsa-dark");
+    content.style.background = isDarkMode ? "#0f0f1a" : "#ffffff";
+
+    // Check for API key
+    var key = getTornKey();
+    if (!key || key === "###PDA-APIKEY###") {
+      showKeyOnboarding(content, function() { loadData(); });
+      return;
+    }
+
+    content.innerHTML = "<div class=\"tsa-loading\">Fetching data...</div>";
+
+    // A failed tornsy batch resolves to null instead of rejecting the whole
+    // Promise.all — the panel renders from whatever arrived (every batch
+    // carries the live price) with a visible "partial data" banner. Only a
+    // failed Torn call, or ALL four tornsy batches failing, shows the error UI.
+    var tornsyFetch = function(url) {
+      return fetchJSON(url).catch(function() { return null; });
+    };
+
+    Promise.all([
+      fetchJSON("https://api.torn.com/user/?selections=stocks&key=" + getTornKey()),
+      tornsyFetch("https://tornsy.com/api/stocks?interval=m30,h1,h2,h3,h4"),
+      tornsyFetch("https://tornsy.com/api/stocks?interval=h6,h8,h10,h12,h16"),
+      tornsyFetch("https://tornsy.com/api/stocks?interval=h20,d1,d2,d3,d4"),
+      tornsyFetch("https://tornsy.com/api/stocks?interval=d5,d6,d7,w1,h5")
+    ]).then(function(results) {
+      var tornData = results[0];
+      var t1 = results[1];
+      var t2 = results[2];
+      var t3 = results[3];
+      var t4 = results[4];
+
+      if (tornData.error) { throw new Error(friendlyApiError(tornData.error.error)); }
+
+      // Count unusable batches (failed fetch, or a JSON error body that
+      // carries no stock array) so the banner reflects what's really missing.
+      var missingBatches = [t1, t2, t3, t4].filter(function(t) {
+        return !t || !Array.isArray(t.data || t);
+      }).length;
+      if (missingBatches === 4) { throw new Error("tornsy.com unreachable — no price data"); }
+
+      var ownedMap = buildOwnedMap(tornData);
+      var ownedSymbols = Object.keys(ownedMap);
+      var raw = mergeIntervals([t1, t2, t3, t4]);
+
+      // Enrich ownedMap with correct benefit_shares/swing_shares using live prices
+      enrichOwnedMap(ownedMap, raw);
+
+      // Track realized profit from sold positions
+      if (getShowRealized()) {
+        try {
+          var prevHoldings = JSON.parse(localStorage.getItem("tsa_prev_holdings") || "{}");
+          var realizedEvents = getRealizedEvents();
+          var nowTs = Math.floor(Date.now() / 1000);
+          var prevSyms = Object.keys(prevHoldings);
+          for (var rpi = 0; rpi < prevSyms.length; rpi++) {
+            var rpSym = prevSyms[rpi];
+            var prevEntry = prevHoldings[rpSym];
+            if (!prevEntry) continue;
+            var curEntry = ownedMap[rpSym];
+            var prevShares = prevEntry.shares || 0;
+            var curShares = curEntry ? (curEntry.shares || 0) : 0;
+            var soldShares = prevShares - curShares;
+            if (soldShares <= 0) continue;
+            var rpRaw = raw ? raw.find(function(x) { return x.stock === rpSym; }) : null;
+            var liveP = rpRaw ? (parseFloat(rpRaw.price) || 0) : 0;
+            var costP = prevEntry.avg_price || 0;
+            if (liveP <= 0 || costP <= 0) continue;
+            var realizedProfit = (liveP * 0.999 - costP) * soldShares;
+            realizedEvents.push({ ts: nowTs, profit: realizedProfit, sym: rpSym, sell_price: liveP });
+          }
+          // Trim events older than 90 days. Keep entries that are missing `ts`
+          // (legacy data from older TSA versions that didn't record a timestamp)
+          // — discarding them silently would lose the user's realized-P/L history.
+          var trim90 = nowTs - 90 * 86400;
+          realizedEvents = realizedEvents.filter(function(e) { return !e.ts || e.ts >= trim90; });
+          localStorage.setItem("tsa_realized_events", JSON.stringify(realizedEvents));
+        } catch(e) {}
+      }
+      // Save the holdings snapshot on EVERY load, regardless of the
+      // show-realized toggle. If it only updated while the toggle was on,
+      // re-enabling it later would diff against a stale snapshot and book
+      // every interim sale as realized profit at TODAY'S price instead of
+      // the actual sale price. Sales made while the toggle was off are
+      // simply not recorded (their sale price is unknowable).
+      var holdingsSnap = {};
+      Object.keys(ownedMap).forEach(function(s) {
+        holdingsSnap[s] = { shares: ownedMap[s].shares || 0, avg_price: ownedMap[s].avg_price || 0 };
+      });
+      lsSet("tsa_prev_holdings", JSON.stringify(holdingsSnap));
+
+      // Store for ROI planner
+      lastOwnedMap = ownedMap;
+      lastRaw = raw;
+      lastMissingBatches = missingBatches;
+
+      // Calculate best ROI recommendation for Quick Trade bar
+      var benefitSymsForRec = Object.keys(BENEFIT_REQ);
+      var recCandidates = [];
+      benefitSymsForRec.forEach(function(sym) {
+        var tierInfo = calcNextTier(sym, ownedMap, raw);
+        if (!tierInfo || tierInfo.sharesNeeded <= 0) return;
+        var payoutEntry = ROI_MAP[sym + "|T" + tierInfo.nextIncrement] || null;
+        if (!payoutEntry) {
+          // Fallback: find highest available tier for this sym
+          for (var ri2 = ROI_TABLE.length - 1; ri2 >= 0; ri2--) {
+            if (ROI_TABLE[ri2].sym === sym) { payoutEntry = ROI_TABLE[ri2]; break; }
+          }
+        }
+        var roi = payoutEntry ? (payoutEntry.payout / tierInfo.cost * (365 / payoutEntry.freq) * 100) : 0;
+        recCandidates.push({ sym: sym, tierInfo: tierInfo, cost: tierInfo.cost, roi: roi });
+      });
+      recCandidates.sort(function(a, b) { return b.roi - a.roi; });
+      lastBestRec = recCandidates[0] || null;
+      updateQtRecommendation(null);
+
+      // Check price alerts
+      checkAlerts(raw);
+
+      // Record live prices to history (also refreshes the in-memory history cache)
+      recordPrices(raw);
+
+      // Update chart with selected stock
+      var currentStock = lsGet("qt_last_stock", "");
+      if (currentStock) qtDrawChart(currentStock);
+
+      renderFromData(ownedMap, raw, missingBatches);
 
     }).catch(function(e) {
       content.innerHTML = "<div class=\"tsa-error\">Error: " + escHtml(e.message) + "</div>" +
@@ -4746,7 +4770,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
 
       document.getElementById("tsa-settings-cancel").addEventListener("click", function() {
-        loadData();
+        renderCached();
       });
     });
 
@@ -4810,7 +4834,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         });
       });
 
-      document.getElementById("tsa-alerts-back").addEventListener("click", function() { loadData(); });
+      document.getElementById("tsa-alerts-back").addEventListener("click", function() { renderCached(); });
     });
 
     document.getElementById("tsa-roi-btn").addEventListener("click", function() {
@@ -4819,7 +4843,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (roiPlannerActive && lastOwnedMap) {
         showROIPlanner(lastOwnedMap, lastRaw);
       } else if (!roiPlannerActive) {
-        loadData();
+        renderCached();
       }
     });
 
