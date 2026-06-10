@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.27.2
+// @version      2.27.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2990,11 +2990,21 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return days * 24 * 60 * 60 * 1000;
   }
 
+  // In-memory cache of the parsed price history. The JSON string is multi-MB,
+  // so re-parsing it for every chart draw / row tap is expensive on mobile.
+  // recordPrices mutates the cached object in place and saveHistory re-points
+  // the cache, so reads and writes stay coherent within this tab. (Cross-tab
+  // writes were already last-write-wins before the cache existed.)
+  var historyMemCache = null;
+
   function loadHistory() {
-    try { return JSON.parse(localStorage.getItem(HISTORY_KEY)) || {}; } catch(e) { return {}; }
+    if (historyMemCache) return historyMemCache;
+    try { historyMemCache = JSON.parse(localStorage.getItem(HISTORY_KEY)) || {}; } catch(e) { historyMemCache = {}; }
+    return historyMemCache;
   }
 
   function saveHistory(history) {
+    historyMemCache = history;
     try {
       localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
     } catch(e) {
