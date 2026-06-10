@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.26.3
+// @version      2.26.4
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2167,7 +2167,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         // For mixed stocks (benefit + swing) in swing-only mode, count only the swing portion
         var isMixedStock = ownedEntry.has_dividend && ownedEntry.swing_shares > 0 && ownedEntry.benefit_shares > 0;
         if (getProfitSwingOnly() && isMixedStock) {
-          var swingCost = ownedEntry.avg_price || 0;
+          // Price the swing portion at its own FIFO avg (same as the swing
+          // rows and sell pills) so the header total reconciles with the
+          // per-row $ values shown below it.
+          var swingCost = calcSwingAvgPrice(ownedEntry, ownedEntry.transactions, ownedEntry.avg_price);
+          if (swingCost === null) swingCost = ownedEntry.avg_price || 0;
           if (swingCost > 0) {
             totalProfit += (livePrice * 0.999 - swingCost) * ownedEntry.swing_shares;
           }
