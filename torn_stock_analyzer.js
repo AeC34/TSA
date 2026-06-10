@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.28.0
+// @version      2.28.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3619,8 +3619,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       btn.appendChild(del);
       // Click to edit value
       btn.onclick = function() {
-        var newVal = prompt("Edit amount:", amt);
-        newVal = parseInt(newVal, 10);
+        // parseQtMoney accepts the same 25m/1.5b/500k shorthand the pill
+        // budget prompts teach; prompt is pre-filled in the same format.
+        var newVal = parseQtMoney(prompt("Edit amount (e.g. 25m):", fmtQtAmt(amt)));
         if (newVal > 0) {
           qtAmounts[idx] = newVal;
           qtAmounts.sort(function(a,b){return a-b;});
@@ -3680,8 +3681,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       addBtn.style.cssText = "padding:6px 10px;border-radius:7px;border:1px dashed #2a2a4a;background:transparent;color:#4a6fa5;font-family:JetBrains Mono,monospace;font-size:14px;cursor:pointer;flex-shrink:0;";
       addBtn.textContent = "+";
       addBtn.onclick = function() {
-        var val = prompt("Enter amount in $ (e.g. 25000000):");
-        val = parseInt(val, 10);
+        var val = parseQtMoney(prompt("Enter amount in $ (e.g. 25m or 25000000):"));
         if (val > 0) { qtAmounts.push(val); qtAmounts.sort(function(a,b){return a-b;}); saveQtAmounts(); renderQtRows(); }
       };
       buyRow.appendChild(addBtn);
