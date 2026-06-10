@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.27.1
+// @version      2.27.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2066,13 +2066,18 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           realizedEvents = realizedEvents.filter(function(e) { return !e.ts || e.ts >= trim90; });
           localStorage.setItem("tsa_realized_events", JSON.stringify(realizedEvents));
         } catch(e) {}
-        // Save current holdings snapshot for next comparison
-        var holdingsSnap = {};
-        Object.keys(ownedMap).forEach(function(s) {
-          holdingsSnap[s] = { shares: ownedMap[s].shares || 0, avg_price: ownedMap[s].avg_price || 0 };
-        });
-        lsSet("tsa_prev_holdings", JSON.stringify(holdingsSnap));
       }
+      // Save the holdings snapshot on EVERY load, regardless of the
+      // show-realized toggle. If it only updated while the toggle was on,
+      // re-enabling it later would diff against a stale snapshot and book
+      // every interim sale as realized profit at TODAY'S price instead of
+      // the actual sale price. Sales made while the toggle was off are
+      // simply not recorded (their sale price is unknowable).
+      var holdingsSnap = {};
+      Object.keys(ownedMap).forEach(function(s) {
+        holdingsSnap[s] = { shares: ownedMap[s].shares || 0, avg_price: ownedMap[s].avg_price || 0 };
+      });
+      lsSet("tsa_prev_holdings", JSON.stringify(holdingsSnap));
 
       // Store for ROI planner
       lastOwnedMap = ownedMap;
