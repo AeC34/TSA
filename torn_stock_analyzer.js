@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.26.2
+// @version      2.26.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2520,7 +2520,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         if (!isBenefit && s.avg_price > 0) {
           var profitPct = getProfitTarget();
           var avgForTarget = swingAvgPrice !== null ? swingAvgPrice : s.avg_price;
-          var targetPrice = avgForTarget * (1 + profitPct / 100);
+          // Price at which NET profit (after Torn's 0.1% sell fee) hits the
+          // target — matches the PROFIT signal / 🎯 threshold exactly:
+          // (p * 0.999 - avg) / avg = target%  ⇒  p = avg * (1 + t%) / 0.999
+          var targetPrice = avgForTarget * (1 + profitPct / 100) / 0.999;
           var currentPctStr = displayNetProfitPct !== null ? (displayNetProfitPct >= 0 ? "+" : "") + displayNetProfitPct.toFixed(2) + "%" : "";
           var currentPctColor = (displayNetProfitPct || 0) >= 0 ? d.green : d.red;
           targetLine = "<span style=\"font-size:10px;color:" + d.muted + "\">Avg $" + avgForTarget.toFixed(2) + " → Target <strong style=\"color:" + d.green + "\">$" + targetPrice.toFixed(2) + "</strong> (+" + profitPct.toFixed(1) + "%)" +
