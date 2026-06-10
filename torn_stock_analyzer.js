@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.27.0
+// @version      2.27.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1343,6 +1343,20 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         gmXhr({
           method: "GET", url: url,
           onload: function(r) {
+            // HTTP-level errors (4xx/5xx) take the same retry path as
+            // network/parse errors, so transient hiccups are retried instead
+            // of an error body being accepted as data. Exception: a parseable
+            // Torn-style {error: ...} body resolves, so the caller can map it
+            // to a friendly message. (All gmXhr adapter paths supply r.status;
+            // if it's ever missing, the check is false and we parse as before.)
+            if (r.status >= 400) {
+              var errBody = null;
+              try { errBody = JSON.parse(r.responseText); } catch (e2) { /* not JSON */ }
+              if (errBody && errBody.error) { resolve(errBody); return; }
+              if (n > 1) { setTimeout(function() { attempt(n - 1); }, 2000); }
+              else reject(new Error("HTTP " + r.status + " after 3 attempts: " + url));
+              return;
+            }
             try { resolve(JSON.parse(r.responseText)); }
             catch (e) {
               if (n > 1) { setTimeout(function() { attempt(n - 1); }, 2000); }
