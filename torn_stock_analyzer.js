@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.26.0
+// @version      2.26.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -968,8 +968,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     var s = 'font-family:' + c.mono + ';';
 
-    // Capital bar
-    var swingTagsHtml = swingDetails.slice(0,4).map(function(d){
+    // Capital bar — show EVERY position that is counted in totalCapital
+    // (incl. ROI-skipped stocks, whose whole position counts as swing), so
+    // the tag breakdown always reconciles with the Available capital sum.
+    swingDetails.sort(function(a, b) { return b.val - a.val; });
+    var swingTagsHtml = swingDetails.map(function(d){
       return '<span style="font-size:9px;padding:2px 6px;border-radius:8px;background:' + c.tag_bg + ';border:1px solid ' + c.tag_border + ';color:' + c.tag_text + ';' + s + 'margin-right:4px">' + d.sym + ' ' + fmRoi(d.val) + '</span>';
     }).join('');
     if (armoryFunds > 0) {
