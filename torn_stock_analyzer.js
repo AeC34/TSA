@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.28.1
+// @version      2.28.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1873,6 +1873,31 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var m = Math.floor(rem / 60000);
     var s = Math.floor((rem % 60000) / 1000);
     el.textContent = " · " + m + "m " + (s < 10 ? "0" : "") + s + "s";
+  }
+
+  // Undo toast for the realized-profit reset: shows for 10s with an Undo
+  // button that restores tsa_realized_events from the backup written by the
+  // reset handler. Separate from showToast so the button can carry a handler.
+  function showRealizedUndoToast() {
+    var t = document.createElement("div");
+    t.style.cssText = "position:fixed;bottom:16px;left:16px;z-index:2147483648;display:flex;align-items:center;gap:10px;" +
+      "padding:10px 14px;border-radius:10px;border-left:3px solid #ffc107;background:rgba(150,110,0,0.93);" +
+      "color:#fff;font-family:JetBrains Mono,monospace;font-size:12px;";
+    var span = document.createElement("span");
+    span.textContent = "Realized profit reset";
+    t.appendChild(span);
+    var btn = document.createElement("button");
+    btn.textContent = "Undo";
+    btn.style.cssText = "padding:4px 10px;border-radius:6px;border:1px solid #fff;background:transparent;color:#fff;font-weight:700;cursor:pointer;font-size:12px;";
+    btn.onclick = function() {
+      lsSet("tsa_realized_events", localStorage.getItem("tsa_realized_events_backup") || "[]");
+      if (t.parentNode) t.parentNode.removeChild(t);
+      showToast("Realized profit restored", "success");
+      renderCached();
+    };
+    t.appendChild(btn);
+    document.body.appendChild(t);
+    setTimeout(function() { if (t.parentNode) t.parentNode.removeChild(t); }, 10000);
   }
 
   var API_ERRORS = {
@@ -4705,9 +4730,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
 
       document.getElementById("tsa-realized-reset").addEventListener("click", function() {
+        // Stash the events for one-tap undo. tsa_prev_holdings is NOT backed
+        // up: it self-heals on the next load, and restoring an old snapshot
+        // later would fabricate realized events from a stale diff.
+        lsSet("tsa_realized_events_backup", localStorage.getItem("tsa_realized_events") || "[]");
         lsSet("tsa_realized_events", "[]");
         lsSet("tsa_prev_holdings", "{}");
-        showToast("Realized profit reset");
+        showRealizedUndoToast();
         loadData();
       });
 
