@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.28.2
+// @version      2.28.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3969,7 +3969,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var label = sellPillAmt > 0 ? "Sell " + fmtQtAmt(sellPillAmt)
                   : (p.profit === null || p.profit === undefined) ? "Sell" : qtFmtSignedDollar(p.profit);
         if (atTarget) label += " 🎯";
-        var subText = (p.value === null || p.value === undefined) ? "" : qtFmtDollar(p.value);
+        // Sub-text: position value · net profit % (the unit the user's
+        // profit-target/stop-loss thresholds are set in)
+        var pctTxt = (p.pct === null || p.pct === undefined) ? "" : (p.pct >= 0 ? "+" : "") + p.pct.toFixed(2) + "%";
+        var valTxt = (p.value === null || p.value === undefined) ? "" : qtFmtDollar(p.value);
+        var subText = valTxt && pctTxt ? valTxt + " · " + pctTxt : (valTxt || pctTxt);
         var pill = makeQtPill(p.sym, positive, label, isDark, function() {
           qtBuildMaps();
           var owned = qtGetOwnedShares(p.sym);
