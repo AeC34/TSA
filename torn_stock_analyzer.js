@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.25.0
+// @version      2.25.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2457,7 +2457,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // matching the $ value shown on each pill. Independent of the swing
       // section's own (profit-%) sort.
       lastSwingPills = swingTrades.map(function(s) {
-        return { sym: s.symbol, shares: s._swingShares, profit: s._swingProfit, value: s._swingValue };
+        return { sym: s.symbol, shares: s._swingShares, profit: s._swingProfit, value: s._swingValue, pct: s._swingDisplayPct };
       }).sort(function(a, b) {
         var pa = (a.profit == null) ? -Infinity : a.profit;
         var pb = (b.profit == null) ? -Infinity : b.profit;
@@ -3845,10 +3845,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       swWrap.appendChild(swHead);
       var swRow = document.createElement("div");
       swRow.className = "qt-pill-row";
+      var profitTarget = getProfitTarget();
       lastSwingPills.forEach(function(p) {
         var positive = (p.profit || 0) >= 0;
+        // 🎯 marks a swing position whose net profit % has reached the profit
+        // target set in Settings (tsa_profit_target) — i.e. ready to sell.
+        var atTarget = (p.pct !== null && p.pct !== undefined) && (p.pct >= profitTarget);
         var label = sellPillAmt > 0 ? "Sell " + fmtQtAmt(sellPillAmt)
                   : (p.profit === null || p.profit === undefined) ? "Sell" : qtFmtSignedDollar(p.profit);
+        if (atTarget) label += " 🎯";
         var subText = (p.value === null || p.value === undefined) ? "" : qtFmtDollar(p.value);
         var pill = makeQtPill(p.sym, positive, label, isDark, function() {
           qtBuildMaps();
@@ -3875,6 +3880,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
               if (fired && !partial && pill.parentNode) pill.parentNode.removeChild(pill);
             });
         }, subText);
+        if (atTarget) pill.title = "Reached your " + profitTarget + "% profit target";
         swRow.appendChild(pill);
       });
       swWrap.appendChild(swRow);
