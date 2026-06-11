@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.29.0
+// @version      2.29.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -206,7 +206,6 @@
   var prevLoadPrices = {}; // price baseline from the PREVIOUS real load (trend arrows); cached re-renders must not touch it
   var lastLoadTs = 0; // wall-clock of the last successful fetch — footer "Updated:" stamp (render time would mislabel cached data as fresh)
   var lastBestRec = null; // Best ROI recommendation from last data load
-  var lastBridgePill = null; // Best bridge candidate (next highest ROI, non-target) from last data load
   var lastBuySymbols = []; // Symbols currently in the Top-5 buy list (drives Quick Buy pills)
   var lastBuyInvDelta = {}; // {sym: 24h investor delta} for the Quick Buy pill sub-text
   var lastBuyPriceDelta = {}; // {sym: 24h price change %} for the Quick Buy pill sub-text
@@ -2997,28 +2996,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
       recCandidates.sort(function(a, b) { return b.roi - a.roi; });
       lastBestRec = recCandidates[0] || null;
-
-      // Bridge pill: highest-ROI non-target candidate with positive weekly income.
-      // Uses the same filter as ROI Planner's allBridgeCandidates so both agree on which stock to show.
-      lastBridgePill = null;
-      if (lastBestRec) {
-        var bpCands = [];
-        Object.keys(BENEFIT_REQ).forEach(function(bpSym) {
-          if (roiSymSkipped(bpSym)) return;
-          var bpTi = calcNextTier(bpSym, ownedMap, raw);
-          if (!bpTi || bpTi.cost <= 0) return;
-          var bpPe = ROI_MAP[bpSym + "|T" + bpTi.nextIncrement] || null;
-          if (!bpPe) return;
-          var bpIv = getItemValue(bpPe);
-          var bpPc = (bpPe.item && bpIv > 0) ? bpIv : bpPe.payout;
-          if ((bpPc / bpPe.freq * 7) <= 0) return;
-          if (bpSym === lastBestRec.sym && bpTi.nextIncrement === lastBestRec.tierInfo.nextIncrement) return;
-          bpCands.push({ sym: bpSym, tierInfo: bpTi, payoutEntry: bpPe, cost: bpTi.cost, roi: bpPc / bpTi.cost * (365 / bpPe.freq) * 100 });
-        });
-        bpCands.sort(function(a, b) { return b.roi - a.roi; });
-        lastBridgePill = bpCands[0] || null;
-      }
-
       updateQtRecommendation(null);
 
       // Check price alerts
@@ -3922,6 +3899,67 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // building up to the block over time. Caps each buy at the shares still
     // needed so it never overshoots. Follows lastBestRec dynamically.
     if (lastBestRec && lastBestRec.tierInfo) {
+      // Compute bridge pill — exact same logic as ROI Planner's bridgeChain[0].
+      // Uses payoutEntry.payout (not item value) for ROI sort, matching dynamicNextTiers.
+      // Capital = cash + swing shares (same as planner; armory excluded — no API call here).
+      var bpFirst = null;
+      if (lastOwnedMap && lastRaw) {
+        var bpSwingCap = 0;
+        Object.keys(lastOwnedMap).forEach(function(s) {
+          var o = lastOwnedMap[s];
+          if (!o || o.swing_shares <= 0) return;
+          var le = lastRaw.find(function(x) { return x.stock === s; });
+          if (le) bpSwingCap += (parseFloat(le.price) || 0) * o.swing_shares;
+        });
+        var bpTotalCap = qtGetMoneyFast() + bpSwingCap;
+        var bpWeekly = calcWeeklyIncome(lastOwnedMap, lastRaw, null);
+        var bpTargetSym = lastBestRec.sym;
+        var bpTargetInc = lastBestRec.tierInfo.nextIncrement;
+
+        var bpCands = [];
+        Object.keys(BENEFIT_REQ).forEach(function(s) {
+          if (roiSymSkipped(s)) return;
+          var bpTi = calcNextTier(s, lastOwnedMap, lastRaw);
+          if (!bpTi || bpTi.cost <= 0) return;
+          var bpPe = ROI_MAP[s + "|T" + bpTi.nextIncrement] || null;
+          if (!bpPe) return;
+          if (s === bpTargetSym && bpTi.nextIncrement === bpTargetInc) return;
+          var bpIv = getItemValue(bpPe);
+          var bpPc = (bpPe.item && bpIv > 0) ? bpIv : bpPe.payout;
+          if ((bpPc / bpPe.freq * 7) <= 0) return;
+          bpCands.push({ sym: s, tierInfo: bpTi, payoutEntry: bpPe, cost: bpTi.cost,
+            roi: bpPe.payout / bpTi.cost * (365 / bpPe.freq) * 100,
+            extraIncome: bpPc / bpPe.freq * 7 });
+        });
+        bpCands.sort(function(a, b) { return b.roi - a.roi; });
+
+        var bpChainCap = bpTotalCap;
+        bpCands.forEach(function(e) {
+          if (bpFirst) return;
+          if (e.cost <= bpChainCap) {
+            bpFirst = { sym: e.sym, tier: "T" + e.tierInfo.nextIncrement, cost: e.cost,
+              extraIncome: e.extraIncome, roi: e.roi, status: "now", daysUntil: 0, tierInfo: e.tierInfo };
+          }
+        });
+
+        if (!bpFirst) {
+          var bpDaysBase = daysToAfford(lastBestRec.cost, bpTotalCap, bpWeekly);
+          var bpLaterList = [];
+          bpCands.forEach(function(e) {
+            var days = daysToAfford(e.cost, bpChainCap, bpWeekly);
+            if (days === Infinity || days > 365) return;
+            var simCap = bpChainCap + (bpWeekly / 7 * days) - e.cost;
+            var daysAfter = days + daysToAfford(lastBestRec.cost, simCap, bpWeekly + e.extraIncome);
+            var saved = bpDaysBase - daysAfter;
+            if (saved <= 0) return;
+            bpLaterList.push({ sym: e.sym, tier: "T" + e.tierInfo.nextIncrement, cost: e.cost,
+              extraIncome: e.extraIncome, roi: e.roi, status: "later", daysUntil: days, daysSaved: saved, tierInfo: e.tierInfo });
+          });
+          bpLaterList.sort(function(a, b) { return a.daysUntil - b.daysUntil; });
+          bpFirst = bpLaterList[0] || null;
+        }
+      }
+
       var ti = lastBestRec.tierInfo;
       var ownedSh = Math.max(0, ti.totalSharesNeeded - ti.sharesNeeded);
       var bankWrap = document.createElement("div");
@@ -3929,7 +3967,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var bankLbl = document.createElement("span");
       bankLbl.className = "qt-pill-group-label";
       bankLbl.style.color = labelColor;
-      bankLbl.textContent = lastBridgePill ? "🏦 ROI Bank  ·  🔗 Bridgebuilder" : "🏦 ROI Bank → benefit block";
+      bankLbl.textContent = bpFirst ? "🏦 ROI Bank  ·  🔗 Bridgebuilder" : "🏦 ROI Bank → benefit block";
       bankWrap.appendChild(bankLbl);
       var bankRow = document.createElement("div");
       bankRow.className = "qt-pill-row";
@@ -3953,25 +3991,24 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         qtUiTrade(sym, shares, "buyShares", "Banked " + shares.toLocaleString("en-US") + " " + sym + " → T" + r.tierInfo.nextIncrement);
       }, bankMoney, qtPillPaletteBank(isDark)));
 
-      if (lastBridgePill) {
-        var bp = lastBridgePill;
-        var bpLivePrice = qtGetPrice(bp.sym) || bp.tierInfo.livePrice || 0;
-        var bpCost = bpLivePrice > 0 ? bp.tierInfo.sharesNeeded * bpLivePrice : bp.cost;
-        var bpMoney = qtGetMoneyFast();
-        var bpAfford = bpMoney >= bpCost && bpCost > 0;
-        var bpPct = bpCost > 0 ? Math.min(100, Math.round(bpMoney / bpCost * 100)) : 0;
-        var bpLabel = bpAfford ? "Bridge T" + bp.tierInfo.nextIncrement : bpPct + "% T" + bp.tierInfo.nextIncrement;
-        var bpSub = bpLivePrice > 0 ? (bpAfford ? fmRoi(bpCost) : fmRoi(bpMoney) + "/" + fmRoi(bpCost)) : "";
-        bankRow.appendChild(makeQtPill(bp.sym, true, bpLabel, isDark, function() {
+      if (bpFirst) {
+        var bpIsNow = bpFirst.status === "now";
+        var bpLabel = bpIsNow
+          ? "✓ " + bpFirst.tier
+          : "~" + bpFirst.daysUntil + "d " + bpFirst.tier;
+        var bpSub = bpIsNow
+          ? fmRoi(bpFirst.cost) + " +" + fmRoi(bpFirst.extraIncome) + "/7d"
+          : "saves " + bpFirst.daysSaved + "d · " + fmRoi(bpFirst.cost);
+        bankRow.appendChild(makeQtPill(bpFirst.sym, true, bpLabel, isDark, function() {
           qtBuildMaps();
-          var price = qtGetPrice(bp.sym) || bp.tierInfo.livePrice || 0;
-          if (price <= 0) { showToast("Could not read price for " + bp.sym, "error"); return; }
+          var price = qtGetPrice(bpFirst.sym) || bpFirst.tierInfo.livePrice || 0;
+          if (price <= 0) { showToast("Could not read price for " + bpFirst.sym, "error"); return; }
           var m = qtGetMoneyFast();
           if (m <= 0) { showToast("No money found", "warn"); return; }
-          var shares = Math.min(Math.floor(m / price), bp.tierInfo.sharesNeeded);
-          if (shares < 1) { showToast("Not enough cash for 1 share of " + bp.sym, "warn"); return; }
-          qtUiTrade(bp.sym, shares, "buyShares", "Bridged " + shares.toLocaleString("en-US") + " " + bp.sym + " → T" + bp.tierInfo.nextIncrement);
-        }, bpSub, bpAfford ? qtPillPalette(true, isDark) : qtPillPaletteBridge(isDark)));
+          var shares = Math.min(Math.floor(m / price), bpFirst.tierInfo.sharesNeeded);
+          if (shares < 1) { showToast("Not enough cash for 1 share of " + bpFirst.sym, "warn"); return; }
+          qtUiTrade(bpFirst.sym, shares, "buyShares", "Bridged " + shares.toLocaleString("en-US") + " " + bpFirst.sym + " → " + bpFirst.tier);
+        }, bpSub, bpIsNow ? qtPillPalette(true, isDark) : qtPillPaletteBridge(isDark)));
       }
 
       bankWrap.appendChild(bankRow);
