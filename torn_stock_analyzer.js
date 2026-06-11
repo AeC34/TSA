@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.28.8
+// @version      2.28.9
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3778,9 +3778,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       ".qt-pill-group-label{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;" +
         "font-family:JetBrains Mono,monospace;margin:0 0 5px 2px;display:block;}" +
       ".qt-pill .qt-pill-sub{font-size:11px;opacity:0.65;}" +
-      ".qt-pill-row{display:flex;flex-wrap:wrap;gap:6px;}" +
-      // "Bar hidden but pills always on" mode: strip the bar chrome so only pills remain
-      "#qt-bar.qt-bar-pills-only{background:transparent !important;border:none !important;box-shadow:none !important;padding:4px 12px !important;}";
+      ".qt-pill-row{display:flex;flex-wrap:wrap;gap:6px;}";
     document.head.appendChild(st);
   }
 
@@ -3804,17 +3802,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     if (showBar) {
       bar.style.display = "";
-      bar.classList.remove("qt-bar-pills-only");
       if (row1) row1.style.display = "";
       if (body) body.style.display = minimized ? "none" : "block";
-    } else if (pillsVisible) {
-      bar.style.display = "";
-      bar.classList.add("qt-bar-pills-only");
-      if (row1) row1.style.display = "none";
-      if (body) body.style.display = "none";
     } else {
       bar.style.display = "none";
-      bar.classList.remove("qt-bar-pills-only");
     }
   }
 
@@ -4482,10 +4473,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             "<button class='qt-tf-btn' data-tf='all' style='flex:1;min-height:32px;padding:7px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:10px;font-family:JetBrains Mono,monospace;cursor:pointer;'>All</button>" +
           "</div>" +
         "</div>" +
-      "</div>" +
-      // torn-stock-pocket-style Quick Buy / Swing pills — sibling of #qt-body so
-      // they survive minimize and can show standalone when the bar is hidden
-      "<div id='qt-pills' style='display:none;margin-top:8px;'></div>";
+      "</div>";
+
+    var pillsDiv = document.createElement("div");
+    pillsDiv.id = "qt-pills";
+    pillsDiv.style.cssText = "display:none;padding:4px 12px 8px;";
 
     var target = document.getElementById("stockmarketroot") ||
                  document.querySelector(".content-wrapper") ||
@@ -4493,6 +4485,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
                  document.body;
     if (target && target.firstChild) target.insertBefore(bar, target.firstChild);
     else document.body.insertBefore(bar, document.body.firstChild);
+    bar.insertAdjacentElement("afterend", pillsDiv);
 
     renderQtRows();
     setTimeout(qtBuildMaps, 1000);
