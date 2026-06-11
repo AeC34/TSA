@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.28.6
+// @version      2.28.7
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2433,14 +2433,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         s._swingValue = (s.p_live > 0 && swShares > 0) ? swShares * s.p_live : null;
       });
       swingTrades.sort(function(a, b) { return (b._swingDisplayPct || -Infinity) - (a._swingDisplayPct || -Infinity); });
-      // Sell pills are ordered by dollar profit-if-sold-now (biggest first),
-      // matching the $ value shown on each pill. Independent of the swing
-      // section's own (profit-%) sort.
+      // Sell pills are ordered by net profit % (closest to profit first),
+      // so the position nearest break-even/profit surfaces at the top.
       lastSwingPills = swingTrades.map(function(s) {
         return { sym: s.symbol, shares: s._swingShares, profit: s._swingProfit, value: s._swingValue, pct: s._swingDisplayPct };
       }).sort(function(a, b) {
-        var pa = (a.profit == null) ? -Infinity : a.profit;
-        var pb = (b.profit == null) ? -Infinity : b.profit;
+        var pa = (a.pct == null) ? -Infinity : a.pct;
+        var pb = (b.pct == null) ? -Infinity : b.pct;
         return pb - pa;
       });
 
