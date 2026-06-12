@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.29.1
+// @version      2.29.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -206,6 +206,9 @@
   var prevLoadPrices = {}; // price baseline from the PREVIOUS real load (trend arrows); cached re-renders must not touch it
   var lastLoadTs = 0; // wall-clock of the last successful fetch — footer "Updated:" stamp (render time would mislabel cached data as fresh)
   var lastBestRec = null; // Best ROI recommendation from last data load
+  var lastCashBalance = 0; // money_onhand from the last loadData fetch — bridge-pill capital (same source as the ROI Planner)
+  var lastArmoryFunds = 0; // faction armory balance from the last loadData fetch — bridge-pill capital
+  var lastItemFetchTs = 0; // last fetchAllItemPrices run on the pill path (TTL-gated; the planner fetches on every open)
   var lastBuySymbols = []; // Symbols currently in the Top-5 buy list (drives Quick Buy pills)
   var lastBuyInvDelta = {}; // {sym: 24h investor delta} for the Quick Buy pill sub-text
   var lastBuyPriceDelta = {}; // {sym: 24h price change %} for the Quick Buy pill sub-text
@@ -791,6 +794,115 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return rows;
   }
 
+  // Target + bridgebuilder chain — shared by the ROI Planner and the Quick
+  // Trade bridge pill so both always agree on the target and on bridgeChain.
+  // Logic extracted 1:1 from renderROIPlanner; chain entries additionally
+  // carry tierInfo (sharesNeeded/livePrice) for the pill's click handler.
+  function computeBridgePlan(ownedMap, raw, totalCapital, weeklyIncome) {
+    // Build dynamic next tier list for all 35 stocks with benefit data
+    var benefitSyms = Object.keys(BENEFIT_REQ);
+    var dynamicNextTiers = [];
+    benefitSyms.forEach(function(sym) {
+      var tierInfo = calcNextTier(sym, ownedMap, raw);
+      if (!tierInfo || tierInfo.cost <= 0) return;
+      // Find payout data from ROI_MAP for this next increment
+      var payoutEntry = ROI_MAP[sym + "|T" + tierInfo.nextIncrement] || null;
+      // If no ROI_MAP entry — passive stock, skip (no sellable payout)
+      dynamicNextTiers.push({
+        sym: sym,
+        tierInfo: tierInfo,
+        payoutEntry: payoutEntry,
+        cost: tierInfo.cost,
+        roi: payoutEntry ? (payoutEntry.payout / tierInfo.cost * (365 / payoutEntry.freq) * 100) : 0
+      });
+    });
+
+    // Sort by ROI descending, filter out skipped (symbol-level)
+    dynamicNextTiers = dynamicNextTiers.filter(function(e) {
+      return !roiSymSkipped(e.sym);
+    });
+    dynamicNextTiers.sort(function(a, b) { return b.roi - a.roi; });
+
+    // Target = best ROI entry regardless of affordability
+    var target = dynamicNextTiers[0] || null;
+
+    // Bridgebuilder chain: buy multiple bridges you can afford (keep them, don't sell),
+    // each one adds dividend income that accelerates reaching Next Move.
+    var bridgeChain = [];
+    var daysBaseline = target ? daysToAfford(target.cost, totalCapital, weeklyIncome) : 0;
+    var daysWithBridges = daysBaseline;
+
+    if (target) {
+      var chainCap    = totalCapital;
+      var chainIncome = weeklyIncome;
+
+      // Candidates: not the target itself, not skipped, must have dividend income
+      var allBridgeCandidates = dynamicNextTiers.filter(function(e) {
+        if (roiSymSkipped(e.sym)) return false;
+        if (e.sym === target.sym && e.tierInfo.nextIncrement === target.tierInfo.nextIncrement) return false;
+        if (!e.payoutEntry) return false;
+        var fItemVal = getItemValue(e.payoutEntry);
+        var fPerCycle = (e.payoutEntry.item && fItemVal > 0) ? fItemVal : e.payoutEntry.payout;
+        return (fPerCycle / e.payoutEntry.freq * 7) > 0;
+      });
+
+      allBridgeCandidates.forEach(function(e) {
+        var bItemVal = getItemValue(e.payoutEntry);
+        var bPerCycle = (e.payoutEntry.item && bItemVal > 0) ? bItemVal : e.payoutEntry.payout;
+        var extraIncome = bPerCycle / e.payoutEntry.freq * 7;
+
+        if (e.cost <= chainCap) {
+          // Affordable now — buy it, reduce capital, increase income stream
+          chainCap    -= e.cost;
+          chainIncome += extraIncome;
+          bridgeChain.push({
+            sym: e.sym, tier: "T" + e.tierInfo.nextIncrement, tierInfo: e.tierInfo,
+            cost: e.cost, extraIncome: extraIncome, roi: e.roi,
+            status: "now", daysUntil: 0
+          });
+        }
+        // "Later" bridges added separately below, sorted by soonest
+      });
+
+      // After buying all "now" bridges, find the next 2 soonest affordable ones
+      // that actually save days vs just waiting — these are the ones to save up for
+      var laterCandidates = [];
+      allBridgeCandidates.forEach(function(e) {
+        if (bridgeChain.some(function(b) { return b.sym === e.sym && b.tier === ("T" + e.tierInfo.nextIncrement); })) return; // already handled as "now"
+        var lItemVal = getItemValue(e.payoutEntry);
+        var lPerCycle = (e.payoutEntry.item && lItemVal > 0) ? lItemVal : e.payoutEntry.payout;
+        var extraIncome = lPerCycle / e.payoutEntry.freq * 7;
+        var daysUntil   = daysToAfford(e.cost, chainCap, chainIncome);
+        if (daysUntil === Infinity || daysUntil > 365) return;
+        // Simulate buying this bridge after daysUntil: does it save days to target?
+        var simCap    = chainCap + (chainIncome / 7 * daysUntil) - e.cost;
+        var simIncome = chainIncome + extraIncome;
+        var daysAfter = daysUntil + daysToAfford(target.cost, simCap, simIncome);
+        var saved     = daysBaseline - daysAfter;
+        if (saved <= 0) return; // doesn't help
+        laterCandidates.push({
+          sym: e.sym, tier: "T" + e.tierInfo.nextIncrement, tierInfo: e.tierInfo,
+          cost: e.cost, extraIncome: extraIncome, roi: e.roi,
+          status: "later", daysUntil: daysUntil, daysSaved: saved
+        });
+      });
+      // Sort by soonest affordable, keep top 2
+      laterCandidates.sort(function(a, b) { return a.daysUntil - b.daysUntil; });
+      laterCandidates.slice(0, 2).forEach(function(b) { bridgeChain.push(b); });
+
+      // Recompute goal with all "now" bridges applied (capital reduced, income boosted)
+      daysWithBridges = daysToAfford(target.cost, chainCap, chainIncome);
+    }
+
+    return {
+      dynamicNextTiers: dynamicNextTiers,
+      target: target,
+      bridgeChain: bridgeChain,
+      daysBaseline: daysBaseline,
+      daysWithBridges: daysWithBridges
+    };
+  }
+
   function renderROIPlanner(ownedMap, raw, cashBalance, armoryFunds) {
     // From-zero support: planner works with no owned benefit blocks — capital
     // comes from cash + armory, income starts at 0 and bootstraps via buys.
@@ -824,101 +936,18 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // Weekly income from current benefit blocks
     var weeklyIncome = calcWeeklyIncome(ownedMap, raw, null);
 
-    // Build dynamic next tier list for all 35 stocks with benefit data
-    var benefitSyms = Object.keys(BENEFIT_REQ);
-    var dynamicNextTiers = [];
-    benefitSyms.forEach(function(sym) {
-      var tierInfo = calcNextTier(sym, ownedMap, raw);
-      if (!tierInfo || tierInfo.cost <= 0) return;
-      // Find payout data from ROI_MAP for this next increment
-      var payoutEntry = ROI_MAP[sym + "|T" + tierInfo.nextIncrement] || null;
-      // If no ROI_MAP entry — passive stock, skip (no sellable payout)
-      dynamicNextTiers.push({
-        sym: sym,
-        tierInfo: tierInfo,
-        payoutEntry: payoutEntry,
-        cost: tierInfo.cost,
-        roi: payoutEntry ? (payoutEntry.payout / tierInfo.cost * (365 / payoutEntry.freq) * 100) : 0
-      });
-    });
-
-    // Sort by ROI descending, filter out skipped (symbol-level)
-    dynamicNextTiers = dynamicNextTiers.filter(function(e) {
-      return !roiSymSkipped(e.sym);
-    });
-    dynamicNextTiers.sort(function(a, b) { return b.roi - a.roi; });
-
-    // Target = best ROI entry regardless of affordability
-    var target = dynamicNextTiers[0] || null;
+    // Target + bridgebuilder chain via the shared computation (also used by
+    // the Quick Trade bridge pill, so both views always agree).
+    var plan = computeBridgePlan(ownedMap, raw, totalCapital, weeklyIncome);
+    var dynamicNextTiers = plan.dynamicNextTiers;
+    var target = plan.target;
     var nextEntries = target ? [target] : [];
-
-    // Bridgebuilder chain: buy multiple bridges you can afford (keep them, don't sell),
-    // each one adds dividend income that accelerates reaching Next Move.
-    var bridgeChain = [];
-    var daysWait = target ? daysToAfford(target.cost, totalCapital, weeklyIncome) : 0;
-    var daysBaseline = daysWait;
+    var bridgeChain = plan.bridgeChain;
+    var daysWait = plan.daysBaseline;
+    var daysBaseline = plan.daysBaseline;
+    var daysWithBridges = plan.daysWithBridges;
 
     if (target) {
-      var chainCap    = totalCapital;
-      var chainIncome = weeklyIncome;
-
-      // Candidates: not the target itself, not skipped, must have dividend income
-      var allBridgeCandidates = dynamicNextTiers.filter(function(e) {
-        if (roiSymSkipped(e.sym)) return false;
-        if (e.sym === target.sym && e.tierInfo.nextIncrement === target.tierInfo.nextIncrement) return false;
-        if (!e.payoutEntry) return false;
-        var fItemVal = getItemValue(e.payoutEntry);
-        var fPerCycle = (e.payoutEntry.item && fItemVal > 0) ? fItemVal : e.payoutEntry.payout;
-        return (fPerCycle / e.payoutEntry.freq * 7) > 0;
-      });
-
-      allBridgeCandidates.forEach(function(e) {
-        var bItemVal = getItemValue(e.payoutEntry);
-        var bPerCycle = (e.payoutEntry.item && bItemVal > 0) ? bItemVal : e.payoutEntry.payout;
-        var extraIncome = bPerCycle / e.payoutEntry.freq * 7;
-
-        if (e.cost <= chainCap) {
-          // Affordable now — buy it, reduce capital, increase income stream
-          chainCap    -= e.cost;
-          chainIncome += extraIncome;
-          bridgeChain.push({
-            sym: e.sym, tier: "T" + e.tierInfo.nextIncrement,
-            cost: e.cost, extraIncome: extraIncome, roi: e.roi,
-            status: "now", daysUntil: 0
-          });
-        }
-        // "Later" bridges added separately below, sorted by soonest
-      });
-
-      // After buying all "now" bridges, find the next 2 soonest affordable ones
-      // that actually save days vs just waiting — these are the ones to save up for
-      var laterCandidates = [];
-      allBridgeCandidates.forEach(function(e) {
-        if (bridgeChain.some(function(b) { return b.sym === e.sym && b.tier === ("T" + e.tierInfo.nextIncrement); })) return; // already handled as "now"
-        var lItemVal = getItemValue(e.payoutEntry);
-        var lPerCycle = (e.payoutEntry.item && lItemVal > 0) ? lItemVal : e.payoutEntry.payout;
-        var extraIncome = lPerCycle / e.payoutEntry.freq * 7;
-        var daysUntil   = daysToAfford(e.cost, chainCap, chainIncome);
-        if (daysUntil === Infinity || daysUntil > 365) return;
-        // Simulate buying this bridge after daysUntil: does it save days to target?
-        var simCap    = chainCap + (chainIncome / 7 * daysUntil) - e.cost;
-        var simIncome = chainIncome + extraIncome;
-        var daysAfter = daysUntil + daysToAfford(target.cost, simCap, simIncome);
-        var saved     = daysBaseline - daysAfter;
-        if (saved <= 0) return; // doesn't help
-        laterCandidates.push({
-          sym: e.sym, tier: "T" + e.tierInfo.nextIncrement,
-          cost: e.cost, extraIncome: extraIncome, roi: e.roi,
-          status: "later", daysUntil: daysUntil, daysSaved: saved
-        });
-      });
-      // Sort by soonest affordable, keep top 2
-      laterCandidates.sort(function(a, b) { return a.daysUntil - b.daysUntil; });
-      laterCandidates.slice(0, 2).forEach(function(b) { bridgeChain.push(b); });
-
-      // Recompute goal with all "now" bridges applied (capital reduced, income boosted)
-      var daysWithBridges = daysToAfford(target.cost, chainCap, chainIncome);
-
       // Sell candidates: owned benefit blocks with lower ROI than target
       // ROI of target
       var targetRoi = target.roi || 0;
@@ -2892,19 +2921,32 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     };
 
     Promise.all([
-      fetchJSON("https://api.torn.com/user/?selections=stocks&key=" + getTornKey()),
+      // money,basic piggyback on the stocks call: money_onhand + player_id feed
+      // the bridge-pill capital (same numbers the ROI Planner fetches on open).
+      fetchJSON("https://api.torn.com/user/?selections=stocks,money,basic&key=" + getTornKey()),
       tornsyFetch("https://tornsy.com/api/stocks?interval=m30,h1,h2,h3,h4"),
       tornsyFetch("https://tornsy.com/api/stocks?interval=h6,h8,h10,h12,h16"),
       tornsyFetch("https://tornsy.com/api/stocks?interval=h20,d1,d2,d3,d4"),
-      tornsyFetch("https://tornsy.com/api/stocks?interval=d5,d6,d7,w1,h5")
+      tornsyFetch("https://tornsy.com/api/stocks?interval=d5,d6,d7,w1,h5"),
+      // Faction armory balance — counted as capital by the planner's bridgebuilder.
+      // Non-faction users get an API error body → armory stays 0.
+      fetchJSON("https://api.torn.com/faction/?selections=donations&key=" + getTornKey()).catch(function() { return null; })
     ]).then(function(results) {
       var tornData = results[0];
       var t1 = results[1];
       var t2 = results[2];
       var t3 = results[3];
       var t4 = results[4];
+      var factionData = results[5];
 
       if (tornData.error) { throw new Error(friendlyApiError(tornData.error.error)); }
+
+      lastCashBalance = tornData.money_onhand || 0;
+      lastArmoryFunds = 0;
+      var bpPlayerId = tornData.player_id;
+      if (bpPlayerId && factionData && !factionData.error && factionData.donations && factionData.donations[bpPlayerId]) {
+        lastArmoryFunds = factionData.donations[bpPlayerId].money_balance || 0;
+      }
 
       // Count unusable batches (failed fetch, or a JSON error body that
       // carries no stock array) so the banner reflects what's really missing.
@@ -3009,6 +3051,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (currentStock) qtDrawChart(currentStock);
 
       renderFromData(ownedMap, raw, missingBatches);
+
+      // Live item prices feed the bridge pill's income math (planner parity).
+      // TTL-gated to 30 min so auto-refresh doesn't re-fetch ~18 item endpoints
+      // every cycle; pills re-render once prices land.
+      if (Date.now() - lastItemFetchTs > 30 * 60 * 1000) {
+        lastItemFetchTs = Date.now();
+        fetchAllItemPrices(function() { renderQtPills(); });
+      }
 
       // Re-arm the auto-refresh AFTER rendering, from the fetch path only —
       // cached re-renders never reset the timer, and the ROI-planner branch
@@ -3899,10 +3949,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // building up to the block over time. Caps each buy at the shares still
     // needed so it never overshoots. Follows lastBestRec dynamically.
     if (lastBestRec && lastBestRec.tierInfo) {
-      // Compute bridge pill — exact same logic as ROI Planner's bridgeChain[0].
-      // Uses payoutEntry.payout (not item value) for ROI sort, matching dynamicNextTiers.
-      // Capital = cash + swing shares (same as planner; armory excluded — no API call here).
+      // Bridge pill = the planner's bridgeChain[0], from the SAME shared
+      // computation (computeBridgePlan) and the SAME capital: API money_onhand
+      // + swing value + faction armory (all captured in loadData).
       var bpFirst = null;
+      var bpEmpty = false; // a target exists but no bridge options — mirror the planner's "No bridgebuilder options"
       if (lastOwnedMap && lastRaw) {
         var bpSwingCap = 0;
         Object.keys(lastOwnedMap).forEach(function(s) {
@@ -3911,53 +3962,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var le = lastRaw.find(function(x) { return x.stock === s; });
           if (le) bpSwingCap += (parseFloat(le.price) || 0) * o.swing_shares;
         });
-        var bpTotalCap = qtGetMoneyFast() + bpSwingCap;
-        var bpWeekly = calcWeeklyIncome(lastOwnedMap, lastRaw, null);
-        var bpTargetSym = lastBestRec.sym;
-        var bpTargetInc = lastBestRec.tierInfo.nextIncrement;
-
-        var bpCands = [];
-        Object.keys(BENEFIT_REQ).forEach(function(s) {
-          if (roiSymSkipped(s)) return;
-          var bpTi = calcNextTier(s, lastOwnedMap, lastRaw);
-          if (!bpTi || bpTi.cost <= 0) return;
-          var bpPe = ROI_MAP[s + "|T" + bpTi.nextIncrement] || null;
-          if (!bpPe) return;
-          if (s === bpTargetSym && bpTi.nextIncrement === bpTargetInc) return;
-          var bpIv = getItemValue(bpPe);
-          var bpPc = (bpPe.item && bpIv > 0) ? bpIv : bpPe.payout;
-          if ((bpPc / bpPe.freq * 7) <= 0) return;
-          bpCands.push({ sym: s, tierInfo: bpTi, payoutEntry: bpPe, cost: bpTi.cost,
-            roi: bpPe.payout / bpTi.cost * (365 / bpPe.freq) * 100,
-            extraIncome: bpPc / bpPe.freq * 7 });
-        });
-        bpCands.sort(function(a, b) { return b.roi - a.roi; });
-
-        var bpChainCap = bpTotalCap;
-        bpCands.forEach(function(e) {
-          if (bpFirst) return;
-          if (e.cost <= bpChainCap) {
-            bpFirst = { sym: e.sym, tier: "T" + e.tierInfo.nextIncrement, cost: e.cost,
-              extraIncome: e.extraIncome, roi: e.roi, status: "now", daysUntil: 0, tierInfo: e.tierInfo };
-          }
-        });
-
-        if (!bpFirst) {
-          var bpDaysBase = daysToAfford(lastBestRec.cost, bpTotalCap, bpWeekly);
-          var bpLaterList = [];
-          bpCands.forEach(function(e) {
-            var days = daysToAfford(e.cost, bpChainCap, bpWeekly);
-            if (days === Infinity || days > 365) return;
-            var simCap = bpChainCap + (bpWeekly / 7 * days) - e.cost;
-            var daysAfter = days + daysToAfford(lastBestRec.cost, simCap, bpWeekly + e.extraIncome);
-            var saved = bpDaysBase - daysAfter;
-            if (saved <= 0) return;
-            bpLaterList.push({ sym: e.sym, tier: "T" + e.tierInfo.nextIncrement, cost: e.cost,
-              extraIncome: e.extraIncome, roi: e.roi, status: "later", daysUntil: days, daysSaved: saved, tierInfo: e.tierInfo });
-          });
-          bpLaterList.sort(function(a, b) { return a.daysUntil - b.daysUntil; });
-          bpFirst = bpLaterList[0] || null;
-        }
+        var bpPlan = computeBridgePlan(lastOwnedMap, lastRaw,
+          lastCashBalance + bpSwingCap + lastArmoryFunds,
+          calcWeeklyIncome(lastOwnedMap, lastRaw, null));
+        bpFirst = bpPlan.bridgeChain[0] || null;
+        bpEmpty = !!bpPlan.target && !bpFirst;
       }
 
       var ti = lastBestRec.tierInfo;
@@ -3967,7 +3976,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var bankLbl = document.createElement("span");
       bankLbl.className = "qt-pill-group-label";
       bankLbl.style.color = labelColor;
-      bankLbl.textContent = bpFirst ? "🏦 ROI Bank  ·  🔗 Bridgebuilder" : "🏦 ROI Bank → benefit block";
+      bankLbl.textContent = (bpFirst || bpEmpty) ? "🏦 ROI Bank  ·  🔗 Bridgebuilder" : "🏦 ROI Bank → benefit block";
       bankWrap.appendChild(bankLbl);
       var bankRow = document.createElement("div");
       bankRow.className = "qt-pill-row";
@@ -3992,6 +4001,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       }, bankMoney, qtPillPaletteBank(isDark)));
 
       if (bpFirst) {
+        // Same numbers as the planner's bridge row: "✓ Buy now" vs "in ~Nd · saves Nd".
+        // Click buys with on-hand cash, capped at the shares still needed (like the bank pill).
         var bpIsNow = bpFirst.status === "now";
         var bpLabel = bpIsNow
           ? "✓ " + bpFirst.tier
@@ -4009,6 +4020,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           if (shares < 1) { showToast("Not enough cash for 1 share of " + bpFirst.sym, "warn"); return; }
           qtUiTrade(bpFirst.sym, shares, "buyShares", "Bridged " + shares.toLocaleString("en-US") + " " + bpFirst.sym + " → " + bpFirst.tier);
         }, bpSub, bpIsNow ? qtPillPalette(true, isDark) : qtPillPaletteBridge(isDark)));
+      } else if (bpEmpty) {
+        // Planner shows "No bridgebuilder options" here — give the pill row the
+        // same explicit empty state instead of silently rendering nothing.
+        var bpNone = document.createElement("span");
+        bpNone.textContent = "🔗 no bridge options";
+        bpNone.style.cssText = "align-self:center;font-size:10px;color:" + labelColor + ";font-family:JetBrains Mono,monospace;white-space:nowrap;";
+        bankRow.appendChild(bpNone);
       }
 
       bankWrap.appendChild(bankRow);
