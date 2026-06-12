@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.29.3
+// @version      2.29.4
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3893,8 +3893,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       : { border: "#60a5fa", bg: "#dbeafe", text: "#1d4ed8", badge: "#3b82f6" };
   }
 
-  // Amber palette for the bridgebuilder pill when not yet affordable
-  function qtPillPaletteBridge(isDark) {
+  // Bridgebuilder pill palettes: teal when affordable now (distinct from
+  // buy-green and bank-blue), amber while still saving up.
+  function qtPillPaletteBridge(affordable, isDark) {
+    if (affordable) {
+      return isDark
+        ? { border: "rgba(19,78,74,0.75)", bg: "rgba(4,47,46,0.75)", text: "#5eead4", badge: "#0d9488" }
+        : { border: "#2dd4bf", bg: "#ccfbf1", text: "#0f766e", badge: "#14b8a6" };
+    }
     return isDark
       ? { border: "rgba(120,53,15,0.75)", bg: "rgba(69,26,3,0.75)", text: "#fdba74", badge: "#ea580c" }
       : { border: "#fb923c", bg: "#fff7ed", text: "#c2410c", badge: "#f97316" };
@@ -4021,7 +4027,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var shares = Math.min(Math.floor(m / price), bpFirst.tierInfo.sharesNeeded);
           if (shares < 1) { showToast("Not enough cash for 1 share of " + bpFirst.sym, "warn"); return; }
           qtUiTrade(bpFirst.sym, shares, "buyShares", "Bridged " + shares.toLocaleString("en-US") + " " + bpFirst.sym + " → " + bpFirst.tier);
-        }, bpSub, bpIsNow ? qtPillPalette(true, isDark) : qtPillPaletteBridge(isDark)));
+        }, bpSub, qtPillPaletteBridge(bpIsNow, isDark)));
       } else if (bpEmpty) {
         // Planner shows "No bridgebuilder options" here — give the pill row the
         // same explicit empty state instead of silently rendering nothing.
