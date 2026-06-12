@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.29.2
+// @version      2.29.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -4004,9 +4004,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         // Same numbers as the planner's bridge row: "✓ Buy now" vs "in ~Nd · saves Nd".
         // Click buys with on-hand cash, capped at the shares still needed (like the bank pill).
         var bpIsNow = bpFirst.status === "now";
+        // 🔗 prefix ties the pill to the planner's "🔗 Bridgebuilder" section
+        // (without it, the "now" state looks identical to a Quick Buy pill).
         var bpLabel = bpIsNow
-          ? "✓ " + bpFirst.tier
-          : "~" + bpFirst.daysUntil + "d " + bpFirst.tier;
+          ? "🔗 ✓ " + bpFirst.tier
+          : "🔗 ~" + bpFirst.daysUntil + "d " + bpFirst.tier;
         var bpSub = bpIsNow
           ? fmRoi(bpFirst.cost) + " +" + fmRoi(bpFirst.extraIncome) + "/7d"
           : "saves " + bpFirst.daysSaved + "d · " + fmRoi(bpFirst.cost);
