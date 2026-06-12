@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.29.4
+// @version      2.29.5
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3020,24 +3020,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         if (r.stock && p > 0) lastLoadPrices[r.stock] = p;
       });
 
-      // Calculate best ROI recommendation for Quick Trade bar
-      var benefitSymsForRec = Object.keys(BENEFIT_REQ);
-      var recCandidates = [];
-      benefitSymsForRec.forEach(function(sym) {
-        var tierInfo = calcNextTier(sym, ownedMap, raw);
-        if (!tierInfo || tierInfo.sharesNeeded <= 0) return;
-        var payoutEntry = ROI_MAP[sym + "|T" + tierInfo.nextIncrement] || null;
-        if (!payoutEntry) {
-          // Fallback: find highest available tier for this sym
-          for (var ri2 = ROI_TABLE.length - 1; ri2 >= 0; ri2--) {
-            if (ROI_TABLE[ri2].sym === sym) { payoutEntry = ROI_TABLE[ri2]; break; }
-          }
-        }
-        var roi = payoutEntry ? (payoutEntry.payout / tierInfo.cost * (365 / payoutEntry.freq) * 100) : 0;
-        recCandidates.push({ sym: sym, tierInfo: tierInfo, cost: tierInfo.cost, roi: roi });
-      });
-      recCandidates.sort(function(a, b) { return b.roi - a.roi; });
-      lastBestRec = recCandidates[0] || null;
+      // Best ROI recommendation for the Quick Trade bar = the planner's
+      // target from the shared computation, so the bank pill, rec widget,
+      // bridge pill and planner "Next move" always agree — and a stock the
+      // user ROI-skipped can never be recommended. Capital/income don't
+      // affect target selection (best ROI regardless of affordability).
+      lastBestRec = computeBridgePlan(ownedMap, raw, 0, 0).target;
       updateQtRecommendation(null);
 
       // Check price alerts
@@ -3951,29 +3939,34 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var hasSwing = lastSwingPills && lastSwingPills.length > 0;
     var labelColor = isDark ? "#7a7a9a" : "#666666";
 
+    // Shared plan (target + bridge chain), recomputed on EVERY pill render so
+    // skip-list changes made in the planner take effect immediately — the
+    // planner-close path re-renders from cache without a loadData refresh.
+    // Capital: API money_onhand + swing value + faction armory (planner parity).
+    var bpPlan = null;
+    if (lastOwnedMap && lastRaw) {
+      var bpSwingCap = 0;
+      Object.keys(lastOwnedMap).forEach(function(s) {
+        var o = lastOwnedMap[s];
+        if (!o || o.swing_shares <= 0) return;
+        var le = lastRaw.find(function(x) { return x.stock === s; });
+        if (le) bpSwingCap += (parseFloat(le.price) || 0) * o.swing_shares;
+      });
+      bpPlan = computeBridgePlan(lastOwnedMap, lastRaw,
+        lastCashBalance + bpSwingCap + lastArmoryFunds,
+        calcWeeklyIncome(lastOwnedMap, lastRaw, null));
+      // Keep the bank pill and rec widget on the same (skip-filtered) target.
+      lastBestRec = bpPlan.target;
+      updateQtRecommendation(null);
+    }
+
     // ROI "bank" pill — deposit cash into the next recommended benefit increment,
     // building up to the block over time. Caps each buy at the shares still
     // needed so it never overshoots. Follows lastBestRec dynamically.
     if (lastBestRec && lastBestRec.tierInfo) {
-      // Bridge pill = the planner's bridgeChain[0], from the SAME shared
-      // computation (computeBridgePlan) and the SAME capital: API money_onhand
-      // + swing value + faction armory (all captured in loadData).
-      var bpFirst = null;
-      var bpEmpty = false; // a target exists but no bridge options — mirror the planner's "No bridgebuilder options"
-      if (lastOwnedMap && lastRaw) {
-        var bpSwingCap = 0;
-        Object.keys(lastOwnedMap).forEach(function(s) {
-          var o = lastOwnedMap[s];
-          if (!o || o.swing_shares <= 0) return;
-          var le = lastRaw.find(function(x) { return x.stock === s; });
-          if (le) bpSwingCap += (parseFloat(le.price) || 0) * o.swing_shares;
-        });
-        var bpPlan = computeBridgePlan(lastOwnedMap, lastRaw,
-          lastCashBalance + bpSwingCap + lastArmoryFunds,
-          calcWeeklyIncome(lastOwnedMap, lastRaw, null));
-        bpFirst = bpPlan.bridgeChain[0] || null;
-        bpEmpty = !!bpPlan.target && !bpFirst;
-      }
+      // Bridge pill = the planner's bridgeChain[0] from the same shared plan.
+      var bpFirst = bpPlan ? (bpPlan.bridgeChain[0] || null) : null;
+      var bpEmpty = !!(bpPlan && bpPlan.target && !bpFirst); // mirror the planner's "No bridgebuilder options"
 
       var ti = lastBestRec.tierInfo;
       var ownedSh = Math.max(0, ti.totalSharesNeeded - ti.sharesNeeded);
