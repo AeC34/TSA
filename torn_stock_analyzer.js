@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.30.2
+// @version      2.31.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -394,6 +394,29 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var up = String(sym).toUpperCase();
     return roiSkipped.some(function(k) { return k.replace(/T\d+$/, "") === up; });
   }
+  // roiTierCap holds SYMBOL → max benefit tiers to KEEP (e.g. {"CBD":3}). Distinct
+  // from roiSkipped: a cap keeps tiers 1..N as benefit blocks and releases every
+  // share ABOVE tier N to swing (sellable + counted as planner capital); a skip
+  // releases the WHOLE position. Skip takes precedence (checked first in
+  // enrichOwnedMap), so a stock that is both skipped and capped is fully released.
+  var roiTierCap = (function() {
+    try {
+      var raw = JSON.parse(localStorage.getItem("tsa_roi_tier_cap") || "{}") || {};
+      var out = {};
+      Object.keys(raw).forEach(function(k) {
+        var sym = String(k).toUpperCase().replace(/T\d+$/, "");
+        var n = parseInt(raw[k], 10);
+        if (sym && n >= 0 && isFinite(n)) out[sym] = n;
+      });
+      return out;
+    } catch(e) { return {}; }
+  })();
+  // Effective cap for a symbol: the stored tier limit, or Infinity (no cap).
+  function roiSymTierCap(sym) {
+    var up = String(sym).toUpperCase();
+    return Object.prototype.hasOwnProperty.call(roiTierCap, up) ? roiTierCap[up] : Infinity;
+  }
+  function saveRoiTierCap() { lsSet("tsa_roi_tier_cap", JSON.stringify(roiTierCap)); }
   var itemPrices = {}; // cache: itemId -> price
   // itemNames are stable, persist them — saves an API call per id every reload.
   var itemNames = (function() {
@@ -818,9 +841,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
     });
 
-    // Sort by ROI descending, filter out skipped (symbol-level)
+    // Sort by ROI descending, filter out skipped (symbol-level) and any next tier
+    // that sits ABOVE the user's tier cap (don't recommend a buy that would
+    // immediately fall to swing).
     dynamicNextTiers = dynamicNextTiers.filter(function(e) {
-      return !roiSymSkipped(e.sym);
+      if (roiSymSkipped(e.sym)) return false;
+      return e.tierInfo.nextIncrement <= roiSymTierCap(e.sym);
     });
     dynamicNextTiers.sort(function(a, b) { return b.roi - a.roi; });
 
@@ -1153,6 +1179,39 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       '</div>';
     }
 
+    // Tier-cap controls — dropdown of all 35 stocks + cap input, then a
+    // collapsible list of stocks that currently have a cap. A cap keeps tiers
+    // 1..N as benefit blocks and releases every share above tier N to swing.
+    var capSyms = Object.keys(roiTierCap).filter(function(k) { return roiSymTierCap(k) !== Infinity; }).sort();
+    var stockOpts = STOCKS_LIST.map(function(sl) {
+      var sym = sl.toUpperCase();
+      return '<option value="' + sym + '">' + sym + '</option>';
+    }).join("");
+    html += '<div style="padding:8px 14px;border-bottom:1px solid ' + c.divider + ';background:' + c.bg2 + '">' +
+      '<div style="font-size:9px;letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;margin-bottom:5px">Tier cap · shares above tier N → swing</div>' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<select id="tsa-tiercap-sym" style="flex:1;min-width:0;font-size:11px;padding:5px 6px;border-radius:6px;border:1px solid ' + c.border + ';background:' + c.bg + ';color:' + c.text + ';' + s + '">' + stockOpts + '</select>' +
+        '<input id="tsa-tiercap-n" type="number" min="0" step="1" placeholder="N" style="width:52px;font-size:11px;padding:5px 6px;border-radius:6px;border:1px solid ' + c.border + ';background:' + c.bg + ';color:' + c.text + ';' + s + '">' +
+        '<button id="tsa-tiercap-set" style="font-size:11px;font-weight:700;padding:5px 12px;border-radius:6px;border:none;background:' + c.blue + ';color:#fff;cursor:pointer;' + s + '">Set</button>' +
+      '</div>';
+    if (capSyms.length > 0) {
+      html += '<div style="margin-top:6px;border:1px solid ' + c.divider + ';border-radius:6px;overflow:hidden">' +
+        '<button id="tsa-tiercap-toggle" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:none;border:none;cursor:pointer;font-family:' + c.mono + '">' +
+          '<span style="font-size:10px;color:' + c.blue + ';font-weight:600;letter-spacing:0.06em;text-transform:uppercase">Tier-capped (' + capSyms.length + ')</span>' +
+          '<span id="tsa-tiercap-caret" style="font-size:10px;color:' + c.muted + '">▶</span>' +
+        '</button>' +
+        '<div id="tsa-tiercap-list" style="display:none">' +
+          capSyms.map(function(sym) {
+            return '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-top:1px solid ' + c.divider + '">' +
+              '<span style="' + s + ';font-size:12px;font-weight:700;color:' + c.text + '">' + sym + ' <span style="font-size:9px;color:' + c.muted + ';font-weight:400">· cap T' + roiTierCap[sym] + '</span></span>' +
+              '<button class="tsa-tiercap-del" data-sym="' + sym + '" title="Remove cap — restore full benefit-block treatment" style="width:26px;height:26px;border-radius:50%;border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:11px;color:' + c.muted + ';display:flex;align-items:center;justify-content:center">✕</button>' +
+            '</div>';
+          }).join("") +
+        '</div>' +
+      '</div>';
+    }
+    html += '</div>';
+
     // Table header
     html += '<div style="display:grid;grid-template-columns:42px 26px 1fr 54px 32px;gap:4px;padding:5px 14px;font-size:9px;letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;border-bottom:1px solid ' + c.divider + ';' + s + ';position:sticky;top:0;background:' + c.bg + ';z-index:2;">' +
       '<span>Stock</span><span>Tier</span><span>Shares needed / Cost</span><span style="text-align:right">ROI</span><span></span></div>';
@@ -1318,6 +1377,60 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           if (caret) caret.textContent = open ? "▶" : "▼";
         });
       }
+
+      // Tier-cap controls
+      var capSel = content.querySelector("#tsa-tiercap-sym");
+      var capInput = content.querySelector("#tsa-tiercap-n");
+      var capSetBtn = content.querySelector("#tsa-tiercap-set");
+      if (capSel && capInput) {
+        // Pre-fill the input with the selected stock's existing cap (if any).
+        var syncCapInput = function() {
+          var cur = roiTierCap[capSel.value];
+          capInput.value = (cur === 0 || cur > 0) ? cur : "";
+        };
+        capSel.addEventListener("change", syncCapInput);
+        syncCapInput();
+      }
+      if (capSetBtn) {
+        capSetBtn.addEventListener("click", function() {
+          if (!capSel) return;
+          var sym = String(capSel.value || "").toUpperCase();
+          var n = parseInt(capInput ? capInput.value : "", 10);
+          if (!sym) return;
+          if (isNaN(n) || n < 0) { showToast("Enter a tier cap of 0 or more", "warn"); return; }
+          roiTierCap[sym] = n;
+          saveRoiTierCap();
+          // Recompute the benefit/swing split so the new cap takes effect
+          // immediately (swing capital, benefit rows, QT lock) — not just at the
+          // next full refresh. enrichOwnedMap ignores its raw arg.
+          enrichOwnedMap(ownedMap, null);
+          showToast(sym + " capped at T" + n + " — shares above go to swing", "success");
+          showROIPlanner(ownedMap, raw);
+        });
+      }
+      var capToggle = content.querySelector("#tsa-tiercap-toggle");
+      if (capToggle) {
+        capToggle.addEventListener("click", function() {
+          var list = content.querySelector("#tsa-tiercap-list");
+          var caret = content.querySelector("#tsa-tiercap-caret");
+          if (!list) return;
+          var open = list.style.display !== "none";
+          list.style.display = open ? "none" : "block";
+          if (caret) caret.textContent = open ? "▶" : "▼";
+        });
+      }
+      content.querySelectorAll(".tsa-tiercap-del").forEach(function(btn) {
+        btn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          var sym = String(btn.dataset.sym || "").toUpperCase();
+          if (!sym || !Object.prototype.hasOwnProperty.call(roiTierCap, sym)) return;
+          delete roiTierCap[sym];
+          saveRoiTierCap();
+          // Recompute so the restored stock re-enters the benefit-block split now.
+          enrichOwnedMap(ownedMap, null);
+          showROIPlanner(ownedMap, raw);
+        });
+      });
 
       content.querySelectorAll(".tsa-roi-buyrow").forEach(function(row) {
         row.addEventListener("click", function(e) {
@@ -1513,12 +1626,17 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       }
 
       var req = BENEFIT_REQ[sym] || 0;
+      // Per-stock tier cap (ROI planner): keep at most `cap` benefit tiers, release
+      // everything above to swing. Infinity = no cap. cap 0 = whole position swing
+      // (same end state as a skip, but tracked in the separate cap list).
+      var cap = roiSymTierCap(sym);
       var benefitShares;
       if (PASSIVE_STOCKS.indexOf(sym) >= 0) {
         // Passive perk stocks (WSU, IST, etc.) are single-tier — one block of
         // `req` shares, they never stack. Cap at req so any extra shares stay
         // swing/sellable instead of being locked by the 2^n tier formula.
-        benefitShares = req > 0 ? Math.min(req, totalShares) : 0;
+        // A tier cap of 0 releases that single block too.
+        benefitShares = (req > 0 && cap >= 1) ? Math.min(req, totalShares) : 0;
       } else {
         // Active (money/item) stocks stack. If the user has bought enough shares
         // for a higher tier (pending next dividend day), treat those extra shares
@@ -1529,7 +1647,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             effectiveIncrement++;
           }
         }
-        benefitShares = req > 0 ? (Math.pow(2, effectiveIncrement) - 1) * req : 0;
+        // Clamp to the user's tier cap so shares above tier `cap` fall to swing.
+        if (cap < effectiveIncrement) effectiveIncrement = cap;
+        benefitShares = (req > 0 && effectiveIncrement > 0) ? (Math.pow(2, effectiveIncrement) - 1) * req : 0;
         benefitShares = Math.min(benefitShares, totalShares);
       }
       var swingShares = Math.max(0, totalShares - benefitShares);
@@ -3585,14 +3705,20 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (currentOwned === 0) return -1; // sentinel: cannot verify → block
       var curTier = qtGetBenefitTier(symb, currentOwned);
       if (curTier.tier === 0) return Infinity; // no benefit tier → no restriction
-      // Max sellable = current owned minus shares needed to stay at current tier.
+      // Honour the ROI-planner tier cap: only the tiers up to the cap are held
+      // back; shares above it are swing/sellable. (The precise path above already
+      // reflects the cap via enriched benefit_shares — this fallback runs only
+      // before the TSA panel has loaded.)
+      var effTier = Math.min(curTier.tier, roiSymTierCap(symb));
+      if (effTier <= 0) return Infinity; // cap 0 → no shares held back
+      // Max sellable = current owned minus shares needed to stay at the capped tier.
       // Active benefit blocks need the cumulative threshold (2^tier - 1) × req
       // to maintain that tier, NOT just `tier × req` — selling down to tier × req
       // would drop the user to a lower tier. Passive stocks are single-tier so
       // they only need `req` shares total.
       var keepShares = PASSIVE_STOCKS.indexOf(symb) >= 0
         ? BENEFIT_REQ[symb]
-        : (Math.pow(2, curTier.tier) - 1) * BENEFIT_REQ[symb];
+        : (Math.pow(2, effTier) - 1) * BENEFIT_REQ[symb];
       return Math.max(0, currentOwned - keepShares);
     }
     return Infinity; // not a benefit stock
