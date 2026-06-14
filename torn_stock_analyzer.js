@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.30.1
+// @version      2.30.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -212,6 +212,7 @@
   var lastBuySymbols = []; // Symbols currently in the Top-5 buy list (drives Quick Buy pills)
   var lastBuyInvDelta = {}; // {sym: 24h investor delta} for the Quick Buy pill sub-text
   var lastBuyPriceDelta = {}; // {sym: 24h price change %} for the Quick Buy pill sub-text
+  var lastBuyScores = {}; // {sym: buy score} for the Quick Buy pill sub-text
   var lastSwingPills = []; // [{sym, shares, profit}] snapshot for the Swing sell pills
   var _firstLoadKicked = false; // guards the on-load first full loadData against double-fire
 
@@ -2122,6 +2123,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       lastBuyInvDelta = {};
       top5Buy.forEach(function(s) {
         if (s.invDelta != null) lastBuyInvDelta[s.symbol] = s.invDelta;
+      });
+
+      // Buy score per stock, shown as the leading pill sub-text (mirrors the
+      // bold score in the buy-section rows).
+      lastBuyScores = {};
+      top5Buy.forEach(function(s) {
+        lastBuyScores[s.symbol] = s.score;
       });
 
       // 24h price change % per buy stock — derived from tornsy d1 interval vs live price.
@@ -4082,9 +4090,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       lastBuySymbols.forEach(function(sym) {
         var d = lastBuyInvDelta[sym];
         var pct = lastBuyPriceDelta[sym];
+        var sc = lastBuyScores[sym];
+        var scStr = (sc != null) ? sc + "p" : null;
         var pctStr = (pct != null) ? (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%" : null;
         var invStr = (d != null) ? "👥 " + (d >= 0 ? "+" : "") + d.toLocaleString("en-US") : null;
-        var subText = [pctStr, invStr].filter(Boolean).join(" · ");
+        var subText = [scStr, pctStr, invStr].filter(Boolean).join(" · ");
         buyRow.appendChild(makeQtPill(sym, true, buyPillLabel, isDark, function() {
           qtBuildMaps();
           var amt = getQtBuyPillAmt();
