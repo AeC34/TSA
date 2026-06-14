@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.30.0
+// @version      2.30.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -870,12 +870,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         return { daysUntil: daysUntil, days: daysUntil + daysToAfford(target.cost, capAtBuy, weeklyIncome + weekly) };
       }
 
+      // nowBridge = top-ROI tier affordable now (first hit wins, candidates are
+      // ROI-ranked). nextBridge = the tier we're CLOSEST to affording (smallest
+      // daysUntil) among those that still save days — ties broken by ROI, since
+      // ROI-ranked iteration reaches the higher-ROI tie first and we compare with <.
       var nowBridge = null, nextBridge = null;
-      candidates.some(function(c) {
+      candidates.forEach(function(c) {
         var info = bridgeDays(c.e.cost, c.weekly);
-        if (!info) return false;
+        if (!info) return;
         var saved = daysBaseline - info.days;
-        if (saved <= 0) return false; // doesn't save days — not a bridge
+        if (saved <= 0) return; // doesn't save days — not a bridge
         var b = {
           sym: c.e.sym, tier: "T" + c.e.tierInfo.nextIncrement, tierInfo: c.e.tierInfo,
           cost: c.e.cost, extraIncome: c.weekly, roi: c.e.roi,
@@ -883,8 +887,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           daysUntil: info.daysUntil, daysSaved: saved
         };
         if (b.status === "now") { if (!nowBridge) nowBridge = b; }
-        else { if (!nextBridge) nextBridge = b; }
-        return nowBridge && nextBridge; // stop once we have both
+        else if (!nextBridge || b.daysUntil < nextBridge.daysUntil) nextBridge = b;
       });
 
       // Show the affordable-now bridge first (capital can work immediately), then
