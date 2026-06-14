@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.29.5
+// @version      2.30.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -826,72 +826,77 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // Target = best ROI entry regardless of affordability
     var target = dynamicNextTiers[0] || null;
 
-    // Bridgebuilder chain: buy multiple bridges you can afford (keep them, don't sell),
-    // each one adds dividend income that accelerates reaching Next Move.
+    // Bridgebuilder chain (sell-later model): a bridge is a benefit tier you buy
+    // (or drip into via the pills), hold to collect dividends, then SELL again to
+    // help fund the Next Move target. The capital is recovered on sale, so it does
+    // NOT permanently reduce your capital — only Torn's 0.1% sell fee is lost (at
+    // live price, which already reflects any profit/loss on the position). The days
+    // saved therefore come purely from the extra dividend income while held.
+    // We surface up to two: the top-ROI tier affordable NOW (acted on first so the
+    // capital starts earning), and the top-ROI tier we're closest to affording (the
+    // one to drip into). Both must save days vs. just waiting, or it isn't a bridge.
     var bridgeChain = [];
     var daysBaseline = target ? daysToAfford(target.cost, totalCapital, weeklyIncome) : 0;
     var daysWithBridges = daysBaseline;
 
     if (target) {
-      var chainCap    = totalCapital;
-      var chainIncome = weeklyIncome;
+      var SELL_FEE = 0.001; // Torn's 0.1% sell fee, lost on the eventual bridge sale
 
-      // Candidates: not the target itself, not skipped, must have dividend income
-      var allBridgeCandidates = dynamicNextTiers.filter(function(e) {
-        if (roiSymSkipped(e.sym)) return false;
-        if (e.sym === target.sym && e.tierInfo.nextIncrement === target.tierInfo.nextIncrement) return false;
-        if (!e.payoutEntry) return false;
-        var fItemVal = getItemValue(e.payoutEntry);
-        var fPerCycle = (e.payoutEntry.item && fItemVal > 0) ? fItemVal : e.payoutEntry.payout;
-        return (fPerCycle / e.payoutEntry.freq * 7) > 0;
+      // Candidates: every other next-tier with positive dividend income, ROI-ranked
+      // (dynamicNextTiers is already sorted by ROI desc, skip-filtered).
+      var candidates = [];
+      dynamicNextTiers.forEach(function(e) {
+        if (e.sym === target.sym && e.tierInfo.nextIncrement === target.tierInfo.nextIncrement) return;
+        if (!e.payoutEntry) return;
+        var iv = getItemValue(e.payoutEntry);
+        var perCycle = (e.payoutEntry.item && iv > 0) ? iv : e.payoutEntry.payout;
+        var weekly = perCycle / e.payoutEntry.freq * 7;
+        if (weekly <= 0) return;
+        candidates.push({ e: e, weekly: weekly });
       });
 
-      allBridgeCandidates.forEach(function(e) {
-        var bItemVal = getItemValue(e.payoutEntry);
-        var bPerCycle = (e.payoutEntry.item && bItemVal > 0) ? bItemVal : e.payoutEntry.payout;
-        var extraIncome = bPerCycle / e.payoutEntry.freq * 7;
-
-        if (e.cost <= chainCap) {
-          // Affordable now — buy it, reduce capital, increase income stream
-          chainCap    -= e.cost;
-          chainIncome += extraIncome;
-          bridgeChain.push({
-            sym: e.sym, tier: "T" + e.tierInfo.nextIncrement, tierInfo: e.tierInfo,
-            cost: e.cost, extraIncome: extraIncome, roi: e.roi,
-            status: "now", daysUntil: 0
-          });
+      // Days to reach the target if capital is routed through a bridge and sold
+      // later to fund it: only the fee is lost, the rest of the cost is recovered.
+      function bridgeDays(cost, weekly) {
+        var fee = cost * SELL_FEE;
+        if (cost <= totalCapital) {
+          // Affordable now — buy immediately, dividend income boosted from day 0.
+          return { daysUntil: 0, days: daysToAfford(target.cost, totalCapital - fee, weeklyIncome + weekly) };
         }
-        // "Later" bridges added separately below, sorted by soonest
+        // Not yet — save up at current income, then buy, then collect boosted income.
+        var daysUntil = daysToAfford(cost, totalCapital, weeklyIncome);
+        if (daysUntil === Infinity || daysUntil > 365) return null;
+        var capAtBuy = totalCapital + (weeklyIncome / 7 * daysUntil) - fee;
+        return { daysUntil: daysUntil, days: daysUntil + daysToAfford(target.cost, capAtBuy, weeklyIncome + weekly) };
+      }
+
+      var nowBridge = null, nextBridge = null;
+      candidates.some(function(c) {
+        var info = bridgeDays(c.e.cost, c.weekly);
+        if (!info) return false;
+        var saved = daysBaseline - info.days;
+        if (saved <= 0) return false; // doesn't save days — not a bridge
+        var b = {
+          sym: c.e.sym, tier: "T" + c.e.tierInfo.nextIncrement, tierInfo: c.e.tierInfo,
+          cost: c.e.cost, extraIncome: c.weekly, roi: c.e.roi,
+          status: info.daysUntil === 0 ? "now" : "later",
+          daysUntil: info.daysUntil, daysSaved: saved
+        };
+        if (b.status === "now") { if (!nowBridge) nowBridge = b; }
+        else { if (!nextBridge) nextBridge = b; }
+        return nowBridge && nextBridge; // stop once we have both
       });
 
-      // After buying all "now" bridges, find the next 2 soonest affordable ones
-      // that actually save days vs just waiting — these are the ones to save up for
-      var laterCandidates = [];
-      allBridgeCandidates.forEach(function(e) {
-        if (bridgeChain.some(function(b) { return b.sym === e.sym && b.tier === ("T" + e.tierInfo.nextIncrement); })) return; // already handled as "now"
-        var lItemVal = getItemValue(e.payoutEntry);
-        var lPerCycle = (e.payoutEntry.item && lItemVal > 0) ? lItemVal : e.payoutEntry.payout;
-        var extraIncome = lPerCycle / e.payoutEntry.freq * 7;
-        var daysUntil   = daysToAfford(e.cost, chainCap, chainIncome);
-        if (daysUntil === Infinity || daysUntil > 365) return;
-        // Simulate buying this bridge after daysUntil: does it save days to target?
-        var simCap    = chainCap + (chainIncome / 7 * daysUntil) - e.cost;
-        var simIncome = chainIncome + extraIncome;
-        var daysAfter = daysUntil + daysToAfford(target.cost, simCap, simIncome);
-        var saved     = daysBaseline - daysAfter;
-        if (saved <= 0) return; // doesn't help
-        laterCandidates.push({
-          sym: e.sym, tier: "T" + e.tierInfo.nextIncrement, tierInfo: e.tierInfo,
-          cost: e.cost, extraIncome: extraIncome, roi: e.roi,
-          status: "later", daysUntil: daysUntil, daysSaved: saved
-        });
-      });
-      // Sort by soonest affordable, keep top 2
-      laterCandidates.sort(function(a, b) { return a.daysUntil - b.daysUntil; });
-      laterCandidates.slice(0, 2).forEach(function(b) { bridgeChain.push(b); });
+      // Show the affordable-now bridge first (capital can work immediately), then
+      // the drip target — even if the now bridge has the lower ROI of the two.
+      if (nowBridge) bridgeChain.push(nowBridge);
+      if (nextBridge) bridgeChain.push(nextBridge);
 
-      // Recompute goal with all "now" bridges applied (capital reduced, income boosted)
-      daysWithBridges = daysToAfford(target.cost, chainCap, chainIncome);
+      // Goal with the affordable-now bridge applied (capital recovered minus fee,
+      // income boosted). Mirrors bridgeDays' "now" branch.
+      if (nowBridge) {
+        daysWithBridges = daysToAfford(target.cost, totalCapital - nowBridge.cost * SELL_FEE, weeklyIncome + nowBridge.extraIncome);
+      }
     }
 
     return {
@@ -917,7 +922,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var liveEntry = raw ? raw.find(function(x){ return x.stock === sym; }) : null;
       if (!liveEntry) return;
       var livePrice = parseFloat(liveEntry.price) || 0;
-      var val = livePrice * o.swing_shares;
+      // Net of Torn's 0.1% sell fee — this is the cash actually deployable if
+      // the swing position is liquidated to fund a benefit purchase. Live price
+      // already reflects current profit/loss vs the original investment.
+      var val = livePrice * o.swing_shares * 0.999;
       swingCapital += val;
       if (val > 0) swingDetails.push({sym: sym, val: val});
     });
@@ -1043,9 +1051,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       html += nmRow("Cost", fmRoi(target.cost) + (shortBy > 0 ? " · short " + fmRoi(shortBy) : " ✓"), shortBy > 0 ? c.red : c.green);
       html += nmRow("Available", fmRoi(totalCapital), c.text);
 
-      // Bridgebuilder chain — buy and hold, each block adds dividend income
+      // Bridgebuilder chain — buy (or drip into) a tier, collect dividends, then
+      // sell it again to help fund the target. Each row saves days vs. just waiting.
       html += '<div style="border-top:1px solid ' + c.divider + ';margin:6px 0"></div>';
-      html += '<div style="font-size:9px;color:#5a7a4a;letter-spacing:0.08em;' + s + ';margin-bottom:5px">🔗 Bridgebuilder</div>';
+      html += '<div style="font-size:9px;color:#5a7a4a;letter-spacing:0.08em;' + s + ';margin-bottom:5px">🔗 Bridgebuilder · sell later for target</div>';
 
       var hasSell = sellCandidates && sellCandidates.length > 0;
 
@@ -1053,8 +1062,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         bridgeChain.forEach(function(b) {
           var statusColor = b.status === "now" ? c.green : c.muted;
           var statusLabel = b.status === "now"
-            ? "✓ Buy now"
-            : "in ~" + b.daysUntil + "d · saves " + b.daysSaved + "d";
+            ? "✓ Buy now · saves " + b.daysSaved + "d"
+            : "drip ~" + b.daysUntil + "d · saves " + b.daysSaved + "d";
           var roiStr = b.roi > 0 ? " · " + b.roi.toFixed(1) + "%" : "";
           html += nmRow(
             "🔗 " + b.sym + " " + b.tier + roiStr,
@@ -3950,7 +3959,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var o = lastOwnedMap[s];
         if (!o || o.swing_shares <= 0) return;
         var le = lastRaw.find(function(x) { return x.stock === s; });
-        if (le) bpSwingCap += (parseFloat(le.price) || 0) * o.swing_shares;
+        // Net of Torn's 0.1% sell fee — deployable cash if liquidated (planner parity).
+        if (le) bpSwingCap += (parseFloat(le.price) || 0) * o.swing_shares * 0.999;
       });
       bpPlan = computeBridgePlan(lastOwnedMap, lastRaw,
         lastCashBalance + bpSwingCap + lastArmoryFunds,
@@ -4000,27 +4010,31 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       }, bankMoney, qtPillPaletteBank(isDark)));
 
       if (bpFirst) {
-        // Same numbers as the planner's bridge row: "✓ Buy now" vs "in ~Nd · saves Nd".
-        // Click buys with on-hand cash, capped at the shares still needed (like the bank pill).
-        var bpIsNow = bpFirst.status === "now";
-        // 🔗 prefix ties the pill to the planner's "🔗 Bridgebuilder" section
-        // (without it, the "now" state looks identical to a Quick Buy pill).
-        var bpLabel = bpIsNow
-          ? "🔗 ✓ " + bpFirst.tier
-          : "🔗 ~" + bpFirst.daysUntil + "d " + bpFirst.tier;
-        var bpSub = bpIsNow
-          ? fmRoi(bpFirst.cost) + " +" + fmRoi(bpFirst.extraIncome) + "/7d"
-          : "saves " + bpFirst.daysSaved + "d · " + fmRoi(bpFirst.cost);
-        bankRow.appendChild(makeQtPill(bpFirst.sym, true, bpLabel, isDark, function() {
-          qtBuildMaps();
-          var price = qtGetPrice(bpFirst.sym) || bpFirst.tierInfo.livePrice || 0;
-          if (price <= 0) { showToast("Could not read price for " + bpFirst.sym, "error"); return; }
-          var m = qtGetMoneyFast();
-          if (m <= 0) { showToast("No money found", "warn"); return; }
-          var shares = Math.min(Math.floor(m / price), bpFirst.tierInfo.sharesNeeded);
-          if (shares < 1) { showToast("Not enough cash for 1 share of " + bpFirst.sym, "warn"); return; }
-          qtUiTrade(bpFirst.sym, shares, "buyShares", "Bridged " + shares.toLocaleString("en-US") + " " + bpFirst.sym + " → " + bpFirst.tier);
-        }, bpSub, qtPillPaletteBridge(bpIsNow, isDark)));
+        // Up to two bridge pills mirroring the planner's two rows: the affordable-now
+        // tier ("✓ Buy now") and the drip target ("~Nd"). Each click buys with on-hand
+        // cash, capped at the shares still needed so it never overshoots the tier — so
+        // the drip pill lets you bank into the next bridge gradually.
+        bpPlan.bridgeChain.slice(0, 2).forEach(function(b) {
+          var bpIsNow = b.status === "now";
+          // 🔗 prefix ties the pill to the planner's "🔗 Bridgebuilder" section
+          // (without it, the "now" state looks identical to a Quick Buy pill).
+          var bpLabel = bpIsNow
+            ? "🔗 ✓ " + b.tier
+            : "🔗 ~" + b.daysUntil + "d " + b.tier;
+          var bpSub = bpIsNow
+            ? fmRoi(b.cost) + " +" + fmRoi(b.extraIncome) + "/7d"
+            : "saves " + b.daysSaved + "d · " + fmRoi(b.cost);
+          bankRow.appendChild(makeQtPill(b.sym, true, bpLabel, isDark, function() {
+            qtBuildMaps();
+            var price = qtGetPrice(b.sym) || b.tierInfo.livePrice || 0;
+            if (price <= 0) { showToast("Could not read price for " + b.sym, "error"); return; }
+            var m = qtGetMoneyFast();
+            if (m <= 0) { showToast("No money found", "warn"); return; }
+            var shares = Math.min(Math.floor(m / price), b.tierInfo.sharesNeeded);
+            if (shares < 1) { showToast("Not enough cash for 1 share of " + b.sym, "warn"); return; }
+            qtUiTrade(b.sym, shares, "buyShares", "Bridged " + shares.toLocaleString("en-US") + " " + b.sym + " → " + b.tier);
+          }, bpSub, qtPillPaletteBridge(bpIsNow, isDark)));
+        });
       } else if (bpEmpty) {
         // Planner shows "No bridgebuilder options" here — give the pill row the
         // same explicit empty state instead of silently rendering nothing.
