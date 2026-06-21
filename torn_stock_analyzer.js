@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.31.0
+// @version      2.32.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3962,6 +3962,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       ".qt-pill-group-label{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;" +
         "font-family:JetBrains Mono,monospace;margin:0 0 5px 2px;display:block;}" +
       ".qt-pill .qt-pill-sub{font-size:11px;opacity:0.65;}" +
+      // Sell pill + its mini "buy more" pill stay glued together as one unit when the row wraps.
+      ".qt-pill-pair{display:inline-flex;gap:4px;align-items:stretch;}" +
+      // Compact green buy-more pill: no logo/badge, just a bold ＋.
+      ".qt-pill-mini{padding:5px 9px;font-size:14px;font-weight:800;gap:0;}" +
       ".qt-pill-row{display:flex;flex-wrap:wrap;gap:6px;}";
     document.head.appendChild(st);
   }
@@ -4293,12 +4297,33 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             "Sold " + shares.toLocaleString("en-US") + " " + p.sym + " (swing)",
             { blockMaxShares: shares }).then(function(fired) {
               // Only remove the pill when the whole swing position was sold; a
-              // partial $-amount sell leaves shares, so keep the pill.
-              if (fired && !partial && pill.parentNode) pill.parentNode.removeChild(pill);
+              // partial $-amount sell leaves shares, so keep the pill. Remove the
+              // whole pair so the glued green ＋ buy pill goes with it.
+              if (fired && !partial && pair.parentNode) pair.parentNode.removeChild(pair);
             });
         }, subText);
         if (atTarget) pill.title = "Reached your " + profitTarget + "% profit target";
-        swRow.appendChild(pill);
+
+        // Small green "buy more" pill glued to the right of the sell pill: drips
+        // all available cash into this same holding (vault), so you can add to a
+        // swing position without leaving the pill panel. Same one-click POST flow.
+        var buyMore = makeQtPill(p.sym, true, "＋", isDark, function() {
+          qtBuildMaps();
+          qtVault(p.sym);
+        });
+        buyMore.classList.add("qt-pill-mini");
+        // Compact variant drops the logo/badge so it reads as a +, not a stock pill.
+        var bmImg = buyMore.querySelector("img");
+        if (bmImg) bmImg.style.display = "none";
+        var bmBadge = buyMore.querySelector(".qt-pill-badge");
+        if (bmBadge) bmBadge.style.display = "none";
+        buyMore.title = "Buy more " + p.sym + " with all available cash";
+
+        var pair = document.createElement("span");
+        pair.className = "qt-pill-pair";
+        pair.appendChild(pill);
+        pair.appendChild(buyMore);
+        swRow.appendChild(pair);
       });
       swWrap.appendChild(swRow);
       container.appendChild(swWrap);
