@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.35.1
+// @version      2.35.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -218,7 +218,7 @@
   // worse benefit tier is sold (step 1). Holds the buy half so step 2 (the next click)
   // buys the better tier deterministically, even if a re-render recomputes the plan.
   // In-memory only (a within-session intent); cleared on the buy or via the ✕ pill.
-  var qtPendingUpgrade = null; // {sym, tier, shares, livePrice, cost}
+  var qtPendingUpgrade = null; // {sym, tier, shares, livePrice, cost, expectedCash}
   var _firstLoadKicked = false; // guards the on-load first full loadData against double-fire
 
   var STOCK_ID_MAP = {
@@ -4428,11 +4428,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           qtBuildMaps();
           var price = qtGetPrice(pend.sym) || pend.livePrice || 0;
           if (price <= 0) { showToast("Could not read price for " + pend.sym, "error"); return; }
-          var liveCash = qtGetMoneyFast();
-          if (liveCash <= 0) { showToast("No money found", "warn"); return; }
+          // Funds floor = the larger of the live DOM money and the expected cash from
+          // step 1's sale. A direct-POST sale may not have refreshed #user-money yet,
+          // so trusting only the DOM would falsely block the buy even though the
+          // proceeds are already server-side. If expectedCash is somehow too high
+          // (cash spent elsewhere), Torn rejects the buy and qtFireTrade toasts it.
+          var availCash = Math.max(qtGetMoneyFast(), pend.expectedCash || 0);
+          if (availCash <= 0) { showToast("No money found", "warn"); return; }
           var needCost = pend.shares * price;
-          if (needCost > liveCash) {
-            showToast("Need $" + Math.ceil(needCost - liveCash).toLocaleString("en-US") + " more for " + pend.sym + " " + pend.tier, "warn");
+          if (needCost > availCash) {
+            showToast("Need $" + Math.ceil(needCost - availCash).toLocaleString("en-US") + " more for " + pend.sym + " " + pend.tier, "warn");
             return;
           }
           qtUiTrade(pend.sym, pend.shares, "buyShares",
@@ -4461,6 +4466,18 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           if (owned <= 0) { showToast("You have no shares of " + sw.sell.sym, "warn"); return; }
           var shares = sw.sell.shares;
           if (shares > owned) shares = owned;
+          // Snapshot cash + this sale's net proceeds BEFORE the POST. We submit
+          // via a direct AJAX POST, so Torn's front-end may not refresh #user-money
+          // afterwards — step 2 must not rely on the DOM having updated. The server
+          // has the proceeds the instant the sale succeeds, so expectedCash is the
+          // authoritative funds floor for the buy guard (see step 2).
+          var cashBefore = qtGetMoneyFast();
+          var sellPrice = qtGetPrice(sw.sell.sym) || 0;
+          // Fallback (unreadable price) scales the precomputed saleValue by the shares
+          // actually sold, so a clamped `shares` doesn't over-estimate the proceeds.
+          var proceeds = sellPrice > 0
+            ? shares * sellPrice * 0.999
+            : sw.sell.saleValue * (sw.sell.shares > 0 ? shares / sw.sell.shares : 1);
           qtUiTrade(sw.sell.sym, shares, "sellShares",
             "Upgrade step 1: sold " + shares.toLocaleString("en-US") + " " + sw.sell.sym + " (" + sw.sell.tier + ")",
             { blockMaxShares: shares })
@@ -4468,7 +4485,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
               if (fired) {
                 qtPendingUpgrade = {
                   sym: sw.buy.sym, tier: sw.buy.tier, shares: sw.buy.shares,
-                  livePrice: sw.buy.tierInfo.livePrice, cost: sw.buy.cost
+                  livePrice: sw.buy.tierInfo.livePrice, cost: sw.buy.cost,
+                  expectedCash: (cashBefore > 0 ? cashBefore : 0) + proceeds
                 };
                 renderQtPills();
               }
