@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.35.2
+// @version      2.35.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -4286,6 +4286,36 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return btn;
   }
 
+  // Live-price re-check for an Upgrade swap. computeUpgradeSwap ranks candidates on
+  // the last API snapshot, which can be stale; before we ever sell a benefit block we
+  // re-price the swap against the CURRENT stock prices (qtGetPrice), so a price drop
+  // since the snapshot — i.e. a real loss on the sale — shrinks the proceeds we count.
+  // Returns null if prices/shares are unreadable; otherwise the live numbers plus an
+  // `affordable` flag = on-hand cash + live sale proceeds >= live buy cost. The sell
+  // is only ever offered/fired when affordable, so the irreversible step-1 sale can't
+  // strand the user holding nothing they can complete the buy with.
+  function qtUpgradeLiveCheck(sw) {
+    if (!sw) return null;
+    qtBuildMaps();
+    var owned = qtGetOwnedShares(sw.sell.sym);
+    if (owned <= 0) return null;
+    var sellShares = Math.min(sw.sell.shares, owned);
+    if (sellShares < 1) return null;
+    var sellPrice = qtGetPrice(sw.sell.sym);
+    var buyPrice = qtGetPrice(sw.buy.sym);
+    if (sellPrice <= 0 || buyPrice <= 0) return null;
+    var liveProceeds = sellShares * sellPrice * 0.999; // net of Torn's 0.1% sell fee, at CURRENT price
+    var liveBuyCost = sw.buy.shares * buyPrice;
+    var cashNow = qtGetMoneyFast();
+    var cashAvail = cashNow > 0 ? cashNow : 0;
+    var cashAfterSale = cashAvail + liveProceeds;
+    return {
+      sellShares: sellShares, sellPrice: sellPrice, buyPrice: buyPrice,
+      liveProceeds: liveProceeds, liveBuyCost: liveBuyCost,
+      cashAfterSale: cashAfterSale, affordable: cashAfterSale >= liveBuyCost
+    };
+  }
+
   // Builds the Quick Buy / Swing pill panel under the QT bar. Driven by the
   // last data load's Top-5 buy list and swing holdings; re-run on every
   // loadData and on theme change.
@@ -4409,7 +4439,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // swing/armory paper value baked into bpCapital (see computeUpgradeSwap).
     var upSwap = (bpPlan && lastOwnedMap && lastRaw)
       ? computeUpgradeSwap(lastOwnedMap, lastRaw, lastCashBalance, bpPlan) : null;
-    if (qtPendingUpgrade || upSwap) {
+    // Re-price the ranked swap against LIVE prices before offering the sell. This is
+    // the money-safety gate: the snapshot may say "affordable" while the sell stock
+    // has dropped (a loss), leaving too little after the sale to complete the buy.
+    var upLive = (upSwap && !qtPendingUpgrade) ? qtUpgradeLiveCheck(upSwap) : null;
+    if (qtPendingUpgrade || upLive) {
       var upWrap = document.createElement("div");
       upWrap.style.marginBottom = (hasBuy || hasSwing) ? "10px" : "0";
       var upLbl = document.createElement("span");
@@ -4454,44 +4488,50 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var cBadge = cancel.querySelector(".qt-pill-badge"); if (cBadge) cBadge.style.display = "none";
         cancel.title = "Cancel the pending upgrade buy (keeps the cash from the sale)";
         upRow.appendChild(cancel);
-      } else {
+      } else if (upLive.affordable) {
         // Step 1: sell the worse benefit tier. This DELIBERATELY bypasses Benefit
         // Lock — it is the benefit-share sale the user explicitly asked for via the
         // Upgrade pill. The label names the tier being sold so it's never hidden.
         var sw = upSwap;
         upRow.appendChild(makeQtPill(sw.sell.sym, false,
           "⤴ Sell " + sw.sell.tier + " → " + sw.buy.sym + " " + sw.buy.tier, isDark, function() {
-          qtBuildMaps();
-          var owned = qtGetOwnedShares(sw.sell.sym);
-          if (owned <= 0) { showToast("You have no shares of " + sw.sell.sym, "warn"); return; }
-          var shares = sw.sell.shares;
-          if (shares > owned) shares = owned;
-          // Snapshot cash + this sale's net proceeds BEFORE the POST. We submit
-          // via a direct AJAX POST, so Torn's front-end may not refresh #user-money
-          // afterwards — step 2 must not rely on the DOM having updated. The server
-          // has the proceeds the instant the sale succeeds, so expectedCash is the
-          // authoritative funds floor for the buy guard (see step 2).
-          var cashBefore = qtGetMoneyFast();
-          var sellPrice = qtGetPrice(sw.sell.sym) || 0;
-          // Fallback (unreadable price) scales the precomputed saleValue by the shares
-          // actually sold, so a clamped `shares` doesn't over-estimate the proceeds.
-          var proceeds = sellPrice > 0
-            ? shares * sellPrice * 0.999
-            : sw.sell.saleValue * (sw.sell.shares > 0 ? shares / sw.sell.shares : 1);
-          qtUiTrade(sw.sell.sym, shares, "sellShares",
-            "Upgrade step 1: sold " + shares.toLocaleString("en-US") + " " + sw.sell.sym + " (" + sw.sell.tier + ")",
-            { blockMaxShares: shares })
+          // MONEY SAFETY: re-price against LIVE prices at click time (they may have
+          // moved since render). NEVER sell the benefit block unless on-hand cash +
+          // the live sale proceeds cover the buy at the current price — otherwise the
+          // irreversible sale would strand the user with no replacement block.
+          var lc = qtUpgradeLiveCheck(sw);
+          if (!lc) { showToast("Could not read live prices for the swap — try again", "warn"); return; }
+          if (!lc.affordable) {
+            showToast("Upgrade blocked: after selling " + sw.sell.sym + " you'd have " + fmRoi(lc.cashAfterSale) +
+              ", but " + sw.buy.sym + " " + sw.buy.tier + " now costs " + fmRoi(lc.liveBuyCost) + ". Not selling.", "warn");
+            return;
+          }
+          // The server credits the proceeds the instant the sale succeeds, but a
+          // direct-POST sale may not refresh #user-money — so step 2's funds floor
+          // uses this live cashAfterSale, not a (possibly stale) DOM re-read.
+          qtUiTrade(sw.sell.sym, lc.sellShares, "sellShares",
+            "Upgrade step 1: sold " + lc.sellShares.toLocaleString("en-US") + " " + sw.sell.sym + " (" + sw.sell.tier + ")",
+            { blockMaxShares: lc.sellShares })
             .then(function(fired) {
               if (fired) {
                 qtPendingUpgrade = {
                   sym: sw.buy.sym, tier: sw.buy.tier, shares: sw.buy.shares,
-                  livePrice: sw.buy.tierInfo.livePrice, cost: sw.buy.cost,
-                  expectedCash: (cashBefore > 0 ? cashBefore : 0) + proceeds
+                  livePrice: lc.buyPrice, cost: sw.buy.shares * lc.buyPrice,
+                  expectedCash: lc.cashAfterSale
                 };
                 renderQtPills();
               }
             });
         }, "+" + fmRoi(sw.netWeekly) + "/7d", qtPillPaletteUpgrade(isDark)));
+      } else {
+        // upSwap exists but, at LIVE prices, the sale wouldn't cover the buy (e.g. the
+        // sell stock dropped since the snapshot — a loss). Show a muted, non-clickable
+        // hint instead of a sell pill we'd refuse, so the user is never lured into an
+        // unaffordable, irreversible benefit-block sale.
+        var upNone = document.createElement("span");
+        upNone.textContent = "⤴ not affordable at live price (" + upSwap.sell.sym + "→" + upSwap.buy.sym + ")";
+        upNone.style.cssText = "align-self:center;font-size:10px;color:" + labelColor + ";font-family:JetBrains Mono,monospace;white-space:nowrap;";
+        upRow.appendChild(upNone);
       }
 
       upWrap.appendChild(upRow);
