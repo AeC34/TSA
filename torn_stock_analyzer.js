@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.33.0
+// @version      2.34.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -251,7 +251,7 @@
     "pts","sym","sys","tcc","tci","tcm","tcp","tct","tgp","ths",
     "tmi","tsb","wlt","wsu","yaz"];
 
-var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 16px; z-index: 2147483647;\n\n      background: #4a6fa5; color: #ffffff; border: none;\n\n      border-radius: 50px; padding: 10px 18px; font-size: 13px;\n\n      font-family: Arial, sans-serif; cursor: pointer; font-weight: bold;\n\n      box-shadow: 0 2px 8px rgba(0,0,0,0.3);\n\n      -webkit-tap-highlight-color: transparent;\n\n    }\n\n    #tsa-btn:hover { background: #3a5f95; }\n\n    #tsa-overlay {\n\n      position: fixed; bottom: 130px; right: 16px; z-index: 2147483646;\n\n      max-height: 75vh; overflow-y: auto;\n\n      background: #ffffff; border: 1px solid #ddd; border-radius: 12px;\n\n      font-family: Arial, sans-serif; font-size: 12px; color: #222;\n\n      box-shadow: 0 4px 20px rgba(0,0,0,0.15); display: none;\n\n    }\n\n    #tsa-overlay::-webkit-scrollbar { width: 4px; }\n\n    #tsa-overlay::-webkit-scrollbar-thumb { background: #ccc; border-radius: 2px; }\n\n    .tsa-header {\n\n      display: flex; align-items: center; justify-content: space-between;\n\n      padding: 12px 14px; border-bottom: 1px solid #eee;\n\n      position: sticky; top: 0; background: #ffffff; z-index: 1;\n\n    }\n\n    .tsa-header-left { display: flex; align-items: center; gap: 8px; }\n\n    .tsa-title { font-size: 13px; font-weight: bold; color: #4a6fa5; letter-spacing: 0.05em; }\n\n    .tsa-theme-btn {\n\n      font-size: 14px; cursor: pointer; background: none; border: none;\n\n      padding: 2px 4px; line-height: 1; opacity: 0.7;\n\n    }\n\n    .tsa-theme-btn:hover { opacity: 1; }\n\n    .tsa-close { cursor: pointer; color: #777; font-size: 18px; padding: 0 4px; line-height: 1; }\n\n    .tsa-close:hover { color: #333; }\n\n    .tsa-stats {\n\n      display: grid; grid-template-columns: repeat(3, 1fr);\n\n      gap: 8px; padding: 12px 14px; border-bottom: 1px solid #eee;\n\n    }\n\n    .tsa-stat { background: #f7f9fc; border-radius: 8px; padding: 8px; text-align: center; border: 1px solid #e8edf5; }\n\n    .tsa-stat-label { font-size: 10px; color: #666; margin-bottom: 4px; }\n\n    .tsa-stat-value { font-size: 16px; font-weight: bold; color: #222; }\n\n    .tsa-stat-value.green { color: #1a8a45; }\n\n    .tsa-stat-value.red { color: #cc2222; }\n\n    .tsa-section { padding: 10px 14px 6px; }\n\n    .tsa-section-title { font-size: 10px; letter-spacing: 0.12em; color: #777; text-transform: uppercase; margin-bottom: 8px; font-weight: bold; }\n\n    .tsa-row {\n\n      display: flex; align-items: center; justify-content: space-between;\n\n      padding: 8px 10px; border-radius: 8px; margin-bottom: 5px; cursor: pointer;\n\n    }\n\n    .tsa-row.buy { background: #edfaf3; border: 1px solid #a8e6c0; }\n\n    .tsa-row.sell { background: #fff0f0; border: 1px solid #ffb3b3; }\n\n    .tsa-row.hold { background: #f0f4ff; border: 1px solid #c0d0ff; }\n\n    .tsa-row.buy:active { background: #d0f5e3; }\n\n    .tsa-row.sell:active { background: #ffd8d8; }\n\n    .tsa-row.hold:active { background: #dce6ff; }\n\n    .tsa-row-left { display: flex; flex-direction: column; gap: 2px; }\n\n    .tsa-symbol { font-size: 13px; font-weight: bold; }\n\n    .tsa-symbol.buy { color: #1a8a45; }\n\n    .tsa-symbol.sell { color: #cc2222; }\n\n    .tsa-symbol.hold { color: #4a6fa5; }\n\n    .tsa-detail { font-size: 10px; color: #666; }\n\n    .tsa-row-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }\n\n    .tsa-score { font-size: 14px; font-weight: bold; }\n\n    .tsa-score.buy { color: #1a8a45; }\n\n    .tsa-score.sell { color: #cc2222; }\n\n    .tsa-score.hold { color: #4a6fa5; }\n\n    .tsa-badge { font-size: 9px; padding: 2px 6px; border-radius: 10px; font-weight: bold; }\n\n    .tsa-badge.benefit { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }\n\n    .tsa-divider { border: none; border-top: 1px solid #eee; margin: 6px 14px; }\n\n    .tsa-footer {\n\n      padding: 10px 14px; display: flex; justify-content: space-between;\n\n      align-items: center; border-top: 1px solid #eee; background: #fafafa;\n\n      border-radius: 0 0 12px 12px;\n\n    }\n\n    .tsa-updated { font-size: 10px; color: #888; }\n\n    .tsa-refresh {\n\n      font-size: 11px; background: #4a6fa5; border: none;\n\n      color: #fff; border-radius: 6px; padding: 5px 12px; cursor: pointer;\n\n      font-family: Arial, sans-serif; font-weight: bold;\n\n    }\n\n    .tsa-refresh:hover { background: #3a5f95; }\n\n    .tsa-loading { padding: 30px; text-align: center; color: #888; font-size: 12px; }\n\n    @keyframes tsa-spin { to { transform: rotate(360deg); } }\n\n    .tsa-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: tsa-spin 0.7s linear infinite; vertical-align: middle; margin-right: 6px; opacity: 0.6; }\n\n    .tsa-error { padding: 16px; color: #cc2222; font-size: 11px; text-align: center; }\n\n    /* DARK MODE */\n\n    #tsa-overlay.tsa-dark {\n\n      background: #0f0f1a; border-color: #3a3a6a; color: #c8c8d8;\n\n    }\n\n    #tsa-overlay.tsa-dark::-webkit-scrollbar-thumb { background: #3a3a6a; }\n\n    #tsa-overlay.tsa-dark .tsa-header { background: #0f0f1a; border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-stats { border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-stat { background: #1a1a2e; border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-label { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-value { color: #e0e0ff; }\n\n    #tsa-overlay.tsa-dark .tsa-section-title { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-detail { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-row.buy { background: rgba(76,255,145,0.08); border-color: rgba(76,255,145,0.2); }\n\n    #tsa-overlay.tsa-dark .tsa-row.sell { background: rgba(255,76,106,0.08); border-color: rgba(255,76,106,0.2); }\n\n    #tsa-overlay.tsa-dark .tsa-row.hold { background: rgba(160,160,255,0.05); border-color: rgba(160,160,255,0.1); }\n\n    #tsa-overlay.tsa-dark .tsa-row.buy:active { background: rgba(76,255,145,0.18); }\n\n    #tsa-overlay.tsa-dark .tsa-row.sell:active { background: rgba(255,76,106,0.18); }\n\n    #tsa-overlay.tsa-dark .tsa-row.hold:active { background: rgba(160,160,255,0.14); }\n\n    #tsa-overlay.tsa-dark .tsa-symbol.buy { color: #4cff91; }\n\n    #tsa-overlay.tsa-dark .tsa-symbol.sell { color: #ff4c6a; }\n\n    #tsa-overlay.tsa-dark .tsa-symbol.hold { color: #a0a0ff; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-value.green { color: #4cff91; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-value.red { color: #ff4c6a; }\n\n    #tsa-overlay.tsa-dark .tsa-divider { border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-footer { background: #0f0f1a; border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-updated { color: #666; }\n\n    #tsa-overlay.tsa-dark .tsa-loading { color: #666; }\n\n    #tsa-overlay.tsa-dark .tsa-close { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-close:hover { color: #aaa; }\n\n    #tsa-overlay.tsa-dark .tsa-theme-btn { color: #c8c8d8; opacity: 1; }\n\n    #tsa-overlay.tsa-dark .tsa-theme-btn:hover { color: #ffffff; }\n\n    #tsa-overlay.tsa-dark .tsa-title { color: #7a9fd4; }\n\n \\n"
+var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 16px; z-index: 2147483647;\n\n      background: #4a6fa5; color: #ffffff; border: none;\n\n      border-radius: 50px; padding: 10px 18px; font-size: 13px;\n\n      font-family: Arial, sans-serif; cursor: pointer; font-weight: bold;\n\n      box-shadow: 0 2px 8px rgba(0,0,0,0.3);\n\n      -webkit-tap-highlight-color: transparent; touch-action: none;\n\n    }\n\n    #tsa-btn:hover { background: #3a5f95; }\n\n    #tsa-overlay {\n\n      position: fixed; bottom: 130px; right: 16px; z-index: 2147483646;\n\n      max-height: 75vh; overflow-y: auto;\n\n      background: #ffffff; border: 1px solid #ddd; border-radius: 12px;\n\n      font-family: Arial, sans-serif; font-size: 12px; color: #222;\n\n      box-shadow: 0 4px 20px rgba(0,0,0,0.15); display: none;\n\n    }\n\n    #tsa-overlay::-webkit-scrollbar { width: 4px; }\n\n    #tsa-overlay::-webkit-scrollbar-thumb { background: #ccc; border-radius: 2px; }\n\n    .tsa-header {\n\n      display: flex; align-items: center; justify-content: space-between;\n\n      padding: 12px 14px; border-bottom: 1px solid #eee;\n\n      position: sticky; top: 0; background: #ffffff; z-index: 1;\n\n    }\n\n    .tsa-header-left { display: flex; align-items: center; gap: 8px; }\n\n    .tsa-title { font-size: 13px; font-weight: bold; color: #4a6fa5; letter-spacing: 0.05em; }\n\n    .tsa-theme-btn {\n\n      font-size: 14px; cursor: pointer; background: none; border: none;\n\n      padding: 2px 4px; line-height: 1; opacity: 0.7;\n\n    }\n\n    .tsa-theme-btn:hover { opacity: 1; }\n\n    .tsa-close { cursor: pointer; color: #777; font-size: 18px; padding: 0 4px; line-height: 1; }\n\n    .tsa-close:hover { color: #333; }\n\n    .tsa-stats {\n\n      display: grid; grid-template-columns: repeat(3, 1fr);\n\n      gap: 8px; padding: 12px 14px; border-bottom: 1px solid #eee;\n\n    }\n\n    .tsa-stat { background: #f7f9fc; border-radius: 8px; padding: 8px; text-align: center; border: 1px solid #e8edf5; }\n\n    .tsa-stat-label { font-size: 10px; color: #666; margin-bottom: 4px; }\n\n    .tsa-stat-value { font-size: 16px; font-weight: bold; color: #222; }\n\n    .tsa-stat-value.green { color: #1a8a45; }\n\n    .tsa-stat-value.red { color: #cc2222; }\n\n    .tsa-section { padding: 10px 14px 6px; }\n\n    .tsa-section-title { font-size: 10px; letter-spacing: 0.12em; color: #777; text-transform: uppercase; margin-bottom: 8px; font-weight: bold; }\n\n    .tsa-row {\n\n      display: flex; align-items: center; justify-content: space-between;\n\n      padding: 8px 10px; border-radius: 8px; margin-bottom: 5px; cursor: pointer;\n\n    }\n\n    .tsa-row.buy { background: #edfaf3; border: 1px solid #a8e6c0; }\n\n    .tsa-row.sell { background: #fff0f0; border: 1px solid #ffb3b3; }\n\n    .tsa-row.hold { background: #f0f4ff; border: 1px solid #c0d0ff; }\n\n    .tsa-row.buy:active { background: #d0f5e3; }\n\n    .tsa-row.sell:active { background: #ffd8d8; }\n\n    .tsa-row.hold:active { background: #dce6ff; }\n\n    .tsa-row-left { display: flex; flex-direction: column; gap: 2px; }\n\n    .tsa-symbol { font-size: 13px; font-weight: bold; }\n\n    .tsa-symbol.buy { color: #1a8a45; }\n\n    .tsa-symbol.sell { color: #cc2222; }\n\n    .tsa-symbol.hold { color: #4a6fa5; }\n\n    .tsa-detail { font-size: 10px; color: #666; }\n\n    .tsa-row-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }\n\n    .tsa-score { font-size: 14px; font-weight: bold; }\n\n    .tsa-score.buy { color: #1a8a45; }\n\n    .tsa-score.sell { color: #cc2222; }\n\n    .tsa-score.hold { color: #4a6fa5; }\n\n    .tsa-badge { font-size: 9px; padding: 2px 6px; border-radius: 10px; font-weight: bold; }\n\n    .tsa-badge.benefit { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }\n\n    .tsa-divider { border: none; border-top: 1px solid #eee; margin: 6px 14px; }\n\n    .tsa-footer {\n\n      padding: 10px 14px; display: flex; justify-content: space-between;\n\n      align-items: center; border-top: 1px solid #eee; background: #fafafa;\n\n      border-radius: 0 0 12px 12px;\n\n    }\n\n    .tsa-updated { font-size: 10px; color: #888; }\n\n    .tsa-refresh {\n\n      font-size: 11px; background: #4a6fa5; border: none;\n\n      color: #fff; border-radius: 6px; padding: 5px 12px; cursor: pointer;\n\n      font-family: Arial, sans-serif; font-weight: bold;\n\n    }\n\n    .tsa-refresh:hover { background: #3a5f95; }\n\n    .tsa-loading { padding: 30px; text-align: center; color: #888; font-size: 12px; }\n\n    @keyframes tsa-spin { to { transform: rotate(360deg); } }\n\n    .tsa-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: tsa-spin 0.7s linear infinite; vertical-align: middle; margin-right: 6px; opacity: 0.6; }\n\n    .tsa-error { padding: 16px; color: #cc2222; font-size: 11px; text-align: center; }\n\n    /* DARK MODE */\n\n    #tsa-overlay.tsa-dark {\n\n      background: #0f0f1a; border-color: #3a3a6a; color: #c8c8d8;\n\n    }\n\n    #tsa-overlay.tsa-dark::-webkit-scrollbar-thumb { background: #3a3a6a; }\n\n    #tsa-overlay.tsa-dark .tsa-header { background: #0f0f1a; border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-stats { border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-stat { background: #1a1a2e; border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-label { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-value { color: #e0e0ff; }\n\n    #tsa-overlay.tsa-dark .tsa-section-title { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-detail { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-row.buy { background: rgba(76,255,145,0.08); border-color: rgba(76,255,145,0.2); }\n\n    #tsa-overlay.tsa-dark .tsa-row.sell { background: rgba(255,76,106,0.08); border-color: rgba(255,76,106,0.2); }\n\n    #tsa-overlay.tsa-dark .tsa-row.hold { background: rgba(160,160,255,0.05); border-color: rgba(160,160,255,0.1); }\n\n    #tsa-overlay.tsa-dark .tsa-row.buy:active { background: rgba(76,255,145,0.18); }\n\n    #tsa-overlay.tsa-dark .tsa-row.sell:active { background: rgba(255,76,106,0.18); }\n\n    #tsa-overlay.tsa-dark .tsa-row.hold:active { background: rgba(160,160,255,0.14); }\n\n    #tsa-overlay.tsa-dark .tsa-symbol.buy { color: #4cff91; }\n\n    #tsa-overlay.tsa-dark .tsa-symbol.sell { color: #ff4c6a; }\n\n    #tsa-overlay.tsa-dark .tsa-symbol.hold { color: #a0a0ff; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-value.green { color: #4cff91; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-value.red { color: #ff4c6a; }\n\n    #tsa-overlay.tsa-dark .tsa-divider { border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-footer { background: #0f0f1a; border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-updated { color: #666; }\n\n    #tsa-overlay.tsa-dark .tsa-loading { color: #666; }\n\n    #tsa-overlay.tsa-dark .tsa-close { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-close:hover { color: #aaa; }\n\n    #tsa-overlay.tsa-dark .tsa-theme-btn { color: #c8c8d8; opacity: 1; }\n\n    #tsa-overlay.tsa-dark .tsa-theme-btn:hover { color: #ffffff; }\n\n    #tsa-overlay.tsa-dark .tsa-title { color: #7a9fd4; }\n\n \\n"
 
   // ============================================================
   // ROI PLANNER
@@ -2130,17 +2130,59 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return lsGet("tsa_overlay_position", "bottom-right");
   }
 
-  function applyOverlayPosition(pos) {
-    var p = {
-      "bottom-right": { btn: { bottom:"80px",  top:"auto", right:"16px", left:"auto" }, overlay: { bottom:"130px", top:"auto", right:"16px", left:"auto" } },
-      "bottom-left":  { btn: { bottom:"80px",  top:"auto", right:"auto", left:"16px" }, overlay: { bottom:"130px", top:"auto", right:"auto", left:"16px" } },
-      "top-right":    { btn: { bottom:"auto",  top:"16px", right:"16px", left:"auto" }, overlay: { bottom:"auto",  top:"60px", right:"16px", left:"auto" } },
-      "top-left":     { btn: { bottom:"auto",  top:"16px", right:"auto", left:"16px" }, overlay: { bottom:"auto",  top:"60px", right:"auto", left:"16px" } }
-    }[pos] || { btn: { bottom:"80px", top:"auto", right:"16px", left:"auto" }, overlay: { bottom:"130px", top:"auto", right:"16px", left:"auto" } };
+  // Anchor the overlay panel to whichever screen quadrant the button sits in,
+  // clamped on-screen. Used for the free-drag ("custom") mode where the button
+  // can be anywhere; the preset modes use the fixed map in applyOverlayPosition.
+  function positionOverlayNearButton() {
     var btn = document.getElementById("tsa-btn");
     var ov  = document.getElementById("tsa-overlay");
-    if (btn) { btn.style.bottom = p.btn.bottom; btn.style.top = p.btn.top; btn.style.right = p.btn.right; btn.style.left = p.btn.left; }
-    if (ov)  { ov.style.bottom  = p.overlay.bottom; ov.style.top = p.overlay.top; ov.style.right = p.overlay.right; ov.style.left = p.overlay.left; }
+    if (!btn || !ov) return;
+    var r = btn.getBoundingClientRect();
+    var vw = window.innerWidth, vh = window.innerHeight;
+    ov.style.transform = "none";
+    // Horizontal: anchor to the side the button is nearer to.
+    if (r.left + r.width / 2 < vw / 2) {
+      ov.style.left = Math.round(r.left) + "px"; ov.style.right = "auto";
+    } else {
+      ov.style.right = Math.round(vw - r.right) + "px"; ov.style.left = "auto";
+    }
+    // Vertical: open above the button when it's in the lower half, else below.
+    if (r.top + r.height / 2 > vh / 2) {
+      ov.style.bottom = Math.round(vh - r.top + 8) + "px"; ov.style.top = "auto";
+    } else {
+      ov.style.top = Math.round(r.bottom + 8) + "px"; ov.style.bottom = "auto";
+    }
+  }
+
+  function applyOverlayPosition(pos) {
+    var btn = document.getElementById("tsa-btn");
+    var ov  = document.getElementById("tsa-overlay");
+    // Free-drag mode: restore the saved button coords (clamped to the current
+    // viewport) and anchor the overlay next to it.
+    if (pos === "custom") {
+      var c;
+      try { c = JSON.parse(lsGet("tsa_btn_custom", "null")); } catch(e) { c = null; }
+      if (btn && c && typeof c.left === "number" && typeof c.top === "number") {
+        var left = Math.max(0, Math.min(c.left, window.innerWidth - btn.offsetWidth));
+        var top  = Math.max(0, Math.min(c.top,  window.innerHeight - btn.offsetHeight));
+        btn.style.left = left + "px"; btn.style.top = top + "px";
+        btn.style.right = "auto"; btn.style.bottom = "auto"; btn.style.transform = "none";
+        positionOverlayNearButton();
+        return;
+      }
+      // No saved coords yet — fall through to the default preset.
+      pos = "bottom-right";
+    }
+    var p = {
+      "bottom-right": { btn: { bottom:"80px",  top:"auto", right:"16px", left:"auto", transform:"none" }, overlay: { bottom:"130px", top:"auto", right:"16px", left:"auto", transform:"none" } },
+      "bottom-left":  { btn: { bottom:"80px",  top:"auto", right:"auto", left:"16px", transform:"none" }, overlay: { bottom:"130px", top:"auto", right:"auto", left:"16px", transform:"none" } },
+      "top-right":    { btn: { bottom:"auto",  top:"16px", right:"16px", left:"auto", transform:"none" }, overlay: { bottom:"auto",  top:"60px", right:"16px", left:"auto", transform:"none" } },
+      "top-left":     { btn: { bottom:"auto",  top:"16px", right:"auto", left:"16px", transform:"none" }, overlay: { bottom:"auto",  top:"60px", right:"auto", left:"16px", transform:"none" } },
+      "middle-right": { btn: { bottom:"auto",  top:"50%", right:"16px", left:"auto", transform:"translateY(-50%)" }, overlay: { bottom:"auto", top:"50%", right:"16px", left:"auto", transform:"translateY(-50%)" } },
+      "middle-left":  { btn: { bottom:"auto",  top:"50%", right:"auto", left:"16px", transform:"translateY(-50%)" }, overlay: { bottom:"auto", top:"50%", right:"auto", left:"16px", transform:"translateY(-50%)" } }
+    }[pos] || { btn: { bottom:"80px", top:"auto", right:"16px", left:"auto", transform:"none" }, overlay: { bottom:"130px", top:"auto", right:"16px", left:"auto", transform:"none" } };
+    if (btn) { btn.style.bottom = p.btn.bottom; btn.style.top = p.btn.top; btn.style.right = p.btn.right; btn.style.left = p.btn.left; btn.style.transform = p.btn.transform; }
+    if (ov)  { ov.style.bottom  = p.overlay.bottom; ov.style.top = p.overlay.top; ov.style.right = p.overlay.right; ov.style.left = p.overlay.left; ov.style.transform = p.overlay.transform; }
   }
   function getRealizedDays() {
     return parseInt(lsGet("tsa_realized_days", "7"), 10);
@@ -5074,9 +5116,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           "<select id=\"tsa-setting-position\" style=\"" + inputStyle + "\">" +
             "<option value=\"bottom-right\"" + (getOverlayPosition() === "bottom-right" ? " selected" : "") + ">Bottom right</option>" +
             "<option value=\"bottom-left\""  + (getOverlayPosition() === "bottom-left"  ? " selected" : "") + ">Bottom left</option>" +
+            "<option value=\"middle-right\"" + (getOverlayPosition() === "middle-right" ? " selected" : "") + ">Middle right</option>" +
+            "<option value=\"middle-left\""  + (getOverlayPosition() === "middle-left"  ? " selected" : "") + ">Middle left</option>" +
             "<option value=\"top-right\""    + (getOverlayPosition() === "top-right"    ? " selected" : "") + ">Top right</option>" +
             "<option value=\"top-left\""     + (getOverlayPosition() === "top-left"     ? " selected" : "") + ">Top left</option>" +
+            (getOverlayPosition() === "custom" ? "<option value=\"custom\" selected>Custom (dragged)</option>" : "") +
           "</select>" +
+          "<div style=\"font-size:10px;color:" + muted + ";margin-top:4px\">Tip: drag the Stocks button to place it anywhere.</div>" +
         "</div>" +
         "</div>" +
 
@@ -5268,12 +5314,55 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     document.body.appendChild(overlay);
 
+    // Free-drag the button: a plain tap still toggles the panel (click handler
+    // below), but pressing and moving past a 6px threshold drags the button to
+    // a custom position. Pointer events unify mouse + touch (PDA); touch-action
+    // is none on #tsa-btn so a drag isn't stolen by page scrolling.
+    var dragState = null;
+    var tsaJustDragged = false;
+    btn.addEventListener("pointerdown", function(e) {
+      if (typeof e.button === "number" && e.button !== 0) return; // primary/touch only
+      tsaJustDragged = false; // cleared every press so a swallowed click can't get stuck
+      var rect = btn.getBoundingClientRect();
+      dragState = { startX: e.clientX, startY: e.clientY, offX: e.clientX - rect.left, offY: e.clientY - rect.top, moved: false, pid: e.pointerId };
+    });
+    btn.addEventListener("pointermove", function(e) {
+      if (!dragState) return;
+      var dx = e.clientX - dragState.startX, dy = e.clientY - dragState.startY;
+      if (!dragState.moved && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+        dragState.moved = true;
+        try { btn.setPointerCapture(dragState.pid); } catch(_) {}
+      }
+      if (dragState.moved) {
+        e.preventDefault();
+        var nx = Math.max(0, Math.min(e.clientX - dragState.offX, window.innerWidth - btn.offsetWidth));
+        var ny = Math.max(0, Math.min(e.clientY - dragState.offY, window.innerHeight - btn.offsetHeight));
+        btn.style.left = nx + "px"; btn.style.top = ny + "px";
+        btn.style.right = "auto"; btn.style.bottom = "auto"; btn.style.transform = "none";
+      }
+    });
+    btn.addEventListener("pointerup", function(e) {
+      if (!dragState) return;
+      if (dragState.moved) {
+        tsaJustDragged = true; // suppress the click that follows this drag
+        var r = btn.getBoundingClientRect();
+        lsSet("tsa_overlay_position", "custom");
+        lsSet("tsa_btn_custom", JSON.stringify({ left: Math.round(r.left), top: Math.round(r.top) }));
+        positionOverlayNearButton();
+        try { btn.releasePointerCapture(dragState.pid); } catch(_) {}
+      }
+      dragState = null;
+    });
+    btn.addEventListener("pointercancel", function() { dragState = null; }); // PDA system gesture interrupted the drag
+
     btn.addEventListener("click", function() {
+      if (tsaJustDragged) { tsaJustDragged = false; return; } // just finished a drag, not a tap
       var isOpen = overlay.style.display === "block";
       if (isOpen) {
         overlay.style.display = "none";
         overlay.classList.remove("tsa-visible");
       } else {
+        if (getOverlayPosition() === "custom") positionOverlayNearButton();
         overlay.style.display = "block";
         overlay.classList.remove("tsa-visible");
         // Force reflow so animation triggers fresh
