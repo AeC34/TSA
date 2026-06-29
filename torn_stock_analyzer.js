@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.35.3
+// @version      2.36.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -218,7 +218,7 @@
   // worse benefit tier is sold (step 1). Holds the buy half so step 2 (the next click)
   // buys the better tier deterministically, even if a re-render recomputes the plan.
   // In-memory only (a within-session intent); cleared on the buy or via the ✕ pill.
-  var qtPendingUpgrade = null; // {sym, tier, shares, livePrice, cost, expectedCash}
+  var qtPendingUpgrade = null; // {sells:[{sym,tier,shares}], total, buy:{sym,tier,shares}, buyPrice, expectedCash}
   var _firstLoadKicked = false; // guards the on-load first full loadData against double-fire
 
   var STOCK_ID_MAP = {
@@ -944,28 +944,26 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
 
   // Upgrade swap — shared by the ROI Planner line and the Quick Trade pill so both
-  // always agree. Finds the single best "sell a worse owned benefit tier → buy a
-  // strictly-better-ROI next tier" pair: best = largest net weekly income gain among
-  // pairs that become affordable once the worse tier is sold. Buy candidates are
-  // reused from plan.dynamicNextTiers (already skip/cap-filtered and ROI-ranked).
-  // Returns one swap object or null. NOTE: the sell side here is a deliberate,
-  // user-initiated benefit-share sale — the Quick Trade pill bypasses Benefit Lock
-  // for it (and labels it explicitly), so it must never fire without an explicit click.
-  // `liquidCash` must be ON-HAND cash only (NOT swing/armory paper value): the two-step
-  // pill funds the buy from on-hand cash + the worse tier's sale proceeds, so swing
-  // positions and faction armory are not deployable in one click. Using total planner
-  // capital here would surface swaps the buy step then can't actually afford.
+  // always agree. Finds the best "sell one or more worse-ROI owned benefit tiers → buy
+  // a strictly-better-ROI next tier" plan: it sells the LOWEST-ROI tiers first and only
+  // as many as needed to afford the buy, requiring total weekly income to still rise.
+  // Buy candidates are reused from plan.dynamicNextTiers (skip/cap-filtered, ROI-ranked).
+  // Returns { sells:[...], buy, netWeekly, leftoverCash } or null. NOTE: the sells are
+  // deliberate, user-initiated benefit-share sales — the Quick Trade pill bypasses
+  // Benefit Lock for them (labelled explicitly) and fires one POST per click only.
+  // `liquidCash` must be ON-HAND cash only (NOT swing/armory paper value): the pill funds
+  // the buy from on-hand cash + the sale proceeds, so swing/armory aren't deployable.
   function computeUpgradeSwap(ownedMap, raw, liquidCash, plan) {
     if (!plan || !plan.dynamicNextTiers || plan.dynamicNextTiers.length === 0) return null;
     ownedMap = ownedMap || {};
 
-    // Sell candidates: the marginal TOP benefit tier of each owned benefit stock.
-    // Only the top increment is realistically sellable in one go (Torn shares are
-    // fungible — dropping a lower tier means selling everything above it too) and it
-    // is also the lowest-ROI tier, so it's the correct thing to give up. effTopTier
-    // honours the planner tier cap: shares above the cap are already swing, so the
-    // marginal *benefit* tier is the capped tier.
-    var sellCands = [];
+    // Sell units: EVERY owned benefit marginal tier (each stock, tier 1..effTopTier).
+    // A stock's tiers must be sold top-down (shares are fungible — to drop a lower tier
+    // you must sell everything above it). Because a higher tier has lower ROI, sorting
+    // all units by ROI ascending lays out each stock's tiers in top-down order, so
+    // accumulating a prefix of the sorted list never violates the top-down rule.
+    // effTopTier honours the planner tier cap (shares above the cap are already swing).
+    var sellUnits = [];
     Object.keys(ownedMap).forEach(function(sym) {
       var o = ownedMap[sym];
       if (!o || !o.has_dividend || o.benefit_shares <= 0) return;
@@ -979,22 +977,25 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var liveEntry = raw ? raw.find(function(x) { return x.stock === sym; }) : null;
       var livePrice = liveEntry ? (parseFloat(liveEntry.price) || 0) : 0;
       if (livePrice <= 0) return;
-      var marginalShares = (PASSIVE_STOCKS.indexOf(sym) >= 0)
-        ? req
-        : Math.pow(2, effTopTier - 1) * req;
-      var saleValue = marginalShares * livePrice * 0.999; // net of Torn's 0.1% sell fee
-      if (saleValue <= 0) return;
-      var entry = ROI_MAP[sym + "|T" + effTopTier];
-      if (!entry) return;
-      var iv = getItemValue(entry);
-      var perCycle = (entry.item && iv > 0) ? iv : entry.payout;
-      var weekly = perCycle ? perCycle / (entry.freq || 7) * 7 : 0;
-      var liveTierCost = marginalShares * livePrice;
-      // payout-based ROI to match the buy-side roi from computeBridgePlan (comparable)
-      var sellRoi = (liveTierCost > 0 && entry.payout) ? (entry.payout / liveTierCost * (365 / (entry.freq || 7)) * 100) : 0;
-      sellCands.push({ sym: sym, tier: "T" + effTopTier, roi: sellRoi, shares: marginalShares, saleValue: saleValue, weekly: weekly });
+      var isPassive = PASSIVE_STOCKS.indexOf(sym) >= 0;
+      var topT = isPassive ? 1 : effTopTier; // passive stocks are single-tier
+      for (var t = 1; t <= topT; t++) {
+        var marginalShares = isPassive ? req : Math.pow(2, t - 1) * req;
+        var saleValue = marginalShares * livePrice * 0.999; // net of Torn's 0.1% sell fee
+        if (saleValue <= 0) continue;
+        var entry = ROI_MAP[sym + "|T" + t];
+        if (!entry) continue;
+        var iv = getItemValue(entry);
+        var perCycle = (entry.item && iv > 0) ? iv : entry.payout;
+        var weekly = perCycle ? perCycle / (entry.freq || 7) * 7 : 0;
+        var tierCost = marginalShares * livePrice;
+        // payout-based ROI to match the buy-side roi from computeBridgePlan (comparable)
+        var roi = (tierCost > 0 && entry.payout) ? (entry.payout / tierCost * (365 / (entry.freq || 7)) * 100) : 0;
+        sellUnits.push({ sym: sym, tier: "T" + t, roi: roi, shares: marginalShares, saleValue: saleValue, weekly: weekly });
+      }
     });
-    if (sellCands.length === 0) return null;
+    if (sellUnits.length === 0) return null;
+    sellUnits.sort(function(a, b) { return a.roi - b.roi; }); // lowest ROI first
 
     var best = null;
     plan.dynamicNextTiers.forEach(function(b) {
@@ -1003,21 +1004,30 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var bPerCycle = (b.payoutEntry.item && biv > 0) ? biv : b.payoutEntry.payout;
       var buyWeekly = bPerCycle ? bPerCycle / (b.payoutEntry.freq || 7) * 7 : 0;
       if (buyWeekly <= 0) return;
-      sellCands.forEach(function(s) {
-        if (s.sym === b.sym) return;                       // not a self-swap
-        if (b.roi <= s.roi) return;                        // must be a strictly better ROI block
-        if (liquidCash + s.saleValue < b.cost) return;     // on-hand cash + sale proceeds must cover the buy
-        var netWeekly = buyWeekly - s.weekly;
-        if (netWeekly <= 0) return;                        // must raise weekly income
-        if (!best || netWeekly > best.netWeekly) {
-          best = {
-            sell: { sym: s.sym, tier: s.tier, roi: s.roi, shares: s.shares, saleValue: s.saleValue, weekly: s.weekly },
-            buy: { sym: b.sym, tier: "T" + b.tierInfo.nextIncrement, roi: b.roi, cost: b.cost, shares: b.tierInfo.sharesNeeded, tierInfo: b.tierInfo },
-            netWeekly: netWeekly,
-            leftoverCash: liquidCash + s.saleValue - b.cost
-          };
+      if (liquidCash >= b.cost) return; // affordable with cash alone — no sell needed, not an upgrade swap
+      // Accumulate lowest-ROI sell units until on-hand cash + proceeds cover the buy.
+      // Skip the buy's own symbol; stop the moment a unit's ROI reaches the buy's — we
+      // never give up a block as good as the one we're buying, and (list is ascending)
+      // every later unit is worse-ROI too. Record only when income still rises.
+      var cumProceeds = 0, cumWeekly = 0, sells = [];
+      for (var i = 0; i < sellUnits.length; i++) {
+        var u = sellUnits[i];
+        if (u.sym === b.sym) continue;
+        if (b.roi <= u.roi) break;
+        sells.push(u); cumProceeds += u.saleValue; cumWeekly += u.weekly;
+        if (liquidCash + cumProceeds >= b.cost) {
+          var netWeekly = buyWeekly - cumWeekly;
+          if (netWeekly > 0 && (!best || netWeekly > best.netWeekly)) {
+            best = {
+              sells: sells.map(function(s){ return { sym: s.sym, tier: s.tier, roi: s.roi, shares: s.shares, saleValue: s.saleValue, weekly: s.weekly }; }),
+              buy: { sym: b.sym, tier: "T" + b.tierInfo.nextIncrement, roi: b.roi, cost: b.cost, shares: b.tierInfo.sharesNeeded, tierInfo: b.tierInfo },
+              netWeekly: netWeekly,
+              leftoverCash: liquidCash + cumProceeds - b.cost
+            };
+          }
+          break; // affordable — never sell more than needed
         }
-      });
+      }
     });
     return best;
   }
@@ -1210,17 +1220,19 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         });
       }
 
-      // ⤴ Upgrade — the single best swap of a worse-ROI owned tier for a better-ROI
-      // one (largest net weekly income gain, affordable after the sale). Shares the
-      // computeUpgradeSwap call with the Quick Trade pill so the two always agree.
-      // On-hand cash only (not totalCapital) — the swap is executed via the Quick
-      // Trade pill from cash + sale proceeds, so swing/armory aren't deployable here.
+      // ⤴ Upgrade — best plan to sell one or more worse-ROI owned tiers (lowest ROI
+      // first, only as many as needed) and buy a strictly-better tier, for the largest
+      // net weekly income gain. Shares the computeUpgradeSwap plan with the Quick Trade
+      // pill so the two always agree. On-hand cash only (not totalCapital) — the swap is
+      // executed via the pill from cash + sale proceeds, so swing/armory aren't usable.
       var upSwap = computeUpgradeSwap(ownedMap, raw, cashBalance, plan);
       if (upSwap) {
+        var upSellLabel = upSwap.sells.map(function(sc){ return sc.sym + " " + sc.tier; }).join(" + ");
         html += '<div style="border-top:1px solid ' + c.divider + ';margin:6px 0"></div>';
-        html += '<div style="font-size:9px;color:#9333ea;letter-spacing:0.08em;' + s + ';margin-bottom:5px">⤴ Upgrade · swap to better ROI</div>';
+        html += '<div style="font-size:9px;color:#9333ea;letter-spacing:0.08em;' + s + ';margin-bottom:5px">⤴ Upgrade · swap to better ROI'
+          + (upSwap.sells.length > 1 ? " (" + upSwap.sells.length + " blocks)" : "") + '</div>';
         html += nmRow(
-          "Sell " + upSwap.sell.sym + " " + upSwap.sell.tier + " (" + upSwap.sell.roi.toFixed(1) + "%) → " + upSwap.buy.sym + " " + upSwap.buy.tier + " (" + upSwap.buy.roi.toFixed(1) + "%)",
+          "Sell " + upSellLabel + " → " + upSwap.buy.sym + " " + upSwap.buy.tier + " (" + upSwap.buy.roi.toFixed(1) + "%)",
           "+" + fmRoi(upSwap.netWeekly) + "/7d",
           c.green
         );
@@ -4286,33 +4298,49 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return btn;
   }
 
-  // Live-price re-check for an Upgrade swap. computeUpgradeSwap ranks candidates on
-  // the last API snapshot, which can be stale; before we ever sell a benefit block we
-  // re-price the swap against the CURRENT stock prices (qtGetPrice), so a price drop
-  // since the snapshot — i.e. a real loss on the sale — shrinks the proceeds we count.
-  // Returns null if prices/shares are unreadable; otherwise the live numbers plus an
-  // `affordable` flag = on-hand cash + live sale proceeds >= live buy cost. The sell
-  // is only ever offered/fired when affordable, so the irreversible step-1 sale can't
-  // strand the user holding nothing they can complete the buy with.
-  function qtUpgradeLiveCheck(sw) {
-    if (!sw) return null;
+  // Live-price re-check for an Upgrade swap. computeUpgradeSwap plans against the last
+  // API snapshot, which can be stale; before we ever sell a benefit block we re-price
+  // the WHOLE remaining plan against CURRENT stock prices (qtGetPrice), so a price drop
+  // since the snapshot — a real loss on the sale — shrinks the proceeds we count.
+  // `remainingSells` = the sell units not yet executed; `buy` = the target tier.
+  // Returns null if any remaining sell's price/shares are unreadable (never sell blind);
+  // otherwise live numbers + flags:
+  //   affordable        = on-hand cash + live proceeds of ALL remaining sells >= live buy cost
+  //   alreadyAffordable = on-hand cash alone already covers the buy (skip remaining sells)
+  //   nextSell          = the next unit to sell, re-priced and clamped to live owned shares
+  // Conservative on purpose: proceeds are clamped to live owned shares (decremented per
+  // stock across the plan), so a multi-tier sell of one stock never over-counts.
+  function qtUpgradeLiveCheck(remainingSells, buy) {
+    if (!buy || !remainingSells) return null;
     qtBuildMaps();
-    var owned = qtGetOwnedShares(sw.sell.sym);
-    if (owned <= 0) return null;
-    var sellShares = Math.min(sw.sell.shares, owned);
-    if (sellShares < 1) return null;
-    var sellPrice = qtGetPrice(sw.sell.sym);
-    var buyPrice = qtGetPrice(sw.buy.sym);
-    if (sellPrice <= 0 || buyPrice <= 0) return null;
-    var liveProceeds = sellShares * sellPrice * 0.999; // net of Torn's 0.1% sell fee, at CURRENT price
-    var liveBuyCost = sw.buy.shares * buyPrice;
+    var buyPrice = qtGetPrice(buy.sym);
+    if (buyPrice <= 0) return null;
+    var liveBuyCost = buy.shares * buyPrice;
     var cashNow = qtGetMoneyFast();
     var cashAvail = cashNow > 0 ? cashNow : 0;
-    var cashAfterSale = cashAvail + liveProceeds;
+    var ownedRemaining = {}; // sym -> live owned, decremented as the plan consumes shares
+    var liveProceeds = 0;
+    var nextSell = null;
+    for (var i = 0; i < remainingSells.length; i++) {
+      var u = remainingSells[i];
+      var sp = qtGetPrice(u.sym);
+      if (sp <= 0) return null; // can't price a remaining sell → bail, never sell blind
+      if (ownedRemaining[u.sym] === undefined) ownedRemaining[u.sym] = qtGetOwnedShares(u.sym);
+      var sh = Math.min(u.shares, ownedRemaining[u.sym]);
+      if (i === 0) {
+        if (sh < 1) return null; // next sell has no shares to sell
+        nextSell = { sym: u.sym, tier: u.tier, shares: sh, sellPrice: sp };
+      }
+      ownedRemaining[u.sym] -= sh;
+      liveProceeds += sh * sp * 0.999;
+    }
+    var cashAfterAll = cashAvail + liveProceeds;
     return {
-      sellShares: sellShares, sellPrice: sellPrice, buyPrice: buyPrice,
-      liveProceeds: liveProceeds, liveBuyCost: liveBuyCost,
-      cashAfterSale: cashAfterSale, affordable: cashAfterSale >= liveBuyCost
+      buyPrice: buyPrice, liveBuyCost: liveBuyCost, cashNow: cashAvail,
+      liveProceeds: liveProceeds, cashAfterAll: cashAfterAll,
+      affordable: cashAfterAll >= liveBuyCost,
+      alreadyAffordable: cashAvail >= liveBuyCost,
+      nextSell: nextSell
     };
   }
 
@@ -4431,111 +4459,164 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       container.appendChild(bankWrap);
     }
 
-    // ⤴ Upgrade swap — sell a worse-ROI benefit tier, then buy a strictly-better one.
-    // Two-step single-click: step 1 sells (this click), step 2 buys (next click), so
-    // each click is still exactly one POST. The recommendation mirrors the ROI
-    // Planner's "⤴ Upgrade" line (same computeUpgradeSwap call).
-    // On-hand cash only — the buy step funds from cash + sale proceeds, not the
-    // swing/armory paper value baked into bpCapital (see computeUpgradeSwap).
-    var upSwap = (bpPlan && lastOwnedMap && lastRaw)
+    // ⤴ Upgrade swap — sell one or more worse-ROI benefit tiers (lowest ROI first, only
+    // as many as needed), then buy a strictly-better tier. Each sell and the final buy
+    // is one click = one POST. MONEY SAFETY: a sell never fires unless, at LIVE prices,
+    // on-hand cash + the proceeds of ALL remaining planned sells cover the buy — so an
+    // irreversible benefit-block sale can't strand the user mid-upgrade. Mirrors the ROI
+    // Planner's "⤴ Upgrade" line (same computeUpgradeSwap plan).
+    var upSwap = (bpPlan && lastOwnedMap && lastRaw && !qtPendingUpgrade)
       ? computeUpgradeSwap(lastOwnedMap, lastRaw, lastCashBalance, bpPlan) : null;
-    // Re-price the ranked swap against LIVE prices before offering the sell. This is
-    // the money-safety gate: the snapshot may say "affordable" while the sell stock
-    // has dropped (a loss), leaving too little after the sale to complete the buy.
-    var upLive = (upSwap && !qtPendingUpgrade) ? qtUpgradeLiveCheck(upSwap) : null;
-    if (qtPendingUpgrade || upLive) {
+
+    if (qtPendingUpgrade) {
+      // ── Mid-upgrade: sell the remaining planned tiers one click at a time, then buy. ──
+      var pend = qtPendingUpgrade;
+      var lp = qtUpgradeLiveCheck(pend.sells, pend.buy);
+      var doneSells = pend.total - pend.sells.length;
+      var sellNext = pend.sells.length > 0 && lp && lp.nextSell && !lp.alreadyAffordable && lp.affordable;
+      var canBuy = pend.sells.length === 0 || (lp && lp.alreadyAffordable);
+
       var upWrap = document.createElement("div");
       upWrap.style.marginBottom = (hasBuy || hasSwing) ? "10px" : "0";
       var upLbl = document.createElement("span");
       upLbl.className = "qt-pill-group-label";
       upLbl.style.color = labelColor;
-      upLbl.textContent = qtPendingUpgrade ? "⤴ Upgrade · step 2 of 2" : "⤴ Upgrade · swap to better ROI";
+      upLbl.textContent = sellNext ? ("⤴ Upgrade · sell " + (doneSells + 1) + "/" + pend.total) : "⤴ Upgrade · buy step";
       upWrap.appendChild(upLbl);
       var upRow = document.createElement("div");
       upRow.className = "qt-pill-row";
 
-      if (qtPendingUpgrade) {
-        // Step 2: buy the better tier with the EXACT share count that unlocks it
-        // (a partial buy would waste shares without unlocking the block).
-        var pend = qtPendingUpgrade;
-        upRow.appendChild(makeQtPill(pend.sym, true, "⤴ Step 2 · Buy " + pend.tier, isDark, function() {
-          qtBuildMaps();
-          var price = qtGetPrice(pend.sym) || pend.livePrice || 0;
-          if (price <= 0) { showToast("Could not read price for " + pend.sym, "error"); return; }
-          // Funds floor = the larger of the live DOM money and the expected cash from
-          // step 1's sale. A direct-POST sale may not have refreshed #user-money yet,
-          // so trusting only the DOM would falsely block the buy even though the
-          // proceeds are already server-side. If expectedCash is somehow too high
-          // (cash spent elsewhere), Torn rejects the buy and qtFireTrade toasts it.
-          var availCash = Math.max(qtGetMoneyFast(), pend.expectedCash || 0);
-          if (availCash <= 0) { showToast("No money found", "warn"); return; }
-          var needCost = pend.shares * price;
-          if (needCost > availCash) {
-            showToast("Need $" + Math.ceil(needCost - availCash).toLocaleString("en-US") + " more for " + pend.sym + " " + pend.tier, "warn");
-            return;
-          }
-          qtUiTrade(pend.sym, pend.shares, "buyShares",
-            "Upgraded → bought " + pend.shares.toLocaleString("en-US") + " " + pend.sym + " (" + pend.tier + ")")
-            .then(function(fired) { if (fired) { qtPendingUpgrade = null; renderQtPills(); } });
-        }, fmRoi(pend.cost), qtPillPaletteUpgrade(isDark)));
-
-        // ✕ cancel pill — abandons the pending buy (you keep the cash from the sale).
-        var cancel = makeQtPill(pend.sym, true, "✕", isDark, function() {
-          qtPendingUpgrade = null; renderQtPills();
-        }, null, qtPillPaletteUpgrade(isDark));
-        cancel.classList.add("qt-pill-mini");
-        var cImg = cancel.querySelector("img"); if (cImg) cImg.style.display = "none";
-        var cBadge = cancel.querySelector(".qt-pill-badge"); if (cBadge) cBadge.style.display = "none";
-        cancel.title = "Cancel the pending upgrade buy (keeps the cash from the sale)";
-        upRow.appendChild(cancel);
-      } else if (upLive.affordable) {
-        // Step 1: sell the worse benefit tier. This DELIBERATELY bypasses Benefit
-        // Lock — it is the benefit-share sale the user explicitly asked for via the
-        // Upgrade pill. The label names the tier being sold so it's never hidden.
-        var sw = upSwap;
-        upRow.appendChild(makeQtPill(sw.sell.sym, false,
-          "⤴ Sell " + sw.sell.tier + " → " + sw.buy.sym + " " + sw.buy.tier, isDark, function() {
-          // MONEY SAFETY: re-price against LIVE prices at click time (they may have
-          // moved since render). NEVER sell the benefit block unless on-hand cash +
-          // the live sale proceeds cover the buy at the current price — otherwise the
-          // irreversible sale would strand the user with no replacement block.
-          var lc = qtUpgradeLiveCheck(sw);
-          if (!lc) { showToast("Could not read live prices for the swap — try again", "warn"); return; }
+      if (sellNext) {
+        var ns = lp.nextSell;
+        upRow.appendChild(makeQtPill(ns.sym, false,
+          "⤴ Sell " + (doneSells + 1) + "/" + pend.total + " · " + ns.sym + " " + ns.tier, isDark, function() {
+          // Re-price the WHOLE remaining plan live at click; never sell unless the
+          // remaining sells + cash will cover the buy (or it's already affordable).
+          var lc = qtUpgradeLiveCheck(pend.sells, pend.buy);
+          if (!lc || !lc.nextSell) { showToast("Could not read live prices — try again", "warn"); return; }
+          if (lc.alreadyAffordable) { renderQtPills(); return; } // enough cash now — skip to buy
           if (!lc.affordable) {
-            showToast("Upgrade blocked: after selling " + sw.sell.sym + " you'd have " + fmRoi(lc.cashAfterSale) +
-              ", but " + sw.buy.sym + " " + sw.buy.tier + " now costs " + fmRoi(lc.liveBuyCost) + ". Not selling.", "warn");
+            showToast("Upgrade paused: at live prices the remaining sales won't cover " +
+              pend.buy.sym + " " + pend.buy.tier + " (" + fmRoi(lc.liveBuyCost) + "). Not selling more.", "warn");
             return;
           }
-          // The server credits the proceeds the instant the sale succeeds, but a
-          // direct-POST sale may not refresh #user-money — so step 2's funds floor
-          // uses this live cashAfterSale, not a (possibly stale) DOM re-read.
-          qtUiTrade(sw.sell.sym, lc.sellShares, "sellShares",
-            "Upgrade step 1: sold " + lc.sellShares.toLocaleString("en-US") + " " + sw.sell.sym + " (" + sw.sell.tier + ")",
-            { blockMaxShares: lc.sellShares })
+          var sns = lc.nextSell;
+          qtUiTrade(sns.sym, sns.shares, "sellShares",
+            "Upgrade: sold " + sns.shares.toLocaleString("en-US") + " " + sns.sym + " (" + sns.tier + ")",
+            { blockMaxShares: sns.shares })
             .then(function(fired) {
               if (fired) {
-                qtPendingUpgrade = {
-                  sym: sw.buy.sym, tier: sw.buy.tier, shares: sw.buy.shares,
-                  livePrice: lc.buyPrice, cost: sw.buy.shares * lc.buyPrice,
-                  expectedCash: lc.cashAfterSale
-                };
+                pend.sells = pend.sells.slice(1);
+                pend.expectedCash = (pend.expectedCash || 0) + sns.shares * sns.sellPrice * 0.999;
                 renderQtPills();
               }
             });
-        }, "+" + fmRoi(sw.netWeekly) + "/7d", qtPillPaletteUpgrade(isDark)));
+        }, "→ " + pend.buy.sym + " " + pend.buy.tier, qtPillPaletteUpgrade(isDark)));
+      } else if (canBuy) {
+        // Buy step: all needed sells are done (or cash already covers it). Buy the exact
+        // shares that unlock the better tier (a partial buy wastes shares).
+        upRow.appendChild(makeQtPill(pend.buy.sym, true, "⤴ Buy " + pend.buy.tier, isDark, function() {
+          qtBuildMaps();
+          var price = qtGetPrice(pend.buy.sym) || pend.buyPrice || 0;
+          if (price <= 0) { showToast("Could not read price for " + pend.buy.sym, "error"); return; }
+          // Funds floor = larger of live DOM money and accumulated expectedCash (a
+          // direct-POST sale may not have refreshed #user-money). If too optimistic,
+          // Torn rejects the buy and qtFireTrade toasts it — no silent failure.
+          var availCash = Math.max(qtGetMoneyFast(), pend.expectedCash || 0);
+          if (availCash <= 0) { showToast("No money found", "warn"); return; }
+          var needCost = pend.buy.shares * price;
+          if (needCost > availCash) {
+            showToast("Need $" + Math.ceil(needCost - availCash).toLocaleString("en-US") + " more for " + pend.buy.sym + " " + pend.buy.tier, "warn");
+            return;
+          }
+          qtUiTrade(pend.buy.sym, pend.buy.shares, "buyShares",
+            "Upgraded → bought " + pend.buy.shares.toLocaleString("en-US") + " " + pend.buy.sym + " (" + pend.buy.tier + ")")
+            .then(function(fired) { if (fired) { qtPendingUpgrade = null; renderQtPills(); } });
+        }, fmRoi(pend.buy.shares * (pend.buyPrice || 0)), qtPillPaletteUpgrade(isDark)));
       } else {
-        // upSwap exists but, at LIVE prices, the sale wouldn't cover the buy (e.g. the
-        // sell stock dropped since the snapshot — a loss). Show a muted, non-clickable
-        // hint instead of a sell pill we'd refuse, so the user is never lured into an
-        // unaffordable, irreversible benefit-block sale.
-        var upNone = document.createElement("span");
-        upNone.textContent = "⤴ not affordable at live price (" + upSwap.sell.sym + "→" + upSwap.buy.sym + ")";
-        upNone.style.cssText = "align-self:center;font-size:10px;color:" + labelColor + ";font-family:JetBrains Mono,monospace;white-space:nowrap;";
-        upRow.appendChild(upNone);
+        // lp unreadable, or the remaining sells can't cover the buy at live prices —
+        // paused. Cash already freed by completed sells stays in the wallet.
+        var upPaused = document.createElement("span");
+        upPaused.textContent = "⤴ paused — prices moved; ✕ to stop (cash kept)";
+        upPaused.style.cssText = "align-self:center;font-size:10px;color:" + labelColor + ";font-family:JetBrains Mono,monospace;white-space:nowrap;";
+        upRow.appendChild(upPaused);
       }
+
+      // ✕ cancel — abandon the upgrade; any cash already freed by completed sells stays.
+      var cxSym = (sellNext && lp && lp.nextSell) ? lp.nextSell.sym : pend.buy.sym;
+      var cancel = makeQtPill(cxSym, true, "✕", isDark, function() {
+        qtPendingUpgrade = null; renderQtPills();
+      }, null, qtPillPaletteUpgrade(isDark));
+      cancel.classList.add("qt-pill-mini");
+      var cImg = cancel.querySelector("img"); if (cImg) cImg.style.display = "none";
+      var cBadge = cancel.querySelector(".qt-pill-badge"); if (cBadge) cBadge.style.display = "none";
+      cancel.title = "Cancel the upgrade (any cash already freed by sells stays in your wallet)";
+      upRow.appendChild(cancel);
 
       upWrap.appendChild(upRow);
       container.appendChild(upWrap);
+
+    } else if (upSwap) {
+      // ── Start of an upgrade: re-price the full plan live before offering the first sell. ──
+      var upLive = qtUpgradeLiveCheck(upSwap.sells, upSwap.buy);
+      if (upLive) {
+        var nSells = upSwap.sells.length;
+        var upWrap2 = document.createElement("div");
+        upWrap2.style.marginBottom = (hasBuy || hasSwing) ? "10px" : "0";
+        var upLbl2 = document.createElement("span");
+        upLbl2.className = "qt-pill-group-label";
+        upLbl2.style.color = labelColor;
+        upLbl2.textContent = "⤴ Upgrade · swap to better ROI";
+        upWrap2.appendChild(upLbl2);
+        var upRow2 = document.createElement("div");
+        upRow2.className = "qt-pill-row";
+
+        if (upLive.affordable && upLive.nextSell) {
+          var firstSym = upLive.nextSell.sym;
+          var lbl = (nSells > 1 ? "⤴ Sell 1/" + nSells + " · " : "⤴ Sell ") + firstSym + " " + upLive.nextSell.tier;
+          upRow2.appendChild(makeQtPill(firstSym, false,
+            lbl + " → " + upSwap.buy.sym + " " + upSwap.buy.tier, isDark, function() {
+            // MONEY SAFETY: re-price the full plan live at click; never sell unless the
+            // whole plan + cash covers the buy at current prices.
+            var lc = qtUpgradeLiveCheck(upSwap.sells, upSwap.buy);
+            if (!lc || !lc.nextSell) { showToast("Could not read live prices — try again", "warn"); return; }
+            if (lc.alreadyAffordable) {
+              // Live cash already covers the buy — no sell needed; go straight to buy.
+              qtPendingUpgrade = { sells: [], total: nSells, buy: upSwap.buy, buyPrice: lc.buyPrice, expectedCash: lc.cashNow };
+              renderQtPills();
+              return;
+            }
+            if (!lc.affordable) {
+              showToast("Upgrade blocked: at live prices selling " + nSells + " block(s) won't cover " +
+                upSwap.buy.sym + " " + upSwap.buy.tier + " (" + fmRoi(lc.liveBuyCost) + "). Not selling.", "warn");
+              return;
+            }
+            var sns = lc.nextSell;
+            qtUiTrade(sns.sym, sns.shares, "sellShares",
+              "Upgrade: sold " + sns.shares.toLocaleString("en-US") + " " + sns.sym + " (" + sns.tier + ")",
+              { blockMaxShares: sns.shares })
+              .then(function(fired) {
+                if (fired) {
+                  qtPendingUpgrade = {
+                    sells: upSwap.sells.slice(1), total: nSells, buy: upSwap.buy,
+                    buyPrice: lc.buyPrice, expectedCash: lc.cashNow + sns.shares * sns.sellPrice * 0.999
+                  };
+                  renderQtPills();
+                }
+              });
+          }, "+" + fmRoi(upSwap.netWeekly) + "/7d" + (nSells > 1 ? " · " + nSells + " blocks" : ""), qtPillPaletteUpgrade(isDark)));
+        } else {
+          // Plan exists on the snapshot but, at LIVE prices, the sales wouldn't cover the
+          // buy (e.g. a sell stock dropped — a real loss). Show a muted, non-clickable
+          // hint instead of a sell pill we'd refuse: never lure an unaffordable sale.
+          var upNone = document.createElement("span");
+          upNone.textContent = "⤴ not affordable at live price (" + nSells + " block→" + upSwap.buy.sym + ")";
+          upNone.style.cssText = "align-self:center;font-size:10px;color:" + labelColor + ";font-family:JetBrains Mono,monospace;white-space:nowrap;";
+          upRow2.appendChild(upNone);
+        }
+        upWrap2.appendChild(upRow2);
+        container.appendChild(upWrap2);
+      }
     }
 
     if (hasBuy) {
