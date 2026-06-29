@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.34.0
+// @version      2.35.0
 // @author       AeC3
-// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
+// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
 // @run-at       document-end
 // @license      MIT
@@ -214,6 +214,11 @@
   var lastBuyPriceDelta = {}; // {sym: 24h price change %} for the Quick Buy pill sub-text
   var lastBuyScores = {}; // {sym: buy score} for the Quick Buy pill sub-text
   var lastSwingPills = []; // [{sym, shares, profit}] snapshot for the Swing sell pills
+  // Pending two-step Upgrade swap: set after the user clicks the Upgrade pill and the
+  // worse benefit tier is sold (step 1). Holds the buy half so step 2 (the next click)
+  // buys the better tier deterministically, even if a re-render recomputes the plan.
+  // In-memory only (a within-session intent); cleared on the buy or via the ✕ pill.
+  var qtPendingUpgrade = null; // {sym, tier, shares, livePrice, cost}
   var _firstLoadKicked = false; // guards the on-load first full loadData against double-fire
 
   var STOCK_ID_MAP = {
@@ -938,6 +943,81 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     };
   }
 
+  // Upgrade swap — shared by the ROI Planner line and the Quick Trade pill so both
+  // always agree. Finds the single best "sell a worse owned benefit tier → buy a
+  // strictly-better-ROI next tier" pair: best = largest net weekly income gain among
+  // pairs that become affordable once the worse tier is sold. Buy candidates are
+  // reused from plan.dynamicNextTiers (already skip/cap-filtered and ROI-ranked).
+  // Returns one swap object or null. NOTE: the sell side here is a deliberate,
+  // user-initiated benefit-share sale — the Quick Trade pill bypasses Benefit Lock
+  // for it (and labels it explicitly), so it must never fire without an explicit click.
+  function computeUpgradeSwap(ownedMap, raw, totalCapital, plan) {
+    if (!plan || !plan.dynamicNextTiers || plan.dynamicNextTiers.length === 0) return null;
+    ownedMap = ownedMap || {};
+
+    // Sell candidates: the marginal TOP benefit tier of each owned benefit stock.
+    // Only the top increment is realistically sellable in one go (Torn shares are
+    // fungible — dropping a lower tier means selling everything above it too) and it
+    // is also the lowest-ROI tier, so it's the correct thing to give up. effTopTier
+    // honours the planner tier cap: shares above the cap are already swing, so the
+    // marginal *benefit* tier is the capped tier.
+    var sellCands = [];
+    Object.keys(ownedMap).forEach(function(sym) {
+      var o = ownedMap[sym];
+      if (!o || !o.has_dividend || o.benefit_shares <= 0) return;
+      if (roiSymSkipped(sym)) return; // released to swing — not a benefit block
+      var inc = o.dividend_increment || 0;
+      var cap = roiSymTierCap(sym);
+      var effTopTier = Math.min(inc, cap === Infinity ? inc : cap);
+      if (effTopTier < 1) return;
+      var req = BENEFIT_REQ[sym] || 0;
+      if (req <= 0) return;
+      var liveEntry = raw ? raw.find(function(x) { return x.stock === sym; }) : null;
+      var livePrice = liveEntry ? (parseFloat(liveEntry.price) || 0) : 0;
+      if (livePrice <= 0) return;
+      var marginalShares = (PASSIVE_STOCKS.indexOf(sym) >= 0)
+        ? req
+        : Math.pow(2, effTopTier - 1) * req;
+      var saleValue = marginalShares * livePrice * 0.999; // net of Torn's 0.1% sell fee
+      if (saleValue <= 0) return;
+      var entry = ROI_MAP[sym + "|T" + effTopTier];
+      if (!entry) return;
+      var iv = getItemValue(entry);
+      var perCycle = (entry.item && iv > 0) ? iv : entry.payout;
+      var weekly = perCycle ? perCycle / (entry.freq || 7) * 7 : 0;
+      var liveTierCost = marginalShares * livePrice;
+      // payout-based ROI to match the buy-side roi from computeBridgePlan (comparable)
+      var sellRoi = (liveTierCost > 0 && entry.payout) ? (entry.payout / liveTierCost * (365 / (entry.freq || 7)) * 100) : 0;
+      sellCands.push({ sym: sym, tier: "T" + effTopTier, roi: sellRoi, shares: marginalShares, saleValue: saleValue, weekly: weekly });
+    });
+    if (sellCands.length === 0) return null;
+
+    var best = null;
+    plan.dynamicNextTiers.forEach(function(b) {
+      if (!b.payoutEntry || b.cost <= 0 || !b.tierInfo) return;
+      var biv = getItemValue(b.payoutEntry);
+      var bPerCycle = (b.payoutEntry.item && biv > 0) ? biv : b.payoutEntry.payout;
+      var buyWeekly = bPerCycle ? bPerCycle / (b.payoutEntry.freq || 7) * 7 : 0;
+      if (buyWeekly <= 0) return;
+      sellCands.forEach(function(s) {
+        if (s.sym === b.sym) return;                       // not a self-swap
+        if (b.roi <= s.roi) return;                        // must be a strictly better ROI block
+        if (totalCapital + s.saleValue < b.cost) return;   // affordable only after selling the worse tier
+        var netWeekly = buyWeekly - s.weekly;
+        if (netWeekly <= 0) return;                        // must raise weekly income
+        if (!best || netWeekly > best.netWeekly) {
+          best = {
+            sell: { sym: s.sym, tier: s.tier, roi: s.roi, shares: s.shares, saleValue: s.saleValue, weekly: s.weekly },
+            buy: { sym: b.sym, tier: "T" + b.tierInfo.nextIncrement, roi: b.roi, cost: b.cost, shares: b.tierInfo.sharesNeeded, tierInfo: b.tierInfo },
+            netWeekly: netWeekly,
+            leftoverCash: totalCapital + s.saleValue - b.cost
+          };
+        }
+      });
+    });
+    return best;
+  }
+
   function renderROIPlanner(ownedMap, raw, cashBalance, armoryFunds) {
     // From-zero support: planner works with no owned benefit blocks — capital
     // comes from cash + armory, income starts at 0 and bootstraps via buys.
@@ -1124,6 +1204,21 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var daysIfSold = daysToAfford(target.cost - cumulativeSale, totalCapital, weeklyIncome - cumulativeLostIncome);
           html += nmRow("Sell " + sc.sym + " " + sc.tier + " · " + sc.roi.toFixed(1) + "%", fmRoi(sc.saleValue) + " → ~" + daysIfSold + "d", c.muted);
         });
+      }
+
+      // ⤴ Upgrade — the single best swap of a worse-ROI owned tier for a better-ROI
+      // one (largest net weekly income gain, affordable after the sale). Shares the
+      // computeUpgradeSwap call with the Quick Trade pill so the two always agree.
+      var upSwap = computeUpgradeSwap(ownedMap, raw, totalCapital, plan);
+      if (upSwap) {
+        html += '<div style="border-top:1px solid ' + c.divider + ';margin:6px 0"></div>';
+        html += '<div style="font-size:9px;color:#9333ea;letter-spacing:0.08em;' + s + ';margin-bottom:5px">⤴ Upgrade · swap to better ROI</div>';
+        html += nmRow(
+          "Sell " + upSwap.sell.sym + " " + upSwap.sell.tier + " (" + upSwap.sell.roi.toFixed(1) + "%) → " + upSwap.buy.sym + " " + upSwap.buy.tier + " (" + upSwap.buy.roi.toFixed(1) + "%)",
+          "+" + fmRoi(upSwap.netWeekly) + "/7d",
+          c.green
+        );
+        html += nmRow("Net cash after swap", fmRoi(upSwap.leftoverCash), c.muted);
       }
 
       // Alt: Wait
@@ -4147,6 +4242,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       : { border: "#fb923c", bg: "#fff7ed", text: "#c2410c", badge: "#f97316" };
   }
 
+  // Purple palette for the Upgrade swap pill — visually distinct from buy-green,
+  // sell-red, bank-blue and bridge-teal/amber so the swap action stands apart.
+  function qtPillPaletteUpgrade(isDark) {
+    return isDark
+      ? { border: "rgba(88,28,135,0.75)", bg: "rgba(59,7,100,0.75)", text: "#d8b4fe", badge: "#9333ea" }
+      : { border: "#c084fc", bg: "#f3e8ff", text: "#7e22ce", badge: "#a855f7" };
+  }
+
   function makeQtPill(sym, positive, labelText, isDark, onClick, subText, palOverride) {
     var pal = palOverride || qtPillPalette(positive, isDark);
     var btn = document.createElement("button");
@@ -4197,6 +4300,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // planner-close path re-renders from cache without a loadData refresh.
     // Capital: API money_onhand + swing value + faction armory (planner parity).
     var bpPlan = null;
+    var bpCapital = 0; // total planner capital (cash + swing + armory) — reused by the Upgrade pill
     if (lastOwnedMap && lastRaw) {
       var bpSwingCap = 0;
       Object.keys(lastOwnedMap).forEach(function(s) {
@@ -4206,8 +4310,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         // Net of Torn's 0.1% sell fee — deployable cash if liquidated (planner parity).
         if (le) bpSwingCap += (parseFloat(le.price) || 0) * o.swing_shares * 0.999;
       });
+      bpCapital = lastCashBalance + bpSwingCap + lastArmoryFunds;
       bpPlan = computeBridgePlan(lastOwnedMap, lastRaw,
-        lastCashBalance + bpSwingCap + lastArmoryFunds,
+        bpCapital,
         calcWeeklyIncome(lastOwnedMap, lastRaw, null));
       // Keep the bank pill and rec widget on the same (skip-filtered) target.
       lastBestRec = bpPlan.target;
@@ -4290,6 +4395,83 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
       bankWrap.appendChild(bankRow);
       container.appendChild(bankWrap);
+    }
+
+    // ⤴ Upgrade swap — sell a worse-ROI benefit tier, then buy a strictly-better one.
+    // Two-step single-click: step 1 sells (this click), step 2 buys (next click), so
+    // each click is still exactly one POST. The recommendation mirrors the ROI
+    // Planner's "⤴ Upgrade" line (same computeUpgradeSwap call).
+    var upSwap = (bpPlan && lastOwnedMap && lastRaw)
+      ? computeUpgradeSwap(lastOwnedMap, lastRaw, bpCapital, bpPlan) : null;
+    if (qtPendingUpgrade || upSwap) {
+      var upWrap = document.createElement("div");
+      upWrap.style.marginBottom = (hasBuy || hasSwing) ? "10px" : "0";
+      var upLbl = document.createElement("span");
+      upLbl.className = "qt-pill-group-label";
+      upLbl.style.color = labelColor;
+      upLbl.textContent = qtPendingUpgrade ? "⤴ Upgrade · step 2 of 2" : "⤴ Upgrade · swap to better ROI";
+      upWrap.appendChild(upLbl);
+      var upRow = document.createElement("div");
+      upRow.className = "qt-pill-row";
+
+      if (qtPendingUpgrade) {
+        // Step 2: buy the better tier with the EXACT share count that unlocks it
+        // (a partial buy would waste shares without unlocking the block).
+        var pend = qtPendingUpgrade;
+        upRow.appendChild(makeQtPill(pend.sym, true, "⤴ Step 2 · Buy " + pend.tier, isDark, function() {
+          qtBuildMaps();
+          var price = qtGetPrice(pend.sym) || pend.livePrice || 0;
+          if (price <= 0) { showToast("Could not read price for " + pend.sym, "error"); return; }
+          var liveCash = qtGetMoneyFast();
+          if (liveCash <= 0) { showToast("No money found", "warn"); return; }
+          var needCost = pend.shares * price;
+          if (needCost > liveCash) {
+            showToast("Need $" + Math.ceil(needCost - liveCash).toLocaleString("en-US") + " more for " + pend.sym + " " + pend.tier, "warn");
+            return;
+          }
+          qtUiTrade(pend.sym, pend.shares, "buyShares",
+            "Upgraded → bought " + pend.shares.toLocaleString("en-US") + " " + pend.sym + " (" + pend.tier + ")")
+            .then(function(fired) { if (fired) { qtPendingUpgrade = null; renderQtPills(); } });
+        }, fmRoi(pend.cost), qtPillPaletteUpgrade(isDark)));
+
+        // ✕ cancel pill — abandons the pending buy (you keep the cash from the sale).
+        var cancel = makeQtPill(pend.sym, true, "✕", isDark, function() {
+          qtPendingUpgrade = null; renderQtPills();
+        }, null, qtPillPaletteUpgrade(isDark));
+        cancel.classList.add("qt-pill-mini");
+        var cImg = cancel.querySelector("img"); if (cImg) cImg.style.display = "none";
+        var cBadge = cancel.querySelector(".qt-pill-badge"); if (cBadge) cBadge.style.display = "none";
+        cancel.title = "Cancel the pending upgrade buy (keeps the cash from the sale)";
+        upRow.appendChild(cancel);
+      } else {
+        // Step 1: sell the worse benefit tier. This DELIBERATELY bypasses Benefit
+        // Lock — it is the benefit-share sale the user explicitly asked for via the
+        // Upgrade pill. The label names the tier being sold so it's never hidden.
+        var sw = upSwap;
+        upRow.appendChild(makeQtPill(sw.sell.sym, false,
+          "⤴ Sell " + sw.sell.tier + " → " + sw.buy.sym + " " + sw.buy.tier, isDark, function() {
+          qtBuildMaps();
+          var owned = qtGetOwnedShares(sw.sell.sym);
+          if (owned <= 0) { showToast("You have no shares of " + sw.sell.sym, "warn"); return; }
+          var shares = sw.sell.shares;
+          if (shares > owned) shares = owned;
+          qtUiTrade(sw.sell.sym, shares, "sellShares",
+            "Upgrade step 1: sold " + shares.toLocaleString("en-US") + " " + sw.sell.sym + " (" + sw.sell.tier + ")",
+            { blockMaxShares: shares })
+            .then(function(fired) {
+              if (fired) {
+                qtPendingUpgrade = {
+                  sym: sw.buy.sym, tier: sw.buy.tier, shares: sw.buy.shares,
+                  livePrice: sw.buy.tierInfo.livePrice, cost: sw.buy.cost
+                };
+                renderQtPills();
+              }
+            });
+        }, "+" + fmRoi(sw.netWeekly) + "/7d", qtPillPaletteUpgrade(isDark)));
+      }
+
+      upWrap.appendChild(upRow);
+      container.appendChild(upWrap);
     }
 
     if (hasBuy) {
