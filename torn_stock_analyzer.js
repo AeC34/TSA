@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.35.0
+// @version      2.35.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -951,7 +951,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // Returns one swap object or null. NOTE: the sell side here is a deliberate,
   // user-initiated benefit-share sale — the Quick Trade pill bypasses Benefit Lock
   // for it (and labels it explicitly), so it must never fire without an explicit click.
-  function computeUpgradeSwap(ownedMap, raw, totalCapital, plan) {
+  // `liquidCash` must be ON-HAND cash only (NOT swing/armory paper value): the two-step
+  // pill funds the buy from on-hand cash + the worse tier's sale proceeds, so swing
+  // positions and faction armory are not deployable in one click. Using total planner
+  // capital here would surface swaps the buy step then can't actually afford.
+  function computeUpgradeSwap(ownedMap, raw, liquidCash, plan) {
     if (!plan || !plan.dynamicNextTiers || plan.dynamicNextTiers.length === 0) return null;
     ownedMap = ownedMap || {};
 
@@ -1002,7 +1006,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       sellCands.forEach(function(s) {
         if (s.sym === b.sym) return;                       // not a self-swap
         if (b.roi <= s.roi) return;                        // must be a strictly better ROI block
-        if (totalCapital + s.saleValue < b.cost) return;   // affordable only after selling the worse tier
+        if (liquidCash + s.saleValue < b.cost) return;     // on-hand cash + sale proceeds must cover the buy
         var netWeekly = buyWeekly - s.weekly;
         if (netWeekly <= 0) return;                        // must raise weekly income
         if (!best || netWeekly > best.netWeekly) {
@@ -1010,7 +1014,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             sell: { sym: s.sym, tier: s.tier, roi: s.roi, shares: s.shares, saleValue: s.saleValue, weekly: s.weekly },
             buy: { sym: b.sym, tier: "T" + b.tierInfo.nextIncrement, roi: b.roi, cost: b.cost, shares: b.tierInfo.sharesNeeded, tierInfo: b.tierInfo },
             netWeekly: netWeekly,
-            leftoverCash: totalCapital + s.saleValue - b.cost
+            leftoverCash: liquidCash + s.saleValue - b.cost
           };
         }
       });
@@ -1209,7 +1213,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // ⤴ Upgrade — the single best swap of a worse-ROI owned tier for a better-ROI
       // one (largest net weekly income gain, affordable after the sale). Shares the
       // computeUpgradeSwap call with the Quick Trade pill so the two always agree.
-      var upSwap = computeUpgradeSwap(ownedMap, raw, totalCapital, plan);
+      // On-hand cash only (not totalCapital) — the swap is executed via the Quick
+      // Trade pill from cash + sale proceeds, so swing/armory aren't deployable here.
+      var upSwap = computeUpgradeSwap(ownedMap, raw, cashBalance, plan);
       if (upSwap) {
         html += '<div style="border-top:1px solid ' + c.divider + ';margin:6px 0"></div>';
         html += '<div style="font-size:9px;color:#9333ea;letter-spacing:0.08em;' + s + ';margin-bottom:5px">⤴ Upgrade · swap to better ROI</div>';
@@ -4300,7 +4306,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // planner-close path re-renders from cache without a loadData refresh.
     // Capital: API money_onhand + swing value + faction armory (planner parity).
     var bpPlan = null;
-    var bpCapital = 0; // total planner capital (cash + swing + armory) — reused by the Upgrade pill
     if (lastOwnedMap && lastRaw) {
       var bpSwingCap = 0;
       Object.keys(lastOwnedMap).forEach(function(s) {
@@ -4310,9 +4315,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         // Net of Torn's 0.1% sell fee — deployable cash if liquidated (planner parity).
         if (le) bpSwingCap += (parseFloat(le.price) || 0) * o.swing_shares * 0.999;
       });
-      bpCapital = lastCashBalance + bpSwingCap + lastArmoryFunds;
       bpPlan = computeBridgePlan(lastOwnedMap, lastRaw,
-        bpCapital,
+        lastCashBalance + bpSwingCap + lastArmoryFunds,
         calcWeeklyIncome(lastOwnedMap, lastRaw, null));
       // Keep the bank pill and rec widget on the same (skip-filtered) target.
       lastBestRec = bpPlan.target;
@@ -4401,8 +4405,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // Two-step single-click: step 1 sells (this click), step 2 buys (next click), so
     // each click is still exactly one POST. The recommendation mirrors the ROI
     // Planner's "⤴ Upgrade" line (same computeUpgradeSwap call).
+    // On-hand cash only — the buy step funds from cash + sale proceeds, not the
+    // swing/armory paper value baked into bpCapital (see computeUpgradeSwap).
     var upSwap = (bpPlan && lastOwnedMap && lastRaw)
-      ? computeUpgradeSwap(lastOwnedMap, lastRaw, bpCapital, bpPlan) : null;
+      ? computeUpgradeSwap(lastOwnedMap, lastRaw, lastCashBalance, bpPlan) : null;
     if (qtPendingUpgrade || upSwap) {
       var upWrap = document.createElement("div");
       upWrap.style.marginBottom = (hasBuy || hasSwing) ? "10px" : "0";
