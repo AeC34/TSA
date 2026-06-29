@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.32.0
+// @version      2.33.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3037,6 +3037,52 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     else loadData();
   }
 
+  // Instant holdings view, painted the moment the (fast) Torn user call lands,
+  // before the slower tornsy price batches arrive. Shows ONLY price-independent
+  // data (shares + cost basis) from buildOwnedMap; renderFromData overwrites it
+  // with the full panel once live prices are in. The caller guards against the
+  // ROI planner being open.
+  function renderHoldingsSkeleton(ownedMap) {
+    var content = document.getElementById("tsa-content");
+    if (!content) return;
+    var isDark = document.getElementById("tsa-overlay").classList.contains("tsa-dark");
+    var d = isDark
+      ? { bg:"#0f0f1a", bg2:"#1a1a2e", border:"#2a2a4a", text:"#c8c8d8", muted:"#7a7a9a", blue:"#7a9fd4" }
+      : { bg:"#ffffff", bg2:"#f7f9fc", border:"#eee", text:"#222", muted:"#888", blue:"#4a6fa5" };
+    var syms = Object.keys(ownedMap).sort(function(a, b) {
+      var ia = (ownedMap[a].shares || 0) * (ownedMap[a].avg_price || 0);
+      var ib = (ownedMap[b].shares || 0) * (ownedMap[b].avg_price || 0);
+      return ib - ia;
+    });
+    var rows = syms.map(function(sym) {
+      var o = ownedMap[sym];
+      var shares = o.shares || 0;
+      var avg = o.avg_price || 0;
+      var invested = shares * avg;
+      var sub = shares.toLocaleString("en-US") + " sh" +
+        (avg > 0 ? " @ $" + Math.round(avg).toLocaleString("en-US") : "");
+      var investedStr = invested > 0 ? "$" + Math.round(invested).toLocaleString("en-US") : "—";
+      return "<div style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;margin-bottom:5px;background:" + d.bg2 + ";border:1px solid " + d.border + "\">" +
+        "<div style=\"display:flex;flex-direction:column;gap:2px\">" +
+          "<span style=\"font-size:13px;font-weight:bold;color:" + d.blue + "\">" + escHtml(sym) + "</span>" +
+          "<span style=\"font-size:10px;color:" + d.muted + "\">" + sub + "</span>" +
+        "</div>" +
+        "<span style=\"font-size:12px;font-weight:bold;color:" + d.text + "\">" + investedStr + "</span>" +
+      "</div>";
+    }).join("");
+    if (!rows) rows = "<div style=\"padding:20px;text-align:center;color:" + d.muted + ";font-size:11px\">No holdings yet</div>";
+    content.style.background = d.bg;
+    content.innerHTML =
+      "<div style=\"padding:10px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid " + d.border + ";background:" + d.bg + "\">" +
+        "<span class=\"tsa-spinner\" style=\"color:" + d.blue + "\"></span>" +
+        "<span style=\"font-size:11px;color:" + d.muted + "\">Loading live prices…</span>" +
+      "</div>" +
+      "<div style=\"padding:10px 14px\">" +
+        "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Your holdings</div>" +
+        rows +
+      "</div>";
+  }
+
   function loadData() {
     cleanOldIntents();
     var content = document.getElementById("tsa-content");
@@ -3060,18 +3106,33 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return fetchJSON(url).catch(function() { return null; });
     };
 
+    // money,basic piggyback on the stocks call: money_onhand + player_id feed
+    // the bridge-pill capital (same numbers the ROI Planner fetches on open).
+    var userPromise = fetchJSON("https://api.torn.com/user/?selections=stocks,money,basic&key=" + getTornKey());
+    // Faction armory balance — counted as capital by the planner's bridgebuilder.
+    // Non-faction users get an API error body → armory stays 0.
+    var factionPromise = fetchJSON("https://api.torn.com/faction/?selections=donations&key=" + getTornKey()).catch(function() { return null; });
+    var t1p = tornsyFetch("https://tornsy.com/api/stocks?interval=m30,h1,h2,h3,h4");
+    var t2p = tornsyFetch("https://tornsy.com/api/stocks?interval=h6,h8,h10,h12,h16");
+    var t3p = tornsyFetch("https://tornsy.com/api/stocks?interval=h20,d1,d2,d3,d4");
+    var t4p = tornsyFetch("https://tornsy.com/api/stocks?interval=d5,d6,d7,w1,h5");
+
+    // Instant holdings: the Torn user call is fast, the tornsy price batches are
+    // the slow part. Paint a price-independent holdings list the moment the user
+    // call lands, instead of blocking the whole panel on tornsy. The full render
+    // below overwrites this once prices are in.
+    var fullRendered = false;
+    userPromise.then(function(tornData) {
+      if (fullRendered) return;              // prices already landed — skip the flash
+      if (roiPlannerActive) return;          // don't clobber an open ROI planner
+      if (!tornData || tornData.error) return; // real error surfaced by Promise.all below
+      renderHoldingsSkeleton(buildOwnedMap(tornData));
+    }).catch(function() {});                 // Promise.all owns the error UI
+
     Promise.all([
-      // money,basic piggyback on the stocks call: money_onhand + player_id feed
-      // the bridge-pill capital (same numbers the ROI Planner fetches on open).
-      fetchJSON("https://api.torn.com/user/?selections=stocks,money,basic&key=" + getTornKey()),
-      tornsyFetch("https://tornsy.com/api/stocks?interval=m30,h1,h2,h3,h4"),
-      tornsyFetch("https://tornsy.com/api/stocks?interval=h6,h8,h10,h12,h16"),
-      tornsyFetch("https://tornsy.com/api/stocks?interval=h20,d1,d2,d3,d4"),
-      tornsyFetch("https://tornsy.com/api/stocks?interval=d5,d6,d7,w1,h5"),
-      // Faction armory balance — counted as capital by the planner's bridgebuilder.
-      // Non-faction users get an API error body → armory stays 0.
-      fetchJSON("https://api.torn.com/faction/?selections=donations&key=" + getTornKey()).catch(function() { return null; })
+      userPromise, t1p, t2p, t3p, t4p, factionPromise
     ]).then(function(results) {
+      fullRendered = true;
       var tornData = results[0];
       var t1 = results[1];
       var t2 = results[2];
