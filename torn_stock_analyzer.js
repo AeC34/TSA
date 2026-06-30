@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.36.1
+// @version      2.36.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -858,6 +858,23 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // Target = best ROI entry regardless of affordability
     var target = dynamicNextTiers[0] || null;
 
+    // Capital actually deployable toward the target. A stock's own swing value
+    // can't fund building THAT stock's benefit block — selling those shares
+    // shrinks the very block being completed — so the target's own swing is
+    // excluded from every affordability/days calculation below (and from the
+    // renderer's verdict, which reads plan.fundCapital). Mirrors the swing
+    // valuation in renderROIPlanner (livePrice × swing_shares net of 0.1% fee).
+    var ownTargetSwing = 0;
+    if (target) {
+      var tgtOwned = ownedMap[target.sym];
+      var tgtLive = raw ? raw.find(function(x) { return x.stock === target.sym; }) : null;
+      var tgtPrice = tgtLive ? (parseFloat(tgtLive.price) || 0) : 0;
+      if (tgtOwned && tgtOwned.swing_shares > 0 && tgtPrice > 0) {
+        ownTargetSwing = tgtPrice * tgtOwned.swing_shares * 0.999;
+      }
+    }
+    var fundCapital = Math.max(0, totalCapital - ownTargetSwing);
+
     // Bridgebuilder chain (sell-later model): a bridge is a benefit tier you buy
     // (or drip into via the pills), hold to collect dividends, then SELL again to
     // help fund the Next Move target. The capital is recovered on sale, so it does
@@ -868,7 +885,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // capital starts earning), and the top-ROI tier we're closest to affording (the
     // one to drip into). Both must save days vs. just waiting, or it isn't a bridge.
     var bridgeChain = [];
-    var daysBaseline = target ? daysToAfford(target.cost, totalCapital, weeklyIncome) : 0;
+    var daysBaseline = target ? daysToAfford(target.cost, fundCapital, weeklyIncome) : 0;
     var daysWithBridges = daysBaseline;
 
     if (target) {
@@ -891,14 +908,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // later to fund it: only the fee is lost, the rest of the cost is recovered.
       function bridgeDays(cost, weekly) {
         var fee = cost * SELL_FEE;
-        if (cost <= totalCapital) {
+        if (cost <= fundCapital) {
           // Affordable now — buy immediately, dividend income boosted from day 0.
-          return { daysUntil: 0, days: daysToAfford(target.cost, totalCapital - fee, weeklyIncome + weekly) };
+          return { daysUntil: 0, days: daysToAfford(target.cost, fundCapital - fee, weeklyIncome + weekly) };
         }
         // Not yet — save up at current income, then buy, then collect boosted income.
-        var daysUntil = daysToAfford(cost, totalCapital, weeklyIncome);
+        var daysUntil = daysToAfford(cost, fundCapital, weeklyIncome);
         if (daysUntil === Infinity || daysUntil > 365) return null;
-        var capAtBuy = totalCapital + (weeklyIncome / 7 * daysUntil) - fee;
+        var capAtBuy = fundCapital + (weeklyIncome / 7 * daysUntil) - fee;
         return { daysUntil: daysUntil, days: daysUntil + daysToAfford(target.cost, capAtBuy, weeklyIncome + weekly) };
       }
 
@@ -930,13 +947,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // Goal with the affordable-now bridge applied (capital recovered minus fee,
       // income boosted). Mirrors bridgeDays' "now" branch.
       if (nowBridge) {
-        daysWithBridges = daysToAfford(target.cost, totalCapital - nowBridge.cost * SELL_FEE, weeklyIncome + nowBridge.extraIncome);
+        daysWithBridges = daysToAfford(target.cost, fundCapital - nowBridge.cost * SELL_FEE, weeklyIncome + nowBridge.extraIncome);
       }
     }
 
     return {
       dynamicNextTiers: dynamicNextTiers,
       target: target,
+      fundCapital: fundCapital,
       bridgeChain: bridgeChain,
       daysBaseline: daysBaseline,
       daysWithBridges: daysWithBridges
@@ -1075,6 +1093,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var target = plan.target;
     var nextEntries = target ? [target] : [];
     var bridgeChain = plan.bridgeChain;
+    var fundCapital = plan.fundCapital; // deployable toward target (excl. its own swing)
     var daysWait = plan.daysBaseline;
     var daysBaseline = plan.daysBaseline;
     var daysWithBridges = plan.daysWithBridges;
@@ -1167,22 +1186,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       html += '<div style="padding:10px 14px;border-bottom:2px solid ' + c.divider + ';background:' + c.bg3 + '">';
       html += '<div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:' + c.blue + ';' + s + ';font-weight:700;margin-bottom:8px">💡 Next move</div>';
 
-      // Target
-      // A stock's own swing value can't fund building THAT stock's benefit block:
-      // selling those shares shrinks the very block being completed. Exclude the
-      // target's own swing from the affordability verdict so it reflects capital
-      // actually deployable to the buy, not the position you'd have to liquidate.
-      var ownTargetSwing = 0;
-      for (var di = 0; di < swingDetails.length; di++) {
-        if (swingDetails[di].sym === target.sym) { ownTargetSwing = swingDetails[di].val; break; }
-      }
-      var deployable = Math.max(0, totalCapital - ownTargetSwing);
-      var shortBy = Math.max(0, target.cost - deployable);
+      // Target — affordability is judged against plan.fundCapital (totalCapital
+      // minus the target stock's own swing value), since selling the target stock
+      // to fund its own benefit block shrinks the very block being completed.
+      var shortBy = Math.max(0, target.cost - fundCapital);
       var targetTier = target.tier || ("T" + target.tierInfo.nextIncrement);
       html += nmRow("Target", target.sym + " " + targetTier + " · " + (target.roi || 0).toFixed(2) + "% ROI", c.blue);
       html += nmRow("Payback", target.roi > 0 ? Math.round(36500 / target.roi).toLocaleString("en-US") + " days" : "—");
       html += nmRow("Cost", fmRoi(target.cost) + (shortBy > 0 ? " · short " + fmRoi(shortBy) : " ✓"), shortBy > 0 ? c.red : c.green);
-      html += nmRow("Available", fmRoi(deployable), c.text);
+      html += nmRow("Available", fmRoi(fundCapital), c.text);
 
       // Bridgebuilder chain — buy (or drip into) a tier, collect dividends, then
       // sell it again to help fund the target. Each row saves days vs. just waiting.
@@ -1224,7 +1236,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         sellCandidates.slice(0, 4).forEach(function(sc) {
           cumulativeSale += sc.saleValue;
           cumulativeLostIncome += sc.weekly;
-          var daysIfSold = daysToAfford(target.cost - cumulativeSale, totalCapital, weeklyIncome - cumulativeLostIncome);
+          var daysIfSold = daysToAfford(target.cost - cumulativeSale, fundCapital, weeklyIncome - cumulativeLostIncome);
           html += nmRow("Sell " + sc.sym + " " + sc.tier + " · " + sc.roi.toFixed(1) + "%", fmRoi(sc.saleValue) + " → ~" + daysIfSold + "d", c.muted);
         });
       }
