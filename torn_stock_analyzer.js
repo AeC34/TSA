@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.36.0
+// @version      2.36.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1168,12 +1168,21 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       html += '<div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:' + c.blue + ';' + s + ';font-weight:700;margin-bottom:8px">💡 Next move</div>';
 
       // Target
-      var shortBy = Math.max(0, target.cost - totalCapital);
+      // A stock's own swing value can't fund building THAT stock's benefit block:
+      // selling those shares shrinks the very block being completed. Exclude the
+      // target's own swing from the affordability verdict so it reflects capital
+      // actually deployable to the buy, not the position you'd have to liquidate.
+      var ownTargetSwing = 0;
+      for (var di = 0; di < swingDetails.length; di++) {
+        if (swingDetails[di].sym === target.sym) { ownTargetSwing = swingDetails[di].val; break; }
+      }
+      var deployable = Math.max(0, totalCapital - ownTargetSwing);
+      var shortBy = Math.max(0, target.cost - deployable);
       var targetTier = target.tier || ("T" + target.tierInfo.nextIncrement);
       html += nmRow("Target", target.sym + " " + targetTier + " · " + (target.roi || 0).toFixed(2) + "% ROI", c.blue);
       html += nmRow("Payback", target.roi > 0 ? Math.round(36500 / target.roi).toLocaleString("en-US") + " days" : "—");
       html += nmRow("Cost", fmRoi(target.cost) + (shortBy > 0 ? " · short " + fmRoi(shortBy) : " ✓"), shortBy > 0 ? c.red : c.green);
-      html += nmRow("Available", fmRoi(totalCapital), c.text);
+      html += nmRow("Available", fmRoi(deployable), c.text);
 
       // Bridgebuilder chain — buy (or drip into) a tier, collect dividends, then
       // sell it again to help fund the target. Each row saves days vs. just waiting.
