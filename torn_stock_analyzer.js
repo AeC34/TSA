@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.36.4
+// @version      2.36.5
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3744,8 +3744,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return parseFloat($(qt_stocks[id]).text().replace(/,/g, "")) || 0;
   }
 
-  function qtGetOwnedShares(id, bypassCache) {
-    if (!bypassCache && qt_localShareCache[id] !== undefined) return qt_localShareCache[id];
+  function qtReadOwnedFromDom(id) {
     var row = qt_stockRows[id];
     if (!row) return 0;
     var mobileEl = row.find("p[class^='count']");
@@ -3755,9 +3754,25 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return 0;
   }
 
+  function qtGetOwnedShares(id, bypassCache) {
+    var domVal = qtReadOwnedFromDom(id);
+    if (!bypassCache && qt_localShareCache[id] !== undefined) {
+      // The cache holds the true post-trade count while Torn's DOM still shows the
+      // pre-trade value (a direct-POST trade doesn't re-render the share count). Trust
+      // it only while the DOM is unchanged from when we cached; once the DOM moves —
+      // our trade finally reflected, OR the user traded this stock via Torn's native
+      // UI — the cached value is stale, so drop it and trust the DOM again. Without
+      // this the cache would never yield back to reality within a page session.
+      if (qt_localShareCache[id].domAtWrite === domVal) return qt_localShareCache[id].val;
+      delete qt_localShareCache[id];
+    }
+    return domVal;
+  }
+
   function qtUpdateLocalCache(sym, amt) {
-    var current = qtGetOwnedShares(sym);
-    qt_localShareCache[sym] = Math.max(0, current + amt);
+    var domNow = qtReadOwnedFromDom(sym);
+    var base = (qt_localShareCache[sym] !== undefined) ? qt_localShareCache[sym].val : domNow;
+    qt_localShareCache[sym] = { val: Math.max(0, base + amt), domAtWrite: domNow };
   }
 
   function qtGetMoneyFast() {
