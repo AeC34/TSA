@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.36.3
+// @version      2.36.4
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -837,12 +837,21 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // Find payout data from ROI_MAP for this next increment
       var payoutEntry = ROI_MAP[sym + "|T" + tierInfo.nextIncrement] || null;
       // If no ROI_MAP entry — passive stock, skip (no sellable payout)
+      // ROI uses LIVE item value for item-paying stocks (falls back to the baked-in
+      // baseline until the item price loads), matching computeRoadmap and the bridge
+      // candidate income below — otherwise the target picker ranks item stocks on a
+      // stale baseline and disagrees with the roadmap the user sees alongside it.
+      var npCycle = 0;
+      if (payoutEntry) {
+        var npIv = getItemValue(payoutEntry);
+        npCycle = (payoutEntry.item && npIv > 0) ? npIv : payoutEntry.payout;
+      }
       dynamicNextTiers.push({
         sym: sym,
         tierInfo: tierInfo,
         payoutEntry: payoutEntry,
         cost: tierInfo.cost,
-        roi: payoutEntry ? (payoutEntry.payout / tierInfo.cost * (365 / payoutEntry.freq) * 100) : 0
+        roi: payoutEntry ? (npCycle / tierInfo.cost * (365 / payoutEntry.freq) * 100) : 0
       });
     });
 
