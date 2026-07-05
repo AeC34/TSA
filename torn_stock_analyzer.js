@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.36.2
+// @version      2.36.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -4331,13 +4331,20 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   //   nextSell          = the next unit to sell, re-priced and clamped to live owned shares
   // Conservative on purpose: proceeds are clamped to live owned shares (decremented per
   // stock across the plan), so a multi-tier sell of one stock never over-counts.
-  function qtUpgradeLiveCheck(remainingSells, buy) {
+  function qtUpgradeLiveCheck(remainingSells, buy, expectedCash) {
     if (!buy || !remainingSells) return null;
     qtBuildMaps();
     var buyPrice = qtGetPrice(buy.sym);
     if (buyPrice <= 0) return null;
     var liveBuyCost = buy.shares * buyPrice;
-    var cashNow = qtGetMoneyFast();
+    // Cash floor = larger of live DOM money and the cash we KNOW we have this
+    // upgrade (starting on-hand cash + proceeds of every completed sell). A
+    // direct-POST sale may not have refreshed
+    // Torn's #user-money yet, so on the mid-upgrade re-check qtGetMoneyFast() can
+    // still read the pre-sale (~$0) balance; without the floor cashAfterAll would
+    // fall short of the buy and the pill falsely shows "paused — prices moved".
+    // Same DOM-lag guard the buy step uses (see the buy pill's availCash).
+    var cashNow = Math.max(qtGetMoneyFast(), expectedCash || 0);
     var cashAvail = cashNow > 0 ? cashNow : 0;
     var ownedRemaining = {}; // sym -> live owned, decremented as the plan consumes shares
     var liveProceeds = 0;
@@ -4492,7 +4499,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (qtPendingUpgrade) {
       // ── Mid-upgrade: sell the remaining planned tiers one click at a time, then buy. ──
       var pend = qtPendingUpgrade;
-      var lp = qtUpgradeLiveCheck(pend.sells, pend.buy);
+      var lp = qtUpgradeLiveCheck(pend.sells, pend.buy, pend.expectedCash);
       var doneSells = pend.total - pend.sells.length;
       var sellNext = pend.sells.length > 0 && lp && lp.nextSell && !lp.alreadyAffordable && lp.affordable;
       var canBuy = pend.sells.length === 0 || (lp && lp.alreadyAffordable);
@@ -4513,7 +4520,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           "⤴ Sell " + (doneSells + 1) + "/" + pend.total + " · " + ns.sym + " " + ns.tier, isDark, function() {
           // Re-price the WHOLE remaining plan live at click; never sell unless the
           // remaining sells + cash will cover the buy (or it's already affordable).
-          var lc = qtUpgradeLiveCheck(pend.sells, pend.buy);
+          var lc = qtUpgradeLiveCheck(pend.sells, pend.buy, pend.expectedCash);
           if (!lc || !lc.nextSell) { showToast("Could not read live prices — try again", "warn"); return; }
           if (lc.alreadyAffordable) { renderQtPills(); return; } // enough cash now — skip to buy
           if (!lc.affordable) {
