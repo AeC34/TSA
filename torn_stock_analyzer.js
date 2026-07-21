@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.36.5
+// @version      2.36.6
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3744,34 +3744,55 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return parseFloat($(qt_stocks[id]).text().replace(/,/g, "")) || 0;
   }
 
+  // Returns the DOM-reported owned count, or null when the count can't be read
+  // (row not registered yet, or neither the mobile nor the desktop markup is
+  // present — e.g. mid-render). null is deliberately distinct from a genuine 0:
+  // callers must not treat "unreadable" as "owns zero", otherwise a transient
+  // re-render would look like an authoritative change and wipe the local cache.
   function qtReadOwnedFromDom(id) {
     var row = qt_stockRows[id];
-    if (!row) return 0;
+    if (!row) return null;
     var mobileEl = row.find("p[class^='count']");
     if (mobileEl.length > 0) return parseFloat(mobileEl.text().replace(/,/g, "")) || 0;
     var cols = row.children("div");
     if (cols.length >= 5) return parseFloat($(cols[4]).text().replace(/,/g, "")) || 0;
-    return 0;
+    return null;
   }
 
   function qtGetOwnedShares(id, bypassCache) {
     var domVal = qtReadOwnedFromDom(id);
     if (!bypassCache && qt_localShareCache[id] !== undefined) {
       // The cache holds the true post-trade count while Torn's DOM still shows the
-      // pre-trade value (a direct-POST trade doesn't re-render the share count). Trust
-      // it only while the DOM is unchanged from when we cached; once the DOM moves —
-      // our trade finally reflected, OR the user traded this stock via Torn's native
-      // UI — the cached value is stale, so drop it and trust the DOM again. Without
-      // this the cache would never yield back to reality within a page session.
+      // pre-trade value (a direct-POST trade doesn't re-render the share count). If
+      // the DOM is momentarily unreadable (null, e.g. mid-render) keep trusting the
+      // cache — a transient blank must not be mistaken for a real change. Otherwise
+      // trust the cache only while the DOM is unchanged from when we cached; once the
+      // DOM actually moves — our trade finally reflected, OR the user traded this
+      // stock via Torn's native UI — the cached value is stale, so drop it and trust
+      // the DOM again. Without this the cache would never yield back within a session.
+      if (domVal === null) return qt_localShareCache[id].val;
       if (qt_localShareCache[id].domAtWrite === domVal) return qt_localShareCache[id].val;
       delete qt_localShareCache[id];
     }
-    return domVal;
+    return domVal === null ? 0 : domVal;
   }
 
   function qtUpdateLocalCache(sym, amt) {
     var domNow = qtReadOwnedFromDom(sym);
-    var base = (qt_localShareCache[sym] !== undefined) ? qt_localShareCache[sym].val : domNow;
+    var cached = qt_localShareCache[sym];
+    // Re-validate before building on the cache: reuse the cached count only when the
+    // DOM is unchanged from when it was written (still valid) or currently unreadable
+    // (can't tell — keep our known truth). If the DOM has actually moved since, the
+    // cached base is stale (a native-UI trade happened), so re-anchor to the DOM. With
+    // no cache and an unreadable DOM we have no basis, so fall back to 0 as before.
+    var base;
+    if (cached !== undefined && (domNow === null || cached.domAtWrite === domNow)) {
+      base = cached.val;
+    } else if (domNow !== null) {
+      base = domNow;
+    } else {
+      base = 0;
+    }
     qt_localShareCache[sym] = { val: Math.max(0, base + amt), domAtWrite: domNow };
   }
 
