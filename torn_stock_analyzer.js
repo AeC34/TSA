@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.36.6
+// @version      2.36.7
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1659,7 +1659,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             // if it's ever missing, the check is false and we parse as before.)
             if (r.status >= 400) {
               var errBody = null;
-              try { errBody = JSON.parse(r.responseText); } catch (e2) { /* not JSON */ }
+              try { errBody = JSON.parse(r.responseText); } catch (_) { /* not JSON */ }
               if (errBody && errBody.error) { resolve(errBody); return; }
               if (n > 1) { setTimeout(function() { attempt(n - 1); }, 2000); }
               else reject(new Error("HTTP " + r.status + " after 3 attempts: " + url));
@@ -3702,8 +3702,6 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return (Array.isArray(parsed) && parsed.length > 0) ? parsed : QT_DEFAULT_AMOUNTS.slice();
     } catch(e) { return QT_DEFAULT_AMOUNTS.slice(); }
   })();
-  var qtMode = "buy";
-  var qtSelAmt = null;
   var qtEditMode = false;
 
   var QT_STOCKS = ["ASS","BAG","CBD","CNC","ELT","EVL","EWM","FHG","GRN","HRG",
@@ -4401,7 +4399,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (ownedRemaining[u.sym] === undefined) ownedRemaining[u.sym] = qtGetOwnedShares(u.sym);
       var sh = Math.min(u.shares, ownedRemaining[u.sym]);
       if (i === 0) {
-        if (sh < 1) return null; // next sell has no shares to sell
+        // A tier is released by selling EXACTLY its marginal shares (2^(t-1)·req). Selling
+        // fewer still drops you under the tier threshold — you lose that tier's payout AND
+        // keep shares that no longer earn it, for less cash than the plan needs. So a first
+        // sell that has to be clamped means our snapshot disagrees with live holdings (a
+        // manual trade in between): refuse, let the pill pause, and re-plan on fresh data.
+        // Later units may still clamp — there the clamp only UNDER-counts proceeds, which is
+        // the safe direction.
+        // `sh < 1` is kept alongside: a degenerate unit with shares 0 would pass `sh < u.shares`
+        // (0 < 0 is false) and build a 0-share sell. Unreachable with today's plans, cheap to keep.
+        if (sh < 1 || sh < u.shares) return null;
         nextSell = { sym: u.sym, tier: u.tier, shares: sh, sellPrice: sp };
       }
       ownedRemaining[u.sym] -= sh;
