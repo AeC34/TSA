@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.36.7
+// @version      2.37.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1805,6 +1805,23 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return ownedMap;
   }
 
+  // Live prices read straight off the stocks page — the fallback when tornsy is
+  // unreachable. Same shape mergeIntervals produces, minus the `interval` history
+  // (only tornsy has that), so everything that needs a PRICE keeps working:
+  // holdings value, benefit blocks, swing P/L, the ROI planner and the whole
+  // Quick Trade bar. Only the signal scores drop out, and calcScore refuses to
+  // invent those from empty intervals.
+  // No network call: the page is already loaded and being viewed by the user.
+  function buildRawFromDom() {
+    qtBuildMaps();
+    var out = [];
+    QT_STOCKS.forEach(function(sym) {
+      var price = qtGetPrice(sym);
+      if (price > 0) out.push({ stock: sym, price: price, interval: {}, investors: null });
+    });
+    return out;
+  }
+
   function mergeIntervals(calls) {
     var merged = {};
     calls.forEach(function(call) {
@@ -1911,6 +1928,32 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // Pre-compute weekly peak (used by both the hard filter and indicator 1)
     var weekPrices = [p_d1,p_d2,p_d3,p_d4,p_d5,p_d7,p_w1].filter(function(x){ return x > 0; });
     var weekPeak = weekPrices.length > 0 ? Math.max.apply(null, weekPrices) : 0;
+
+    // ── NO INTERVAL HISTORY (tornsy unreachable; price came off the page) ──
+    // Every indicator below reads interval prices, and with them all defaulting to 0 the
+    // score would be noise wearing a signal's clothes. Return the owner-side view only:
+    // score -1 keeps it out of Top-5 (min score is never negative) and out of the 45-75
+    // watch band, while shares/avg_price/P-L still populate the holdings sections. Dropping
+    // the result entirely would have emptied those too — the panel would show a "trading
+    // still works" banner over nothing at all.
+    if (!r.interval || Object.keys(r.interval).length === 0) {
+      return {
+        symbol: s, score: -1, signal: "NO DATA", sellSignal: sellSignal, noHistory: true,
+        scoreBreakdown: { drop: 0, position: 0, reversal: 0 },
+        owned: !!owned, alreadyRallied: false, priceAboveWeek: false,
+        has_swing: (owned && owned.has_swing) || false,
+        has_benefit: (owned && owned.has_dividend) || false,
+        hasDividend: (owned && owned.has_dividend) || false,
+        dividendProgress: (owned && owned.dividend_progress) || 0,
+        dividendFrequency: (owned && owned.dividend_frequency) || 0,
+        p_live, reasons: "tornsy unavailable — no signal data",
+        netProfitPct: netProfitPct,
+        hoursHeld: hoursHeld,
+        shares: (owned && owned.shares) || 0,
+        avg_price: (owned && owned.avg_price) || 0,
+        transactions: (owned && owned.transactions) || []
+      };
+    }
 
     // ── HARD FILTER: must be below the weekly high ────────────────────
     // Live must be below the recent weekly peak — blocks scoring once the
@@ -2541,7 +2584,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var html = "<div style=\"display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:12px 14px;border-bottom:1px solid " + d.border + ";background:" + d.bg + "\">" +
         "<div style=\"background:" + d.bg2 + ";border-radius:8px;padding:8px;text-align:center;border:1px solid " + d.border + "\">" +
           "<div style=\"font-size:10px;color:" + d.muted + ";margin-bottom:4px\">Analyzed</div>" +
-          "<div style=\"font-size:16px;font-weight:bold;color:" + d.text + ";" + ms + "\">" + stockResults.length + "</div></div>" +
+          "<div style=\"font-size:16px;font-weight:bold;color:" + d.text + ";" + ms + "\">" + stockResults.filter(function(sr) { return sr.score >= 0; }).length + "</div></div>" +
         "<div style=\"background:" + d.bg2 + ";border-radius:8px;padding:8px;text-align:center;border:1px solid " + d.border + "\">" +
           "<div style=\"font-size:10px;color:" + d.muted + ";margin-bottom:4px\">You own</div>" +
           "<div style=\"font-size:16px;font-weight:bold;color:" + d.text + ";" + ms + "\">" + ownedSymbols.length + "</div></div>" +
@@ -3006,9 +3049,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
       // Partial-data banner: scores/signals below are computed from
       // incomplete interval data — say so instead of rendering as if full.
-      if (missingBatches > 0) {
+      if (missingBatches === 4) {
+        // Fully down: prices are the page's own, so there is no history to score with.
+        // Be explicit that trading is unaffected — the whole point of not blanking out.
+        html = "<div style=\"padding:8px 14px;font-size:11px;font-weight:700;color:" + (isDark2 ? "#ff8a80" : "#a12020") + ";background:rgba(255,82,82," + (isDark2 ? "0.14" : "0.12") + ");border-bottom:1px solid rgba(255,82,82,0.5)\">" +
+          "\u26d4 tornsy is down \u2014 no signals or charts. Prices are read from this page, " +
+          "so holdings, the ROI planner and buying/selling all still work.</div>" + html;
+      } else if (missingBatches > 0) {
         html = "<div style=\"padding:8px 14px;font-size:11px;font-weight:700;color:" + (isDark2 ? "#ffc107" : "#7a5c00") + ";background:rgba(255,193,7," + (isDark2 ? "0.12" : "0.18") + ");border-bottom:1px solid rgba(255,193,7,0.45)\">" +
-          "⚠ tornsy partial — " + missingBatches + "/4 interval batches missing, signals degraded</div>" + html;
+          "\u26a0 tornsy partial \u2014 " + missingBatches + "/4 interval batches missing, signals degraded</div>" + html;
       }
 
       content.innerHTML = html;
@@ -3339,10 +3388,15 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var missingBatches = [t1, t2, t3, t4].filter(function(t) {
         return !t || !Array.isArray(t.data || t);
       }).length;
-      if (missingBatches === 4) { throw new Error("tornsy.com unreachable — no price data"); }
-
       var ownedMap = buildOwnedMap(tornData);
-      var raw = mergeIntervals([t1, t2, t3, t4]);
+      // tornsy fully down: fall back to the page's own prices instead of throwing.
+      // Throwing blanked the whole panel — holdings, ROI planner and the Quick Trade
+      // bar's pills with it — even though none of those need tornsy. Only give up if
+      // the page has no prices either (not the stocks page / markup changed).
+      var raw = (missingBatches === 4) ? buildRawFromDom() : mergeIntervals([t1, t2, t3, t4]);
+      if (missingBatches === 4 && raw.length === 0) {
+        throw new Error("tornsy.com unreachable and no prices on the page");
+      }
 
       // Enrich ownedMap with correct benefit_shares/swing_shares using live prices
       enrichOwnedMap(ownedMap, raw);
