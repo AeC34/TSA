@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.37.0
+// @version      2.38.0
 // @author       AeC3
-// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and Quick Trade bar.
+// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
 // @run-at       document-end
 // @license      MIT
@@ -3757,6 +3757,18 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     } catch(e) { return QT_DEFAULT_AMOUNTS.slice(); }
   })();
   var qtEditMode = false;
+  // Quick Trade direction. One row of amount buttons serves both sides, so the bar
+  // has to show which way it points — the buttons themselves no longer say.
+  //
+  // NOT persisted, on purpose. Remembering it would mean a bar left in SELL reopens
+  // armed to sell in the exact position muscle memory uses to buy, on a one-click
+  // irreversible trade. It resets to BUY on every load; within a session the choice
+  // sticks, which is where the convenience actually matters.
+  var qtDir = "buy";
+  function setQtDir(d) {
+    qtDir = (d === "sell") ? "sell" : "buy";
+    renderQtRows();   // repaints the row and resets the consequence line
+  }
 
   var QT_STOCKS = ["ASS","BAG","CBD","CNC","ELT","EVL","EWM","FHG","GRN","HRG",
     "IIL","IOU","IST","LAG","LOS","LSC","MCS","MSG","MUN","PRN",
@@ -3764,6 +3776,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     "TMI","TSB","WLT","WSU","YAZ"];
 
   var qt_stocks = {}, qt_stockRows = {}, qt_stockId = {}, qt_localShareCache = {};
+  var qtMapsBuiltAt = 0;   // throttles the preview's map rebuild — see qtRenderConsequence
 
   function qtBuildMaps() {
     $("ul[class^='stock_']").each(function() {
@@ -4003,6 +4016,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }
     qtUpdateLocalCache(symb, action === "buyShares" ? shares : -shares);
     showToast(label, "success");
+    // The preview line described a trade that has now happened. The pointer is still
+    // resting on the button, so no mouseenter or blur will fire to clear it — without
+    // this the line keeps asserting "25M buys 1,234 shares" about a completed trade,
+    // and a second click would be judged against pre-trade cash and holdings. Reset to
+    // the idle state, which re-reads price and holding from the updated cache.
+    qtRenderConsequence(null);
     return true;
   }
 
@@ -4178,6 +4197,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function createAmountBtn(label, amt, mode, idx) {
     var btn = document.createElement("button");
     var isBuy = mode === "buy";
+    // One row now serves both directions, so the amount buttons carry the colour of
+    // whichever way the bar points. Colour alone never decides what a click does —
+    // the direction toggle above states it in words, and the line below spells out
+    // the consequence — but the buttons still have to LOOK like what they will do.
     var isDark = lsGet("tsa_dark", "false") === "true";
     var buyBorder  = isDark ? "rgba(76,255,145,0.3)"  : "#1a8a45";
     var buyBg      = isDark ? "rgba(76,255,145,0.08)" : "rgba(26,138,69,0.08)";
@@ -4221,46 +4244,170 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         if (isBuy) qtExecuteBuy(s, amt);
         else qtExecuteSell(s, amt);
       };
+      // Focus as well as hover: the row is keyboard-reachable, and a keyboard user
+      // needs the same answer a mouse user gets.
+      var show = function() { qtRenderConsequence({ amt: amt, all: false }); };
+      btn.addEventListener("mouseenter", show);
+      btn.addEventListener("focus", show);
+      var clear = function() { qtRenderConsequence(null); };
+      btn.addEventListener("mouseleave", clear);
+      btn.addEventListener("blur", clear);
     }
     return btn;
   }
 
+  // What the next click will actually do, in shares — the bar asks for money but a
+  // benefit tier is counted in shares, so "25M" alone never answered the question
+  // the user was really asking. Empty until a button is hovered or focused.
+  // Every number here is computed with the EXECUTOR's own formula, not a plausible
+  // approximation of it — qtExecuteSell grosses up for the 0.1% fee and rounds UP,
+  // qtExecuteBuy clamps to cash on hand and rounds DOWN. A preview that disagrees
+  // with the trade by even one share is worse than no preview, because the whole
+  // point of the line is that it is exact.
+  //
+  // The idle state shows price and holding rather than "hover an amount": on touch
+  // (TornPDA) mouseenter fires as part of the tap that also trades, so a hover-only
+  // line would arrive at or after the trade it was meant to explain.
+  //
+  // ⚠️ KNOWN LIMIT: the PER-AMOUNT preview is therefore desktop-only in practice. On
+  // touch the idle line still gives price, holding and the armed direction before any
+  // tap, but the exact share count for a specific amount cannot be read before the
+  // trade fires. A tap-to-preview / tap-again-to-trade path would fix it and is the
+  // obvious next step if mis-taps happen on the phone.
+  function qtRenderConsequence(btnInfo) {
+    var el = document.getElementById("qt-consequence");
+    if (!el) return;
+    var isDark = lsGet("tsa_dark", "false") === "true";
+    var dim = isDark ? "#8b93a8" : "#667088";
+    var live = isDark ? "#e0e0ff" : "#222222";
+    var accent = qtDir === "buy" ? (isDark ? "#4cff91" : "#1a8a45")
+                                 : (isDark ? "#ff4c6a" : "#cc2222");
+    var quiet = function(msg) {
+      el.textContent = msg;
+      el.style.color = dim;
+      el.style.borderLeftColor = "transparent";
+    };
+
+    var sym = document.getElementById("qt-stock") ? document.getElementById("qt-stock").value : "";
+    if (!sym) { quiet("Select a stock to see what a trade would do."); return; }
+    // The maps must be fresh — a Torn re-render leaves the cached jQuery nodes
+    // detached, which would make the preview quietly disagree with the trade. But
+    // rebuilding on every mouseenter re-walks all 35 cards once per button as the
+    // pointer slides along the row, so throttle it: the DOM cannot go stale faster
+    // than Torn re-renders.
+    if (!qt_stocks[sym] || (btnInfo && Date.now() - qtMapsBuiltAt > 1000)) {
+      qtBuildMaps();
+      qtMapsBuiltAt = Date.now();
+    }
+
+    // qt_stocks is keyed by SYMBOL — qtGetPrice's parameter is named `id` but all its
+    // other call sites pass the symbol. qt_stockId holds Torn's DOM id, for the POST.
+    var price = qtGetPrice(sym);
+    var owned = qtGetOwnedShares(sym);
+    if (!price) { quiet("Price not readable on this page yet."); return; }
+
+    if (!btnInfo) {
+      quiet(sym + " $" + price.toLocaleString("en-US") +
+            (owned > 0 ? "  ·  you hold " + owned.toLocaleString("en-US") : "  ·  none held"));
+      return;
+    }
+
+    var txt;
+    if (qtDir === "buy") {
+      // Mirrors qtExecuteBuy: clamp to cash, then floor.
+      var money = qtGetMoneyFast();
+      var wanted = btnInfo.all ? (money > 0 ? money : 0) : btnInfo.amt;
+      var spend = (money > 0 && wanted > money) ? money : wanted;
+      var sh = Math.floor(spend / price);
+      if (sh <= 0) {
+        txt = "Not enough cash for a single share at $" + price.toLocaleString("en-US");
+      } else {
+        var now = qtGetBenefitTier(sym, owned);
+        var after = qtGetBenefitTier(sym, owned + sh);
+        txt = (spend < wanted ? "$" + spend.toLocaleString("en-US") : fmtQtAmt(spend)) +
+              " buys " + sh.toLocaleString("en-US") + " shares at $" +
+              price.toLocaleString("en-US") +
+              (spend < wanted ? "  ·  capped by cash on hand" : "") +
+              // Only claim a tier when the share count is trustworthy: qtGetOwnedShares
+              // collapses an unreadable count to 0, which would promise a tier the user
+              // may already be past.
+              (qtReadOwnedFromDom(sym) !== null && after.tier > now.tier
+                ? "  ·  reaches T" + after.tier : "");
+      }
+    } else {
+      if (owned <= 0) {
+        txt = "You hold no " + sym + " to sell.";
+      } else {
+        // Mirrors qtExecuteSell: gross up for the fee, round UP, clamp to owned,
+        // then apply the lock. qtBenefitLockMax is the lock's single source of truth.
+        var want = btnInfo.all ? owned : Math.ceil((btnInfo.amt / 0.999) / price);
+        if (want > owned) want = owned;
+        var maxSell = $("#qt-lock-benefit").is(":checked") ? qtBenefitLockMax(sym) : Infinity;
+        if (maxSell === -1) {
+          // Defence-in-depth only: qtBenefitLockMax returns -1 when it reads zero
+          // shares, which the `owned <= 0` branch above has already caught. Kept so a
+          // future change to either function cannot silently produce a wrong promise.
+          txt = "Share count not readable — the lock will block this for safety.";
+        } else if (maxSell === 0) {
+          txt = "Every share is in a benefit block — the lock will refuse this.";
+        } else {
+          // Two different caps can bind: your holding (already applied to `want`
+          // above, and self-evident from "N of your N") and the lock. Only the lock
+          // gets named, because only the lock is a setting the reader can change.
+          var capped = (maxSell !== Infinity && maxSell < want);
+          var actual = capped ? maxSell : want;
+          txt = "Sells " + actual.toLocaleString("en-US") + " of your " +
+                owned.toLocaleString("en-US") + " shares" +
+                (capped ? "  ·  capped by Benefit Lock" : "");
+        }
+      }
+    }
+    el.textContent = txt;
+    el.style.color = live;
+    el.style.borderLeftColor = accent;
+  }
+
   function renderQtRows() {
-    var buyRow = document.getElementById("qt-buy-row");
-    var sellRow = document.getElementById("qt-sell-row");
-    if (!buyRow || !sellRow) return;
-    buyRow.innerHTML = "";
-    sellRow.innerHTML = "";
+    var row = document.getElementById("qt-amount-row");
+    if (!row) return;
+    row.innerHTML = "";
+    var isBuy = qtDir === "buy";
 
     qtAmounts.forEach(function(amt, idx) {
-      buyRow.appendChild(createAmountBtn(fmtQtAmt(amt), amt, "buy", idx));
-      sellRow.appendChild(createAmountBtn(fmtQtAmt(amt), amt, "sell", idx));
+      row.appendChild(createAmountBtn(fmtQtAmt(amt), amt, qtDir, idx));
     });
 
-    // ALL buy btn
-    var allBuyBtn = document.createElement("button");
-    allBuyBtn.title = "Vault — buy max shares with all available cash";
+    // ALL means two different things depending on direction — vault everything in,
+    // or withdraw everything out. Same button, because the direction toggle has
+    // already said which one you are asking for.
+    var allBtn = document.createElement("button");
+    allBtn.title = isBuy
+      ? "Vault — buy max shares with all available cash"
+      : "Withdraw all — sell every share of this stock (respects Benefit Lock)";
     var isDarkNow = lsGet("tsa_dark", "false") === "true";
-    allBuyBtn.style.cssText = "padding:6px 9px;border-radius:7px;border:1px solid " + (isDarkNow ? "rgba(76,255,145,0.5)" : "#1a8a45") + ";background:" + (isDarkNow ? "rgba(76,255,145,0.15)" : "rgba(26,138,69,0.1)") + ";color:" + (isDarkNow ? "#4cff91" : "#1a8a45") + ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
-    allBuyBtn.textContent = "ALL";
-    allBuyBtn.onclick = function() {
+    var bd = isBuy ? (isDarkNow ? "rgba(76,255,145,0.5)" : "#1a8a45")
+                   : (isDarkNow ? "rgba(255,76,106,0.5)" : "#cc2222");
+    var bg = isBuy ? (isDarkNow ? "rgba(76,255,145,0.15)" : "rgba(26,138,69,0.1)")
+                   : (isDarkNow ? "rgba(255,76,106,0.12)" : "rgba(204,34,34,0.08)");
+    var fg = isBuy ? (isDarkNow ? "#4cff91" : "#1a8a45")
+                   : (isDarkNow ? "#ff4c6a" : "#cc2222");
+    allBtn.style.cssText = "padding:6px 9px;border-radius:7px;border:1px solid " + bd +
+      ";background:" + bg + ";color:" + fg +
+      ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
+    allBtn.textContent = "ALL";
+    allBtn.onclick = function() {
       var s = $("#qt-stock").val();
       if (!s) { showToast("Select a stock first.", "warn"); return; }
-      qtBuildMaps(); qtVault(s);
+      qtBuildMaps();
+      if (isBuy) qtVault(s); else qtWithdrawAll(s);
     };
-    buyRow.appendChild(allBuyBtn);
-
-    // ALL sell btn
-    var allSellBtn = document.createElement("button");
-    allSellBtn.title = "Withdraw all — sell every share of this stock (respects Benefit Lock)";
-    allSellBtn.style.cssText = "padding:6px 9px;border-radius:7px;border:1px solid " + (isDarkNow ? "rgba(255,76,106,0.5)" : "#cc2222") + ";background:" + (isDarkNow ? "rgba(255,76,106,0.12)" : "rgba(204,34,34,0.08)") + ";color:" + (isDarkNow ? "#ff4c6a" : "#cc2222") + ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
-    allSellBtn.textContent = "ALL";
-    allSellBtn.onclick = function() {
-      var s = $("#qt-stock").val();
-      if (!s) { showToast("Select a stock first.", "warn"); return; }
-      qtBuildMaps(); qtWithdrawAll(s);
-    };
-    sellRow.appendChild(allSellBtn);
+    var showAll = function() { qtRenderConsequence({ amt: 0, all: true }); };
+    allBtn.addEventListener("mouseenter", showAll);
+    allBtn.addEventListener("focus", showAll);
+    var clearAll = function() { qtRenderConsequence(null); };
+    allBtn.addEventListener("mouseleave", clearAll);
+    allBtn.addEventListener("blur", clearAll);
+    row.appendChild(allBtn);
 
     if (qtEditMode) {
       var addBtn = document.createElement("button");
@@ -4270,8 +4417,22 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var val = parseQtMoney(prompt("Enter amount in $ (e.g. 25m or 25000000):"));
         if (val > 0) { qtAmounts.push(val); qtAmounts.sort(function(a,b){return a-b;}); saveQtAmounts(); renderQtRows(); }
       };
-      buyRow.appendChild(addBtn);
+      row.appendChild(addBtn);
     }
+
+    // Repaint the direction toggle so the active side is unmistakable.
+    var bBuy = document.getElementById("qt-dir-buy");
+    var bSell = document.getElementById("qt-dir-sell");
+    if (bBuy && bSell) {
+      bBuy.style.opacity = isBuy ? "1" : "0.4";
+      bSell.style.opacity = isBuy ? "0.4" : "1";
+      bBuy.setAttribute("aria-pressed", isBuy ? "true" : "false");
+      bSell.setAttribute("aria-pressed", isBuy ? "false" : "true");
+    }
+    // Reset the idle line on every re-render, not just on a direction click: this
+    // function also runs at load, on theme change and when edit mode toggles, and a
+    // line left over from before the re-render would describe the wrong state.
+    qtRenderConsequence(null);
   }
 
   // ── torn-stock-pocket-style Quick pills ──────────────────────────────────
@@ -5214,6 +5375,24 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function applyQtTheme(isDark) {
     var bar = document.getElementById("qt-bar");
     if (!bar) return;
+    // The direction toggle is static markup like the search box and the chart, so it
+    // needs re-colouring here — renderQtRows only touches opacity and aria. Without
+    // this, light mode shows neon-on-white. Both elements live inside #qt-bar, so
+    // this belongs below the guard. The consequence line repaints itself from
+    // lsGet("tsa_dark") on every render, and renderQtRows resets it, so it needs no
+    // call of its own here.
+    var dBuy = document.getElementById("qt-dir-buy");
+    var dSell = document.getElementById("qt-dir-sell");
+    if (dBuy) {
+      dBuy.style.borderColor = isDark ? "rgba(76,255,145,0.5)" : "#1a8a45";
+      dBuy.style.background  = isDark ? "rgba(76,255,145,0.15)" : "rgba(26,138,69,0.1)";
+      dBuy.style.color       = isDark ? "#4cff91" : "#1a8a45";
+    }
+    if (dSell) {
+      dSell.style.borderColor = isDark ? "rgba(255,76,106,0.5)" : "#cc2222";
+      dSell.style.background  = isDark ? "rgba(255,76,106,0.12)" : "rgba(204,34,34,0.08)";
+      dSell.style.color       = isDark ? "#ff4c6a" : "#cc2222";
+    }
     var bg       = isDark ? "#0c0c14"        : "#f0f4ff";
     var border   = isDark ? "#3a3a6a"        : "#c0d0ff";
     var selBg    = isDark ? "#13131f"        : "#ffffff";
@@ -5291,21 +5470,26 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           "<span id='qt-lock-text' style='font-size:10px;font-weight:700;color:#ffc107;font-family:JetBrains Mono,monospace;letter-spacing:0.04em;white-space:nowrap;'>🔒 Benefit Lock</span>" +
         "</label>" +
       "</div>" +
-      // Collapsible body: benefit info + buy/sell rows + rec + chart
+      // Collapsible body: benefit info + direction toggle + amount row + rec + chart
       "<div id='qt-body'>" +
         "<div id='qt-benefit-info' style='display:none;margin-bottom:4px;padding:0 2px;'>" +
           "<span id='qt-swing-available' style='font-size:10px;color:#ffc107;font-family:JetBrains Mono,monospace;font-weight:600;'></span>" +
         "</div>" +
-        // Row 2: BUY buttons
-        "<div style='display:flex;gap:5px;align-items:center;margin-bottom:5px'>" +
-          "<span style='font-size:9px;font-weight:700;color:#4cff91;font-family:JetBrains Mono,monospace;flex-shrink:0;letter-spacing:0.06em;'>▲</span>" +
-          "<div id='qt-buy-row' style='display:flex;gap:5px;flex:1;overflow-x:auto;padding-bottom:2px'></div>" +
-        "</div>" +
-        // Row 3: SELL buttons
+        // Row 2: direction, then one row of amounts.
+        //
+        // This replaced two mirrored rows that were told apart only by colour — an
+        // easy mis-click on a trade that spends real money and cannot be undone.
+        // Now the direction is chosen once, in words, and the amounts inherit it.
+        // Costs one extra click only when you actually switch sides.
         "<div style='display:flex;gap:5px;align-items:center'>" +
-          "<span style='font-size:9px;font-weight:700;color:#ff4c6a;font-family:JetBrains Mono,monospace;flex-shrink:0;letter-spacing:0.06em;'>▼</span>" +
-          "<div id='qt-sell-row' style='display:flex;gap:5px;flex:1;overflow-x:auto;padding-bottom:2px'></div>" +
+          "<div role='group' aria-label='Trade direction' style='display:flex;gap:3px;flex-shrink:0;margin-right:4px;'>" +
+            "<button id='qt-dir-buy' aria-pressed='true' title='Buy' style='padding:6px 9px;border-radius:7px;border:1px solid rgba(76,255,145,0.5);background:rgba(76,255,145,0.15);color:#4cff91;font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;cursor:pointer;letter-spacing:0.04em;'>BUY</button>" +
+            "<button id='qt-dir-sell' aria-pressed='false' title='Sell' style='padding:6px 9px;border-radius:7px;border:1px solid rgba(255,76,106,0.5);background:rgba(255,76,106,0.12);color:#ff4c6a;font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;cursor:pointer;letter-spacing:0.04em;'>SELL</button>" +
+          "</div>" +
+          "<div id='qt-amount-row' style='display:flex;gap:5px;flex:1;overflow-x:auto;padding-bottom:2px'></div>" +
         "</div>" +
+        // The consequence line: what the next click does, in shares.
+        "<div id='qt-consequence' role='status' aria-live='polite' style='margin-top:5px;padding-left:8px;border-left:2px solid transparent;font-size:10px;color:#8b93a8;font-family:JetBrains Mono,monospace;min-height:15px;line-height:15px;transition:color .12s,border-color .12s;'>Select a stock to see what a trade would do.</div>" +
         // ROI recommendation
         "<div id='qt-rec' style='display:none;margin-top:6px;'></div>" +
         // Chart
@@ -5384,6 +5568,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             lsSet("qt_last_stock", sym);
             qtDrawChart(sym);
             qtUpdateExec();
+            // Without this the line keeps quoting the PREVIOUS stock's price and
+            // holding while the buttons are armed on this one.
+            qtRenderConsequence(null);
           };
           listEl.appendChild(item);
         });
@@ -5393,6 +5580,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       searchEl.addEventListener("focus", function() { this.select(); buildList(""); });
       searchEl.addEventListener("input", function() {
         hiddenEl.value = "";
+        qtRenderConsequence(null);   // selection cleared — the line must not keep one
         buildList(searchEl.value);
         qtUpdateExec();
       });
@@ -5410,6 +5598,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         hiddenEl.value = lastStock;
         searchEl.value = lastStock;
         qtDrawChart(lastStock);
+        // renderQtRows already ran, before this restore — repaint the line now that
+        // the bar actually has a stock, or it reads "select a stock" under one.
+        qtRenderConsequence(null);
+        // Torn renders the stock cards after document-end, so the call above can land
+        // while qtBuildMaps still has nothing to read and settle on "price not
+        // readable". Nothing else would re-render it until the user interacts, so
+        // repaint once the cards exist. Purely a DOM re-read — no network.
+        setTimeout(function() { qtRenderConsequence(null); }, 1600);
       }
     })();
 
@@ -5422,7 +5618,18 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     document.getElementById("qt-lock-benefit") && document.getElementById("qt-lock-benefit").addEventListener("change", function() {
       qtUpdateExec();
+      // The sell preview reads this checkbox to decide whether to say "capped by
+      // Benefit Lock", so a keyboard or programmatic toggle must repaint it.
+      qtRenderConsequence(null);
     });
+
+    // Direction toggle. setQtDir re-renders the amount row in the new colour and
+    // clears the consequence line, so nothing left over from the old direction can
+    // be read as applying to the new one.
+    document.getElementById("qt-dir-buy") && document.getElementById("qt-dir-buy")
+      .addEventListener("click", function() { setQtDir("buy"); });
+    document.getElementById("qt-dir-sell") && document.getElementById("qt-dir-sell")
+      .addEventListener("click", function() { setQtDir("sell"); });
 
     document.getElementById("qt-min-btn") && document.getElementById("qt-min-btn").addEventListener("click", function() {
       var minimized = lsGet("qt_minimized", "false") === "true";
