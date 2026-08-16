@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.38.1
+// @version      2.38.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -4485,7 +4485,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     if (showBar) {
       bar.style.display = "";
-      if (row1) row1.style.display = "";
+      // "flex", not "" — an empty string CLEARS the inline display and the div falls
+      // back to block, which stacked the stock picker, ✎ and Benefit Lock on four
+      // separate lines. There is no #qt-row1 rule in STYLES to fall back to.
+      if (row1) row1.style.display = "flex";
       if (body) body.style.display = minimized ? "none" : "block";
     } else {
       bar.style.display = "none";
@@ -5456,9 +5459,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (!getShowQtBar()) bar.style.display = "none";
     bar.innerHTML =
       // Row 1: Minimize button + Stock searchable combobox + edit + lock
-      "<div id='qt-row1' style='display:flex;gap:7px;margin-bottom:6px;align-items:center'>" +
+      "<div id='qt-row1' style='display:flex;flex-wrap:wrap;gap:7px;margin-bottom:6px;align-items:center'>" +
         "<button id='qt-min-btn' title='Minimize Quick Trade bar' style='padding:4px 7px;border-radius:7px;border:1px solid #2a2a4a;background:transparent;color:#6a6a9a;font-family:JetBrains Mono,monospace;font-size:10px;cursor:pointer;flex-shrink:0;'>&#9660;</button>" +
-        "<div id='qt-stock-wrap' style='position:relative;flex:1'>" +
+        // min-width:0 so the search field can shrink below its intrinsic input width;
+        // without it a flex item refuses to go under its content size and the row
+        // overflows on a narrow phone instead of fitting on one line.
+        "<div id='qt-stock-wrap' style='position:relative;flex:1;min-width:0'>" +
           "<input id='qt-stock-search' type='text' placeholder='Search stock…' autocomplete='off' style='width:100%;box-sizing:border-box;background:#13131f;border:1px solid #2a2a4a;border-radius:7px;color:#e0e0ff;font-family:JetBrains Mono,monospace;font-size:12px;font-weight:700;padding:7px 26px 7px 10px;outline:none;'>" +
           "<input type='hidden' id='qt-stock' value=''>" +
           "<span style='position:absolute;right:9px;top:50%;transform:translateY(-50%);color:#6a6a9a;font-size:9px;pointer-events:none'>▼</span>" +
