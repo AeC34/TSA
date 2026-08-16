@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.38.0
+// @version      2.38.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -5481,12 +5481,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         // easy mis-click on a trade that spends real money and cannot be undone.
         // Now the direction is chosen once, in words, and the amounts inherit it.
         // Costs one extra click only when you actually switch sides.
-        "<div style='display:flex;gap:5px;align-items:center'>" +
+        "<div style='display:flex;gap:5px;align-items:flex-start'>" +
           "<div role='group' aria-label='Trade direction' style='display:flex;gap:3px;flex-shrink:0;margin-right:4px;'>" +
             "<button id='qt-dir-buy' aria-pressed='true' title='Buy' style='padding:6px 9px;border-radius:7px;border:1px solid rgba(76,255,145,0.5);background:rgba(76,255,145,0.15);color:#4cff91;font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;cursor:pointer;letter-spacing:0.04em;'>BUY</button>" +
             "<button id='qt-dir-sell' aria-pressed='false' title='Sell' style='padding:6px 9px;border-radius:7px;border:1px solid rgba(255,76,106,0.5);background:rgba(255,76,106,0.12);color:#ff4c6a;font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;cursor:pointer;letter-spacing:0.04em;'>SELL</button>" +
           "</div>" +
-          "<div id='qt-amount-row' style='display:flex;gap:5px;flex:1;overflow-x:auto;padding-bottom:2px'></div>" +
+          // Wraps rather than scrolls: on a phone the row is wider than the screen,
+          // and a horizontal swipe inside a vertically-scrolling page hid ALL and the
+          // largest preset behind a gesture nobody discovers. Wrapping costs one row
+          // of height on mobile and nothing on desktop, where it still fits on one line.
+          "<div id='qt-amount-row' style='display:flex;flex-wrap:wrap;gap:5px;flex:1;'></div>" +
         "</div>" +
         // The consequence line: what the next click does, in shares.
         "<div id='qt-consequence' role='status' aria-live='polite' style='margin-top:5px;padding-left:8px;border-left:2px solid transparent;font-size:10px;color:#8b93a8;font-family:JetBrains Mono,monospace;min-height:15px;line-height:15px;transition:color .12s,border-color .12s;'>Select a stock to see what a trade would do.</div>" +
