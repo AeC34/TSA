@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.38.2
+// @version      2.39.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1920,8 +1920,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var sellBaseAvg = (swingAvg !== null) ? swingAvg : owned.avg_price;
       if (sellBaseAvg > 0) {
         var swingNetPct = (p_live * 0.999 - sellBaseAvg) / sellBaseAvg * 100;
-        if (swingNetPct >= getProfitTarget())     sellSignal = "PROFIT";
-        else if (swingNetPct <= -getStopLoss())   sellSignal = "STOP LOSS";
+        var stopLoss = getStopLoss();
+        if (swingNetPct >= getProfitTarget())                        sellSignal = "PROFIT";
+        else if (stopLoss > 0 && swingNetPct <= -stopLoss)           sellSignal = "STOP LOSS";
       }
     }
 
@@ -2179,12 +2180,27 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     };
   }
 
+  // Defaults changed in v2.39.0, from +0.3%/-1.0%. Measured on 5 years of daily
+  // candles (35 stocks, 2021-2026, net of Torn's 0.1% sell fee):
+  //   - The old pair risked 1% to make 0.3%, needing a 76.9% hit rate to break
+  //     even and getting 66.3%. Simulated on ordinary entries it lost money in
+  //     four of five years (-3.7 / -9.0 / -2.2 / +0.1 / -3.7), while never
+  //     selling at all was positive in all five.
+  //   - The tight stop is the expensive half: loosening it alone helped more
+  //     than raising the target alone.
+  // The 1.0% figure itself was measured on zone entries (price in the bottom of
+  // its own 30-day range), where it was the peak of return per day of tied-up
+  // capital. This script applies the target to every swing position regardless
+  // of entry, so treat 1.0 as a sane default rather than a proven optimum for
+  // your own entries. Existing users keep whatever they saved — these are
+  // defaults, not a migration.
   function getProfitTarget() {
-    return parseFloat(lsGet("tsa_profit_target", "0.3"));
+    return parseFloat(lsGet("tsa_profit_target", "1.0"));
   }
 
+  // 0 disables the stop loss entirely (see the SELL LOGIC guard).
   function getStopLoss() {
-    return parseFloat(lsGet("tsa_stop_loss", "1.0"));
+    return parseFloat(lsGet("tsa_stop_loss", "0"));
   }
 
   function escHtml(s) {
@@ -5732,12 +5748,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">Profit target (%)</div>" +
           "<input id=\"tsa-setting-profit\" type=\"number\" step=\"0.1\" min=\"0.1\" max=\"10\" value=\"" + getProfitTarget() + "\" style=\"" + inputStyle + "\">" +
-          "<div style=\"" + hint + "\">Typical: 1–3%. Higher = wait for bigger profits, sells trigger less often.</div>" +
+          "<div style=\"" + hint + "\">Default 1.0%. Backtesting found this the best return per day of tied-up capital; below it the 0.1% round-trip fee eats the gain.</div>" +
         "</div>" +
         "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">Stop loss (%)</div>" +
-          "<input id=\"tsa-setting-stoploss\" type=\"number\" step=\"0.1\" min=\"0.1\" max=\"20\" value=\"" + getStopLoss() + "\" style=\"" + inputStyle + "\">" +
-          "<div style=\"" + hint + "\">Typical: 2–5%. Lower = exit faster on a loss, but more false alarms.</div>" +
+          "<input id=\"tsa-setting-stoploss\" type=\"number\" step=\"0.1\" min=\"0\" max=\"20\" value=\"" + getStopLoss() + "\" style=\"" + inputStyle + "\">" +
+          "<div style=\"" + hint + "\">0 = off (default). Torn stocks mean-revert, so a stop loss mostly realizes dips that recover. Set 2–5% only if you want a hard exit.</div>" +
         "</div>" +
 
         // ── Refresh & data ─────────────────────
@@ -5871,8 +5887,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var posVal = document.getElementById("tsa-setting-position").value;
         var themeVal = document.getElementById("tsa-setting-theme").value;
         var keyVal = (document.getElementById("tsa-setting-apikey").value || "").trim();
-        if (isNaN(profit) || profit <= 0) { showToast("Invalid profit target", "warn"); return; }
-        if (isNaN(stop) || stop <= 0) { showToast("Invalid stop loss", "warn"); return; }
+        // The max= attributes are advisory only — a browser does not enforce them
+        // on a non-submitted input read via .value, so bound them here too.
+        if (isNaN(profit) || profit <= 0 || profit > 10) { showToast("Profit target must be 0.1–10%", "warn"); return; }
+        if (isNaN(stop) || stop < 0 || stop > 20) { showToast("Stop loss must be 0–20% (0 = off)", "warn"); return; }
         if (isNaN(ar) || ar < 0) { showToast("Invalid auto-refresh interval", "warn"); return; }
         if (isNaN(hd) || hd < 1 || hd > 30) { showToast("History must be 1–30 days", "warn"); return; }
         if (isNaN(top5Min) || top5Min < 0 || top5Min > 160) { showToast("Min score must be 0–160", "warn"); return; }
