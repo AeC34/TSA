@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.41.1
+// @version      2.42.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -442,6 +442,253 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     catch(e) { return {}; }
   })();
 
+  // ============================================================
+  // BENEFIT DESCRIPTION PARSER
+  // A DELIBERATE port of one reference implementation, not a second one written
+  // from scratch: anything else that values a Torn benefit has to agree with this
+  // to the cent, so keep the regexes and the branch ORDER byte-identical.
+  //
+  // VERIFIED 2026-08-25 against a live torn/?selections=stocks: all 35 benefit
+  // descriptions classify identically in both languages (6 cash, 12 item,
+  // 1 points, 16 perk; 0 unclassified). Fixture archived out of repo.
+  // ============================================================
+
+  var _CASH_RE    = /^\$([\d,]+)$/;
+  var _ITEM_RE    = /^(\d+)\s*x\s+(.+?)$/;
+  var _POINTS_RE  = /^(\d+)\s+points?$/i;
+
+  // One benefit description -> {amount, kind, detail}.
+  // `kind` is "cash" | "item" | "points" | "unpriceable". `amount` is whole
+  // dollars per cycle, sign POSITIVE (income to the holder).
+  //
+  // An item is valued at the CALLER's price for it. There is deliberately no
+  // baked-in fallback price: an undated snapshot of a market price is the one
+  // thing this parser exists not to carry, so an item we cannot price comes back
+  // "unpriceable" and the caller DROPS the row instead of ranking it off a guess.
+  // "points" is the single documented exception — an owner-chosen rate, and it
+  // reuses PTS_VALUE (the value of PTS's 100-point benefit) divided by 100
+  // rather than declaring a second $/point constant that could drift from it.
+  function parsePayout(description, itemValueByName) {
+    var text = String(description == null ? "" : description).trim();
+    if (!text) return { amount: 0, kind: "unpriceable", detail: "no description" };
+
+    var m = _CASH_RE.exec(text);
+    if (m) return { amount: parseFloat(m[1].replace(/,/g, "")), kind: "cash", detail: text };
+
+    m = _ITEM_RE.exec(text);
+    if (m) {
+      var qty = parseInt(m[1], 10), name = m[2].trim();
+      var price = itemValueByName ? itemValueByName[name] : 0;
+      if (price && price > 0) return { amount: qty * price, kind: "item", detail: name };
+      return { amount: 0, kind: "unpriceable", detail: "no market value for '" + name + "'" };
+    }
+
+    m = _POINTS_RE.exec(text);
+    if (m) return { amount: parseInt(m[1], 10) * (PTS_VALUE / 100), kind: "points", detail: text };
+
+    // "50 nerve", "1000 happiness", "100 energy", and every passive perk ("a 10%
+    // bank interest bonus"). Real benefits with no dollar figure Torn publishes
+    // and no owner-chosen rate either — pricing them would mean inventing one.
+    return { amount: 0, kind: "unpriceable", detail: "non-monetary: " + text };
+  }
+
+  // {qty, name} when the benefit pays a NAMED ITEM, else {qty:null, name:null}.
+  // The same regex parsePayout matches on, exposed separately because "what does
+  // this block give me" and "what is it worth" are different questions with
+  // different failure modes. BAG's "1x Ammunition Pack" has no catalogue entry,
+  // so parsePayout correctly says unpriceable — the item NAME is still the honest
+  // answer to the first question. Never guesses: no match, no name.
+  function payoutItem(description) {
+    var m = _ITEM_RE.exec(String(description == null ? "" : description).trim());
+    if (!m) return { qty: null, name: null };
+    return { qty: parseInt(m[1], 10), name: m[2].trim() };
+  }
+
+  // The ART of the income: "cash" | "item" | "points" | "perk".
+  // NOT parsePayout's `kind`: that one answers "could we put a dollar figure on
+  // it" and collapses two different arts into "unpriceable" — a NAMED ITEM with
+  // no market value (BAG "1x Ammunition Pack", HRG "1x Random Property", TCC
+  // "1x Clothing Cache") versus a genuinely non-monetary benefit ("50 nerve",
+  // every passive perk). The first is item-paid income we cannot price; the
+  // second is not cash income at all.
+  //
+  // DERIVED FROM THE BRANCH parsePayout ACTUALLY TOOK, never from whether a row
+  // happens to carry an item name. For cash/item/points the branch IS the answer;
+  // only the collapsed "unpriceable" case re-runs the item regex, where _CASH_RE
+  // and _POINTS_RE have by definition already failed — so the three cannot
+  // disagree about one description.
+  //
+  // NOTE the deliberate asymmetry: art "item" with a null price means "item-paid,
+  // price unknown" and must NEVER be read as $0.
+  function payoutKind(parseKind, description) {
+    if (parseKind === "cash" || parseKind === "item" || parseKind === "points") return parseKind;
+    return _ITEM_RE.test(String(description == null ? "" : description).trim()) ? "item" : "perk";
+  }
+
+  // Length of one payout cycle in DAYS, straight from Torn's benefit.frequency.
+  // VERIFIED 2026-08-25: the 27 weekly stocks report 7 and all eight monthly ones
+  // (CNC GRN HRG IOU TCC TCT TMI TSB) report exactly 31 — a fixed 31-day cycle,
+  // never the current calendar month's length.
+  function cycleDaysFromFreq(freq) {
+    var f = parseInt(freq, 10);
+    return (isFinite(f) && f > 0) ? f : 7;
+  }
+
+  // ============================================================
+  // STOCK CATALOGUE — derive the benefit tables at runtime
+  //
+  // PASSIVE_STOCKS (:241), BENEFIT_REQ (:244) and ROI_TABLE.freq (:265) were
+  // hand-maintained copies of data Torn publishes. VERIFIED 2026-08-25 against a
+  // live torn/?selections=stocks: all three matched the API EXACTLY (13/13
+  // passives set-equal, 35/35 requirements, 88/88 freq values), so nothing is
+  // lost by deriving them — and a future change on Torn's side now lands by
+  // itself instead of silently rotting. The hardcoded tables STAY as the
+  // COLD-START FALLBACK (first load, offline, API down, item prices not cached
+  // yet) and as the only source for the two payouts the API cannot price (see
+  // UNPRICEABLE_PAYOUT_FALLBACK). Nothing is installed unless the derivation
+  // comes back plausible, so the planner can never end up empty because one API
+  // call failed.
+  //
+  // 🪤 `stocks` is a DICT keyed on the stock id as a STRING ("1".."35"), not a
+  // list.
+  // ============================================================
+
+  // The two benefit items with NO entry in torn/?selections=items, so no market
+  // value exists to derive a payout from. Both are containers, not tradeable
+  // items: HRG pays "1x Random Property", TCC pays "1x Clothing Cache".
+  // These figures are the ONLY hardcoded payouts left, and they are estimates —
+  // keep them until Torn publishes a value or the owner measures one.
+  var UNPRICEABLE_PAYOUT_FALLBACK = { "HRG": 45456058, "TCC": 29526634 };
+
+  // Tiers synthesised per money/item stock. T1-T6 UNIFORMLY for every priceable
+  // stock (18 syms x 6 = 108 rows) — an explicit OWNER DECISION taken 2026-08-25,
+  // not an accident of the port: the hand-built table truncated at 4-6 tiers per
+  // symbol (88 rows) while the dynamic path already used T1-T6, and the owner
+  // chose the uniform ceiling so the planner's candidate set stops depending on
+  // where a hand-edit happened to stop.
+  var MAX_BENEFIT_TIERS = 6;
+
+  // torn/?selections=stocks payload -> {passive, req, roiRows, unpriceable}.
+  // Pure: no globals touched, no I/O — so it is testable and the caller decides
+  // whether the result is good enough to install.
+  function deriveBenefitTables(stocksDict, itemValueByName, nameToItemId) {
+    var passive = [], req = {}, roiRows = [], unpriceable = [];
+    if (!stocksDict) return null;
+    Object.keys(stocksDict).forEach(function(id) {
+      var s = stocksDict[id];
+      if (!s || !s.acronym) return;
+      var sym = s.acronym, b = s.benefit || {};
+      req[sym] = b.requirement || 0;
+      if (b.type === "passive") { passive.push(sym); return; }
+
+      // Active stocks only: a passive perk is a single non-monetary block, never
+      // an ROI candidate (the hand-built table excluded all 13 of them too).
+      var parsed = parsePayout(b.description, itemValueByName);
+      var art = payoutKind(parsed.kind, b.description);
+      if (art === "perk") return;                      // "50 nerve", "100 energy", "1000 happiness"
+
+      var named = payoutItem(b.description);
+      var itemId = (named.name && nameToItemId) ? (nameToItemId[named.name] || 0) : 0;
+      var payout = parsed.amount;
+      if (parsed.kind === "unpriceable") {
+        // A NAMED ITEM we cannot price. Use the owner's fallback if we have one,
+        // otherwise drop the row rather than rank it off a guess — the same
+        // refusal the reference implementation makes. BAG lands here and is
+        // dropped, exactly as the hand-built table already did.
+        payout = UNPRICEABLE_PAYOUT_FALLBACK[sym] || 0;
+        if (!payout) { unpriceable.push(sym); return; }
+      }
+      for (var t = 1; t <= MAX_BENEFIT_TIERS; t++) {
+        roiRows.push({
+          sym: sym, tier: "T" + t, payout: payout,
+          freq: cycleDaysFromFreq(b.frequency),
+          type: art,                 // NOTE: written for shape parity only — nothing reads ROI_TABLE.type
+          item: itemId
+        });
+      }
+    });
+    passive.sort();
+    return { passive: passive, req: req, roiRows: roiRows, unpriceable: unpriceable };
+  }
+
+  var benefitTablesDerived = false;
+
+  // Install a derived set over the hardcoded fallback. Returns true if it landed.
+  //
+  // 🪤 The three tables are MUTATED IN PLACE, never reassigned: closures all over
+  // the file captured the original objects, so a reassignment would leave half
+  // the script reading the old arrays. (The out-of-repo logic guards also grab
+  // them as `var` literals, which is why the fallback path is what they test.)
+  //
+  // 🪤 Nothing is installed unless the result is plausible — ≥30 requirement
+  // symbols, ≥1 passive, ≥60 ROI rows. A truncated or item-price-less derivation
+  // leaves the hardcoded tables untouched instead of shrinking the planner.
+  function installDerivedBenefitTables(stocksDict) {
+    var d = deriveBenefitTables(stocksDict, itemMarketValues, itemIdsByName);
+    if (!d) return false;
+    if (Object.keys(d.req).length < 30 || d.passive.length < 1 || d.roiRows.length < 60) return false;
+
+    PASSIVE_STOCKS.length = 0;
+    d.passive.forEach(function(sym) { PASSIVE_STOCKS.push(sym); });
+
+    Object.keys(BENEFIT_REQ).forEach(function(k) { delete BENEFIT_REQ[k]; });
+    Object.keys(d.req).forEach(function(k) { BENEFIT_REQ[k] = d.req[k]; });
+
+    ROI_TABLE.length = 0;
+    d.roiRows.forEach(function(row) { ROI_TABLE.push(row); });
+    rebuildRoiMap();
+
+    // Any item id the derivation discovered must be price-fetched like the rest.
+    ROI_TABLE.forEach(function(row) {
+      if (row.item && ITEM_IDS.indexOf(row.item) < 0) ITEM_IDS.push(row.item);
+    });
+
+    benefitTablesDerived = true;
+    return true;
+  }
+
+  // Cached torn/?selections=stocks payload. Benefit requirements are game
+  // mechanics and change ~never, so one call per user per DAY is plenty.
+  var STOCK_CATALOGUE_TTL_MS = 24 * 60 * 60 * 1000;
+  // A cached payload past its TTL is still USED (it triggers a refresh, it does
+  // not stop being true) — expiring it into nothing would drop the whole install
+  // back to the hardcoded fallback for one load every 24h.
+  var stockCatalogue = (function() {
+    try { return JSON.parse(lsGet("tsa_stock_catalogue", "null")) || null; }
+    catch(e) { return null; }
+  })();
+
+  function applyStockCatalogue() {
+    if (!stockCatalogue) return false;
+    try { return installDerivedBenefitTables(stockCatalogue); }
+    catch(e) { return false; }
+  }
+
+  // Fetch the catalogue at most once per TTL and install what it yields.
+  // Never rejects: a failed call resolves false and the current tables stand.
+  function refreshStockCatalogue() {
+    var ts = parseInt(lsGet("tsa_stock_catalogue_ts", "0"), 10) || 0;
+    if (stockCatalogue && (Date.now() - ts) < STOCK_CATALOGUE_TTL_MS) {
+      return Promise.resolve(false);
+    }
+    var key = getTornKey();
+    if (!key) return Promise.resolve(false);
+    return fetchJSON("https://api.torn.com/torn/?selections=stocks&key=" + key)
+      .then(function(d) {
+        if (!d || d.error || !d.stocks) return false;
+        stockCatalogue = d.stocks;
+        lsSet("tsa_stock_catalogue", JSON.stringify(d.stocks));
+        lsSet("tsa_stock_catalogue_ts", String(Date.now()));
+        return applyStockCatalogue();
+      })
+      .catch(function() { return false; });
+  }
+
+  // Warm-cache install, before anything reads the tables. On a cold profile both
+  // the catalogue and the item market values are missing, so this is a no-op and
+  // the hardcoded tables serve the first load.
+  applyStockCatalogue();
+
   function fmRoi(n) {
     if (n >= 1e9) return "$" + (n/1e9).toFixed(2) + "B";
     if (n >= 1e6) return "$" + (n/1e6).toFixed(2) + "M";
@@ -552,6 +799,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // ROI_TABLE, then fetch market price + display name for the (possibly
     // expanded) ITEM_IDS list.
     ensureDynamicItemIds(function() {
+      // The item fetch is what makes item-paying benefits priceable, so retry the
+      // catalogue install here: on a cold profile the module-init attempt ran with
+      // an empty itemMarketValues and was (correctly) rejected as implausible.
+      applyStockCatalogue();
       augmentRoiTableWithDynamicStocks();
       var remaining = ITEM_IDS.length * 2;
       var done = false;
@@ -3728,6 +3979,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // Faction armory balance — counted as capital by the planner's bridgebuilder.
     // Non-faction users get an API error body → armory stays 0.
     var factionPromise = fetchJSON("https://api.torn.com/faction/?selections=donations&key=" + getTornKey()).catch(function() { return null; });
+    // Benefit requirements / frequencies / payout descriptions, straight from Torn
+    // instead of a hand-maintained table. Cached 24h, so this is at most one extra
+    // call per user per day and usually zero. It is awaited in the Promise.all
+    // below purely for ORDER: the tables must be installed before anything is
+    // computed from them. Never rejects — a failure leaves the fallback standing.
+    var cataloguePromise = refreshStockCatalogue();
     var t1p = tornsyFetch("https://tornsy.com/api/stocks?interval=m30,h1,h2,h3,h4");
     var t2p = tornsyFetch("https://tornsy.com/api/stocks?interval=h6,h8,h10,h12,h16");
     var t3p = tornsyFetch("https://tornsy.com/api/stocks?interval=h20,d1,d2,d3,d4");
@@ -3746,7 +4003,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }).catch(function() {});                 // Promise.all owns the error UI
 
     Promise.all([
-      userPromise, t1p, t2p, t3p, t4p, factionPromise
+      userPromise, t1p, t2p, t3p, t4p, factionPromise, cataloguePromise
     ]).then(function(results) {
       fullRendered = true;
       var tornData = results[0];
