@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.44.0
+// @version      2.45.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -70,8 +70,17 @@
   // Skip alert/signal toasts when the tab isn't actively viewed — the toast
   // TTL would expire before the user returns. Alerts/signals remain
   // un-consumed and re-fire on the next loadData() when active.
-  function isActivelyViewed() {
-    return document.visibilityState === "visible" && document.hasFocus();
+  // ON SCREEN, which is NOT the same as focused — and the difference decides whether
+  // anything at all happens inside TornPDA. PDA's webview reports
+  // document.hasFocus() === false even while the page is fully on screen (the on-load
+  // fetch in createUIOnce has gated on visibilityState alone for exactly this reason),
+  // so every hasFocus-gated timer silently never fires there: auto-refresh, price
+  // alerts and the history warm-up all did nothing on the platform the owner actually
+  // uses. A hidden tab still fails this test, so the "no background traffic" rule is
+  // kept — a page you are looking at is not a background page.
+  // Owner decision 2026-08-25: this is the gate for anything periodic.
+  function isOnScreen() {
+    return document.visibilityState !== "hidden";
   }
 
   var TORN_API_KEY = lsGet("tsa-torn-apikey", "");
@@ -140,7 +149,7 @@
     // hitting the API for a panel nobody is looking at. Resumed by the
     // visibilitychange / focus listener below, which fires one immediate
     // loadData() that then re-enters this function with a fresh schedule.
-    if (!isActivelyViewed()) return;
+    if (!isOnScreen()) return;
     autoRefreshEndTime = Date.now() + mins * 60000;
     autoRefreshCountdownInterval = setInterval(updateCountdownLabel, 1000);
     autoRefreshTimer = setTimeout(function() {
@@ -190,7 +199,7 @@
     if (!fired.length) return;
     // Defer consume + toast until the user is actively viewing — otherwise
     // the one-shot alert would be consumed silently while the user is away.
-    if (!isActivelyViewed()) return;
+    if (!isOnScreen()) return;
     // Remove one-shot fired alerts; keep repeat alerts active
     var firedKeys = fired.map(function(f) { return f.sym + f.dir; });
     saveAlerts(alerts.filter(function(a) { return a.repeat || firedKeys.indexOf(a.sym + a.dir) < 0; }));
@@ -877,6 +886,431 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // the catalogue and the item market values are missing, so this is a no-op and
   // the hardcoded tables serve the first load.
   applyStockCatalogue();
+
+  // ============================================================
+  // PER-SYMBOL TORNSY HISTORY — FETCH LAYER ONLY
+  // ============================================================
+  // Two endpoints, one symbol per call. Shape VERIFIED 2026-08-25 against
+  // ~/.claude/Torn-API-fixtures/tornsy_per_symbol_20260825.md:
+  //   /api/{SYM}?interval=d1&limit=2000  -> 1956 rows, 5.36 years, 125 KB
+  //   /api/{SYM}?interval=h1&limit=200   -> 200 rows, 8.3 days, 13 KB
+  // The body is {"data": [[ts, open, high, low, close, total_shares], ...]},
+  // OLDEST FIRST, and nothing else: no status, no metadata, no symbol echo. So a
+  // response is only ever keyed by the symbol we asked for.
+  //
+  // Three traps, all of them silent:
+  //   ts is unix SECONDS, not ms.
+  //   open/high/low/close are STRINGS — parseFloat every one, reject 0/NaN.
+  //   `limit` is not a row count (2000 asked, 1956 returned: the daily series has
+  //   real holes), so a date is read off ts and NEVER derived from an index.
+  //
+  // This block fetches, derives, stores. It has NO consumer yet — nothing here
+  // feeds calcScore, a buy zone or an indicator. Its only outputs are the three
+  // readiness flags and one status string.
+  //
+  // The SERIES IS NEVER STORED: 125 KB x 35 symbols = 4.4 MB against a ~5 MB
+  // localStorage ceiling that TSA already degrades price history to stay under.
+  // Parse, derive, discard — d1 leaves a ~200 B summary, h1 leaves 200 closes.
+
+  var HIST_D1_MAX_AGE_MS = 86400 * 1000;   // daily candles move once a day
+  var HIST_H1_MAX_AGE_MS = 21600 * 1000;   // six-hourly, same gates as dossier
+  var HIST_TICK_MS       = 3000;           // warm-up cadence: one call per 3 s
+  var HIST_MIN_GAP_MS    = 2000;           // HARD FLOOR between calls
+  var HIST_MAX_IN_FLIGHT = 1;              // tornsy's own client is one-at-a-time
+  var HIST_ERR_BACKOFF_MS     = 3000;      // ordinary error: exponential from here
+  var HIST_ERR_BACKOFF_MAX_MS = 300000;
+  // Stand-down rungs in SECONDS, one probe call per rung. Copied from dossier's
+  // TornsyClient. We NEVER ramp faster than HIST_TICK_MS on a success streak:
+  // additive increase is the direction that trips a throttle, and tornsy
+  // publishes no limit, so there is no safe number to increase towards.
+  var HIST_THROTTLE_LADDER = [120, 300, 900, 1800];
+  var HIST_D1_LIMIT = 2000, HIST_H1_LIMIT = 200;
+  var HIST_H1_MIN_CLOSES = 35;             // MACD/RSI need this many points
+  var HIST_D1_MIN_ROWS   = 30;             // 30-day window
+  var HIST_D1_YEAR_ROWS  = 365;            // vs_year_ago + the year window
+  // The 17 intervals calcScore actually reads (h5/h10/d6 ride along in the
+  // batches but are never scored, so their absence is not a readiness failure).
+  var HIST_SCORE_INTERVALS = ["m30","h1","h2","h3","h4","h6","h8","h12","h16",
+                              "h20","d1","d2","d3","d4","d5","d7","w1"];
+
+  var HIST_LT_KEY    = "tsa_lt_context";
+  var HIST_LT_TS_KEY = "tsa_lt_context_ts";
+  var HIST_H1_KEY    = "tsa_h1_closes";
+  var HIST_H1_TS_KEY = "tsa_h1_closes_ts";
+  var HIST_BLOCK_KEY = "tsa_tornsy_blocked_until";
+  var HIST_STEP_KEY  = "tsa_tornsy_throttle_step";
+
+  function histLoadMap(key) {
+    try { return JSON.parse(lsGet(key, "{}")) || {}; } catch (e) { return {}; }
+  }
+  function histSaveMap(key, obj) { lsSet(key, JSON.stringify(obj)); }
+
+  var histLtStore = histLoadMap(HIST_LT_KEY);   // SYM -> long-term summary
+  var histLtTs    = histLoadMap(HIST_LT_TS_KEY); // SYM -> ms of last d1 fetch
+  var histH1Store = histLoadMap(HIST_H1_KEY);   // SYM -> {closes, stamps}
+  var histH1Ts    = histLoadMap(HIST_H1_TS_KEY); // SYM -> ms of last h1 fetch
+
+  function histNum(v) { var n = parseFloat(v); return isFinite(n) ? n : 0; }
+
+  // Rows exactly as long_term_context receives them in dossier (_fetch_daily):
+  // length-filtered only. The >0 filters live INSIDE the derivations, as they do
+  // there, so `days` counts the same rows on both sides of the port.
+  function histRawRows(data) {
+    if (!data || !Array.isArray(data.data)) return null;
+    return data.data.filter(function(r) { return Array.isArray(r) && r.length >= 5; });
+  }
+
+  function histNewestClose(rows) {
+    for (var i = rows.length - 1; i >= 0; i--) {
+      var c = histNum(rows[i][4]);
+      if (c > 0) return c;
+    }
+    return 0;
+  }
+
+  // Close from `days` CALENDAR days before the newest row, located by ts. Port of
+  // signals.py `_close_days_back`, including why it cannot be `closes[-days]`:
+  // the last element is today, so day N back is index -(N+1), AND tornsy's daily
+  // series has real holes, so N rows back is not N days back. Returns null when
+  // nothing sits within tolDays of the target rather than quietly substituting a
+  // row from another month.
+  function histCloseDaysBack(rows, days, tolDays) {
+    if (tolDays === undefined) tolDays = 7;
+    if (!rows || !rows.length) return null;
+    var usable = rows.filter(function(r) {
+      return r.length >= 5 && histNum(r[4]) > 0 && typeof r[0] === "number";
+    });
+    if (!usable.length) return null;
+    var target = usable[usable.length - 1][0] - days * 86400;
+    var best = usable[0], bestD = Math.abs(usable[0][0] - target);
+    for (var i = 1; i < usable.length; i++) {
+      var d = Math.abs(usable[i][0] - target);
+      if (d < bestD) { best = usable[i]; bestD = d; }
+    }
+    if (bestD > tolDays * 86400) return null;
+    return histNum(best[4]);
+  }
+
+  function histPctVs(price, ref) {
+    if (!ref || ref <= 0 || !price || price <= 0) return null;
+    return (price / ref - 1) * 100;
+  }
+
+  // Position in the last N ROWS' range. The window size is in ROWS, matching
+  // long_term_context.window(30) — the side that must not move, because the
+  // dossier zone result is backtested on it. Too short a series returns null.
+  function histWindow(rows, price, days) {
+    if (!rows || rows.length < days) return null;
+    var hi = 0, lo = 0, seenHi = false, seenLo = false;
+    for (var i = rows.length - days; i < rows.length; i++) {
+      var r = rows[i];
+      if (r.length < 5) continue;
+      var h = histNum(r[2]), l = histNum(r[3]);
+      if (h > 0 && (!seenHi || h > hi)) { hi = h; seenHi = true; }
+      if (l > 0 && (!seenLo || l < lo)) { lo = l; seenLo = true; }
+    }
+    if (!seenHi || !seenLo) return null;
+    var rng = hi - lo;
+    return { high: hi, low: lo,
+             position: rng > 0 ? ((price - lo) / rng * 100) : null };
+  }
+
+  // Port of signals.py `long_term_context` — same field names, same maths. The
+  // mirror shares the original's computation instead of re-deriving the numbers
+  // a second way. Deliberately NOT folded into calcScore: that function is a
+  // faithful port whose only purpose is to agree with dossier number for number,
+  // and feeding it inputs it never had would make the cross-check meaningless.
+  function histLongTermContext(price, rows) {
+    if (!rows || !rows.length || !(price > 0)) return null;
+    var ath = 0, atl = 0, seenHi = false, seenLo = false, seenClose = false;
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (r.length < 5) continue;
+      var h = histNum(r[2]), l = histNum(r[3]), c = histNum(r[4]);
+      if (h > 0 && (!seenHi || h > ath)) { ath = h; seenHi = true; }
+      if (l > 0 && (!seenLo || l < atl)) { atl = l; seenLo = true; }
+      if (c > 0) seenClose = true;
+    }
+    if (!seenHi || !seenLo || !seenClose) return null;
+    var span = ath - atl;
+    return {
+      days: rows.length,
+      first_ts: rows[0][0],
+      all_time_high: ath,
+      all_time_low: atl,
+      position_all_time: span > 0 ? ((price - atl) / span * 100) : null,
+      vs_year_ago: histPctVs(price, histCloseDaysBack(rows, 365)),
+      month:   histWindow(rows, price, 30),
+      quarter: histWindow(rows, price, 90),
+      year:    histWindow(rows, price, 365),
+      // The price every position above was measured against. Kept so a consumer
+      // can re-derive a position from high/low with a fresher price instead of
+      // reading a stale one as current — the basis has to be visible for that.
+      price: price
+    };
+  }
+
+  // h1: only the closes and their stamps survive — 200 floats, ~2 KB per symbol.
+  // Mirrors _fetch_candles' close>0 filter so closes and stamps line up index
+  // for index. total_shares is dropped: it is shares outstanding, not volume,
+  // and nothing here reads it.
+  function histH1Closes(rows) {
+    if (!rows) return null;
+    var closes = [], stamps = [];
+    for (var i = 0; i < rows.length; i++) {
+      var c = histNum(rows[i][4]);
+      if (c <= 0) continue;
+      closes.push(c);
+      stamps.push(rows[i][0]);
+    }
+    return closes.length ? { closes: closes, stamps: stamps } : null;
+  }
+
+  // -- rate discipline -------------------------------------------------------
+  // blocked_until is PERSISTED, unlike dossier's in-memory equivalent: dossier's
+  // process outlives a stand-down, a browser tab does not. Without this, a
+  // reload resets the stand-down and goes straight back to hammering an IP that
+  // was just blocked.
+  function histBlockedUntil() { return parseInt(lsGet(HIST_BLOCK_KEY, "0"), 10) || 0; }
+  function histThrottleStep() { return parseInt(lsGet(HIST_STEP_KEY, "0"), 10) || 0; }
+
+  var histInFlight = 0;
+  var histLastCallTs = 0;
+  var histBackoffUntil = 0;   // ordinary-error backoff; in memory on purpose
+  var histBackoffMs = 0;
+  var histD1Cursor = 0, histH1Cursor = 0;
+  var histTimer = null;
+
+  function histNoteThrottle(now) {
+    var step = histThrottleStep();
+    var rung = HIST_THROTTLE_LADDER[Math.min(step, HIST_THROTTLE_LADDER.length - 1)];
+    lsSet(HIST_BLOCK_KEY, String(now + rung * 1000));
+    lsSet(HIST_STEP_KEY, String(step + 1));
+    histRecomputeStatus(now);
+  }
+
+  function histNoteSuccess() {
+    lsSet(HIST_BLOCK_KEY, "0");
+    lsSet(HIST_STEP_KEY, "0");
+    histBackoffUntil = 0;
+    histBackoffMs = 0;
+  }
+
+  function histNoteError(now) {
+    histBackoffMs = histBackoffMs
+      ? Math.min(histBackoffMs * 2, HIST_ERR_BACKOFF_MAX_MS)
+      : HIST_ERR_BACKOFF_MS;
+    histBackoffUntil = now + histBackoffMs;
+  }
+
+  // A LiteSpeed throttle answers with an HTML page and can carry HTTP 200, so a
+  // 200 is not proof of data. 403/429, a content type that is not JSON, or a
+  // body opening with "<" all mean BLOCKED — never "empty series". Reading a
+  // block as empty data is what turns one stand-down into a retry storm.
+  function histIsThrottled(status, contentType, body) {
+    if (status === 403 || status === 429) return true;
+    var ct = String(contentType || "").toLowerCase();
+    if (ct && ct.indexOf("json") === -1) return true;
+    var b = String(body || "").replace(/^[\s\uFEFF]+/, "");
+    if (b.charAt(0) === "<") return true;
+    return false;
+  }
+
+  function histContentType(r) {
+    var h = (r && r.responseHeaders) || "";
+    var m = /^[ \t]*content-type[ \t]*:[ \t]*([^\r\n]+)/im.exec(h);
+    return m ? m[1] : "";
+  }
+
+  // The whole rate model in one predicate: one call in flight, never faster than
+  // the hard floor, nothing at all while a stand-down or a backoff is live, and
+  // nothing while the tab is not being looked at.
+  //
+  // Gated on isOnScreen(), not on focus: a page the user is looking at is not a
+  // background page, and PDA's webview never reports focus (see isOnScreen).
+  function histMayCall(now) {
+    if (histInFlight >= HIST_MAX_IN_FLIGHT) return false;
+    if (now < histBlockedUntil()) return false;
+    if (now < histBackoffUntil) return false;
+    if (now - histLastCallTs < HIST_MIN_GAP_MS) return false;
+    if (!isOnScreen()) return false;
+    return true;
+  }
+
+  // Next symbol whose cached entry is missing or past maxAge, round-robining
+  // from a per-store cursor so ordering can never starve a symbol. Port of
+  // signals.py `_next_stale`; returns the advanced cursor because JS has no
+  // setattr. The cursor advances at PICK time, so a symbol that keeps failing
+  // does not block the other 34.
+  function histNextStale(syms, tsStore, maxAge, now, cursor) {
+    if (!syms || !syms.length) return null;
+    for (var i = 0; i < syms.length; i++) {
+      var idx = (cursor + i) % syms.length;
+      var sym = syms[idx];
+      var t = tsStore[sym] || 0;
+      if (!t || (now - t) >= maxAge) {
+        return { sym: sym, cursor: (idx + 1) % syms.length, age: now - t };
+      }
+    }
+    return null;
+  }
+
+  // GET one series. Deliberately NOT fetchJSON: that retries three times on any
+  // 4xx, which against a throttle is three extra hits on an IP that just said
+  // stop, and it cannot see the status or content type a block is detected from.
+  function histFetch(sym, interval, limit, cb) {
+    var url = "https://tornsy.com/api/" + String(sym).toUpperCase() +
+              "?interval=" + interval + "&limit=" + limit;
+    var settled = false;
+    histInFlight++;
+    histLastCallTs = Date.now();
+    function finish(data, err) {
+      if (settled) return;
+      settled = true;
+      histInFlight--;
+      cb(data, err);
+    }
+    try {
+      gmXhr({
+        method: "GET", url: url,
+        // Identifies the traffic to tornsy instead of leaving it anonymous. Only
+        // GM_xmlhttpRequest honours a custom UA; PDA_httpGet and native fetch
+        // send the browser's own. Known limitation, not a blocker.
+        headers: { "User-Agent": "TornStockAnalyzer/" + TSA_VERSION + " (userscript)" },
+        onload: function(r) {
+          var body = (r && r.responseText) || "";
+          if (histIsThrottled(r && r.status, histContentType(r), body)) {
+            histNoteThrottle(Date.now());
+            finish(null, "throttled");
+            return;
+          }
+          // Declared WITHOUT an initialiser so the catch's assignment is the thing
+          // that defines it: `var data = null` first would make `data = null` in the
+          // catch a no-op, which is exactly what ESLint's no-useless-assignment flags.
+          var data;
+          try { data = JSON.parse(body); } catch (e) { data = null; }
+          if (!data) { histNoteError(Date.now()); finish(null, "parse"); return; }
+          histNoteSuccess();
+          finish(data, null);
+        },
+        onerror: function() {
+          histNoteError(Date.now());
+          finish(null, "network");
+        }
+      });
+    } catch (e) {
+      histNoteError(Date.now());
+      finish(null, "throw");
+    }
+  }
+
+  function histFetchD1(sym) {
+    var s = String(sym).toUpperCase();
+    histFetch(s, "d1", HIST_D1_LIMIT, function(data) {
+      if (!data) { histRecomputeStatus(Date.now()); return; }
+      var rows = histRawRows(data);
+      // No rows: leave the timestamp alone so the round-robin comes back to it,
+      // instead of recording an empty summary as if it were a good fetch.
+      if (!rows || !rows.length) return;
+      var live = histNum(lastLoadPrices[s]);
+      var price = live > 0 ? live : histNewestClose(rows);
+      var lt = histLongTermContext(price, rows);
+      if (!lt) return;
+      histLtStore[s] = lt;
+      histLtTs[s] = Date.now();
+      histSaveMap(HIST_LT_KEY, histLtStore);
+      histSaveMap(HIST_LT_TS_KEY, histLtTs);
+      histRecomputeStatus(Date.now());
+      // `rows` dies here. The 125 KB series is never written to localStorage.
+    });
+  }
+
+  function histFetchH1(sym) {
+    var s = String(sym).toUpperCase();
+    histFetch(s, "h1", HIST_H1_LIMIT, function(data) {
+      if (!data) { histRecomputeStatus(Date.now()); return; }
+      var parsed = histH1Closes(histRawRows(data));
+      if (!parsed) return;
+      histH1Store[s] = parsed;
+      histH1Ts[s] = Date.now();
+      histSaveMap(HIST_H1_KEY, histH1Store);
+      histSaveMap(HIST_H1_TS_KEY, histH1Ts);
+      histRecomputeStatus(Date.now());
+    });
+  }
+
+  // -- readiness -------------------------------------------------------------
+  // Every flag is PER SYMBOL. A symbol with a full basis is ready the moment it
+  // has one; it never waits for the other 34. That is the whole point of a
+  // progressive warm-up, and a global gate would throw it away.
+  function histRowOk(row) {
+    if (!row || !row.interval) return false;
+    for (var i = 0; i < HIST_SCORE_INTERVALS.length; i++) {
+      var iv = row.interval[HIST_SCORE_INTERVALS[i]];
+      if (!iv || !(histNum(iv.price) > 0)) return false;
+    }
+    return true;
+  }
+
+  function histReadiness(sym, row) {
+    var s = String(sym || "").toUpperCase();
+    var h1 = histH1Store[s];
+    var lt = histLtStore[s];
+    return {
+      row_ok: histRowOk(row),
+      h1_ok: !!(h1 && h1.closes && h1.closes.length >= HIST_H1_MIN_CLOSES),
+      d1_ok: !!(lt && lt.days >= HIST_D1_MIN_ROWS),
+      // The year window and vs_year_ago need a full year of rows; d1_ok at 30 is
+      // enough for the month window. Two thresholds, so a two-month-old symbol
+      // is not silently shown a year figure it does not have.
+      year_ok: !!(lt && lt.days >= HIST_D1_YEAR_ROWS)
+    };
+  }
+
+  // One string, in the shape of benefitTableStatus: it says why the panel shows
+  // what it shows, and nothing more.
+  var historyStatus = "history 0/" + STOCKS_LIST.length;
+  function histRecomputeStatus(now) {
+    var blocked = histBlockedUntil();
+    if (blocked > now) {
+      var mins = Math.ceil((blocked - now) / 60000);
+      historyStatus = "tornsy throttled, retry in " + mins + "m";
+      return historyStatus;
+    }
+    var ready = 0;
+    for (var i = 0; i < STOCKS_LIST.length; i++) {
+      var f = histReadiness(STOCKS_LIST[i], null);
+      if (f.d1_ok && f.h1_ok) ready++;
+    }
+    historyStatus = "history " + ready + "/" + STOCKS_LIST.length +
+                    (ready >= STOCKS_LIST.length ? "" : " warming");
+    return historyStatus;
+  }
+
+  // One symbol per tick, oldest first across BOTH stores, so d1 and h1 interleave
+  // instead of 35 d1 calls having to land before the first h1 does.
+  function histTick(now) {
+    if (!histMayCall(now)) return null;
+    var syms = STOCKS_LIST.map(function(s) { return s.toUpperCase(); });
+    var d1 = histNextStale(syms, histLtTs, HIST_D1_MAX_AGE_MS, now, histD1Cursor);
+    var h1 = histNextStale(syms, histH1Ts, HIST_H1_MAX_AGE_MS, now, histH1Cursor);
+    if (!d1 && !h1) return null;
+    // Ties go to d1: the long-term summary is the half nothing else substitutes.
+    if (d1 && (!h1 || d1.age >= h1.age)) {
+      histD1Cursor = d1.cursor;
+      histFetchD1(d1.sym);
+      return { sym: d1.sym, interval: "d1" };
+    }
+    histH1Cursor = h1.cursor;
+    histFetchH1(h1.sym);
+    return { sym: h1.sym, interval: "h1" };
+  }
+
+  function histStart() {
+    if (histTimer) return;
+    histRecomputeStatus(Date.now());
+    histTimer = setInterval(function() { histTick(Date.now()); }, HIST_TICK_MS);
+  }
 
   function fmRoi(n) {
     if (n >= 1e9) return "$" + (n/1e9).toFixed(2) + "B";
@@ -3905,7 +4339,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var histLabel = histSyms.length > 0 ? " · " + histSyms.length + " stocks · " + maxHistHours + "h hist" : "";
       html += "<div style=\"padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid " + d.divider + ";background:" + d.bg + "\">" +
         "<span style=\"font-size:10px;color:" + d.muted + "\">Updated: " + new Date(lastLoadTs || Date.now()).toLocaleTimeString("en-GB") + autoRefreshLabel + "<span id='tsa-countdown'></span></span>" +
-        "<span style=\"font-size:10px;color:" + d.muted + "\">Storage: " + getTsaStorageSize() + histLabel + "</span>" +
+        "<span style=\"font-size:10px;color:" + d.muted + "\">Storage: " + getTsaStorageSize() + histLabel + " \u00b7 " + historyStatus + "</span>" +
         "</div>" +
         "<button id='tsa-scroll-top' title='Scroll to top'>↑</button>";
       // (scheduleAutoRefresh deliberately NOT called here: a cached re-render
@@ -6994,6 +7428,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         })
         .catch(function() {});
     })();
+    // Per-symbol history warm-up. Independent of loadData: it is its own paced
+    // round-robin, and every tick re-checks visibility and the stand-down before
+    // it spends a call.
+    histStart();
   }
 
   if (document.readyState === "loading") {
@@ -7004,9 +7442,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     createUIOnce();
   }
 
-  // Resume auto-refresh when the tab becomes actively viewed again
+  // Resume auto-refresh when the page is on screen again. Same gate as the
+  // scheduling side — a resume that waits for focus would never fire in PDA.
   function resumeAutoRefreshIfActive() {
-    if (!isActivelyViewed()) return;
+    if (!isOnScreen()) return;
     if (!_firstLoadKicked) { _firstLoadKicked = true; loadData(); return; } // first full load (e.g. tab opened in background)
     if (getAutoRefreshInterval() <= 0) return;
     if (autoRefreshTimer) return; // already scheduled
