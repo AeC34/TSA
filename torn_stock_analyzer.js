@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.45.0
+// @version      2.46.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -912,6 +912,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // localStorage ceiling that TSA already degrades price history to stay under.
   // Parse, derive, discard — d1 leaves a ~200 B summary, h1 leaves 200 closes.
 
+  // The band, defined HERE because this is where it is measured. DIP_MAX_POS below
+  // reads this value instead of repeating the number — the streak and the position
+  // must always judge the same band, and two literals would eventually disagree.
+  var HIST_BAND_PCT = 10;
   var HIST_D1_MAX_AGE_MS = 86400 * 1000;   // daily candles move once a day
   var HIST_H1_MAX_AGE_MS = 21600 * 1000;   // six-hourly, same gates as dossier
   var HIST_TICK_MS       = 3000;           // warm-up cadence: one call per 3 s
@@ -1015,11 +1019,61 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
              position: rng > 0 ? ((price - lo) / rng * 100) : null };
   }
 
+
   // Port of signals.py `long_term_context` — same field names, same maths. The
   // mirror shares the original's computation instead of re-deriving the numbers
   // a second way. Deliberately NOT folded into calcScore: that function is a
   // faithful port whose only purpose is to agree with dossier number for number,
   // and feeding it inputs it never had would make the cross-check meaningless.
+  // CONSECUTIVE DAYS CLOSED IN THE BOTTOM `threshold`% OF THE OWN TRAILING RANGE —
+  // "how long has this been cheap". Port of the reference implementation's
+  // band_streak, and the reason it can exist here at all is that `rows` is in hand
+  // at derive time: only the STORAGE of the series is given up, not the access.
+  // The result is one integer in the ~200 B summary, so it costs no space and no
+  // extra call.
+  //
+  // 🪤 The window is 30 ROWS, not 31 — `rows.slice(i - 29, i + 1)` — so it measures
+  // the same interval as the 30-day window in the summary. When the two disagreed,
+  // a stock could sit in the zone while its streak read 0, showing WAIT where BUY
+  // belonged (136 of 68,198 day-symbols in the reference measurement).
+  //
+  // 🪤 Judged on the CLOSE, never on the live price. A past day only ever had a
+  // close to be judged on; mixing the two makes the streak mean different things at
+  // its two ends. 0 when the newest close sits outside the band, which the UI reads
+  // as "new" — the honest gap between a price that moved today and a finished day.
+  function histBandStreak(rows, threshold, lookback) {
+    var th = (threshold === undefined) ? HIST_BAND_PCT : threshold;
+    var lb = (lookback === undefined) ? 30 : lookback;
+    var back = lb - 1;
+    if (!rows || rows.length < lb) return 0;
+    var streak = 0;
+    for (var i = rows.length - 1; i >= back; i--) {
+      var row = rows[i];
+      // A short row must break, not throw: a raise here would drop the whole stock.
+      if (!row || row.length < 5) break;
+      var close = histNum(row[4]);
+      // Highs and lows are tracked with SEPARATE seen-flags, exactly as the Python
+      // builds `his` and `los` as two independently >0-filtered lists. One shared
+      // flag is a silent defect: a row with a high but a zero low would set the
+      // flag with `lo` still 0, and every later min() against 0 keeps it there —
+      // the position then measures against a low of zero. `histRawRows` filters on
+      // length only, so a zero low is reachable, not hypothetical.
+      var hi = 0, lo = 0, seenHi = false, seenLo = false;
+      for (var j = i - back; j <= i; j++) {
+        var w = rows[j];
+        if (!w || w.length < 5) continue;
+        var h = histNum(w[2]), l = histNum(w[3]);
+        if (h > 0 && (!seenHi || h > hi)) { hi = h; seenHi = true; }
+        if (l > 0 && (!seenLo || l < lo)) { lo = l; seenLo = true; }
+      }
+      // Python: `if not close or not his or not los: break`, then `if hi <= lo`.
+      if (!(close > 0) || !seenHi || !seenLo || !(hi > lo)) break;
+      if ((close - lo) / (hi - lo) * 100 > th) break;
+      streak++;
+    }
+    return streak;
+  }
+
   function histLongTermContext(price, rows) {
     if (!rows || !rows.length || !(price > 0)) return null;
     var ath = 0, atl = 0, seenHi = false, seenLo = false, seenClose = false;
@@ -1041,6 +1095,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       position_all_time: span > 0 ? ((price - atl) / span * 100) : null,
       vs_year_ago: histPctVs(price, histCloseDaysBack(rows, 365)),
       month:   histWindow(rows, price, 30),
+      // The buy zone's second gate, measured on the same band and the same 30-row
+      // window as `month` above — HIST_BAND_PCT and HIST_D1_MIN_ROWS are passed
+      // explicitly so the two halves of one signal cannot drift apart.
+      band_days: histBandStreak(rows, HIST_BAND_PCT, HIST_D1_MIN_ROWS),
       quarter: histWindow(rows, price, 90),
       year:    histWindow(rows, price, 365),
       // The price every position above was measured against. Kept so a consumer
@@ -1310,6 +1368,286 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (histTimer) return;
     histRecomputeStatus(Date.now());
     histTimer = setInterval(function() { histTick(Date.now()); }, HIST_TICK_MS);
+  }
+
+  // ============================================================
+  // BUY ZONE — ITS OWN SECTION, WITH ITS OWN FORWARD MEASUREMENT
+  // ============================================================
+  // The rule: buy when the price sits in the bottom DIP_MAX_POS% of the stock's
+  // own 30-day high/low range, hold DIP_HOLD_DAYS days, exit at +DIP_SELL_TARGET%.
+  //
+  // The constants are COPIED, not invented — VERIFIED 2026-08-25 against the
+  // dossier's frontend/src/tabs/Signals.tsx:80, 81, 93, 104. Everything they
+  // claim rests on ONE backtest that has never been validated FORWARD. So this
+  // is deliberately not a primary recommendation: it sits BESIDE the Top-5
+  // score, never inside it, and it never touches calcScore or its indicators.
+  //
+  // What is new here is the honest half. TSA logs every time the zone fires and
+  // scores those calls on this owner's own book, so the hit rate on display is
+  // measured here rather than imported from a study.
+  //
+  // DIP_RIPE_DAYS IS applied. histBandStreak computes the streak while the daily
+  // series is still in hand at derive time and keeps it as one integer in the
+  // summary: step 4a gives up STORING the series, not reading it. Deriving the
+  // streak from the 8-day h1 window would have been a different measurement wearing
+  // the same name — that is the version that was rejected, not this one. Only BUY
+  // calls are logged for scoring, because BUY is what the section recommends.
+  var DIP_MAX_POS     = HIST_BAND_PCT;  // same band histBandStreak measures
+  var DIP_HOLD_DAYS   = 7;     // hold horizon, and the horizon calls are scored on
+  var DIP_RIPE_DAYS   = 3;     // days settled in the band before BUY, not just WAIT
+  var DIP_SELL_TARGET = 1.0;   // +1.0% net is what a call has to reach to count
+
+  var DIP_MIN_N        = 20;                          // below this: never a percentage
+  var DIP_HOLD_MS      = DIP_HOLD_DAYS * 86400000;
+  var DIP_PX_TOL_MS    = 2 * 86400000;                // daily cadence => +/-2d slack
+  var DIP_CALLS_MAX    = 200;                         // rolling cap, both directions
+  var DIP_CALLS_MAX_MS = 180 * 86400000;
+  var DIP_PX_PER_SYM   = 10;                          // ~10 daily points per symbol
+  var DIP_PX_MAX_MS    = (DIP_HOLD_DAYS + 7) * 86400000;
+
+  var DIP_CALLS_KEY = "tsa_dip_calls";
+  var DIP_PX_KEY    = "tsa_dip_px";
+
+  var dipCalls = (function () {
+    try {
+      var a = JSON.parse(lsGet(DIP_CALLS_KEY, "[]"));
+      return Array.isArray(a) ? a : [];
+    } catch (e) { return []; }
+  })();
+  // SYM -> { t: stamp of the d1 fetch last recorded, s: [[ts, price], ...] }
+  var dipPx = histLoadMap(DIP_PX_KEY);
+
+  function dipSaveCalls() { lsSet(DIP_CALLS_KEY, JSON.stringify(dipCalls)); }
+  function dipSavePx()    { histSaveMap(DIP_PX_KEY, dipPx); }
+  function dipRound(n, dp) { var f = Math.pow(10, dp); return Math.round(n * f) / f; }
+
+  // The position, RE-DERIVED against the live price instead of read off the
+  // stored summary. long_term_context keeps `price` precisely so a consumer can
+  // do this: the summary refreshes at most once a day, so its own `position` can
+  // be 24 h stale, and a stale position presented as current is the defect this
+  // avoids. high/low move once a day; the price does not.
+  //
+  // Gated PER SYMBOL on d1_ok, never globally. A symbol without 30 daily rows
+  // returns null and is reported as waiting — never as a half number.
+  function dipZone(sym) {
+    var s = String(sym || "").toUpperCase();
+    if (!histReadiness(s, null).d1_ok) return null;
+    var lt = histLtStore[s];
+    var m = lt && lt.month;
+    // A flat 30 days has no range to be at the bottom of; histWindow already
+    // returns position null there, and so must this.
+    if (!m || !(m.high > 0) || !(m.low > 0) || !(m.high > m.low)) return null;
+    var px = histNum(lastLoadPrices[s]) || histNum(lt.price);
+    if (!(px > 0)) return null;
+    return { pos: (px - m.low) / (m.high - m.low) * 100,
+             price: px, high: m.high, low: m.low,
+             // 0 on a summary derived before band_days existed, which reads as
+             // "not settled yet" — the cautious direction.
+             bandDays: histNum(lt.band_days) || 0 };
+  }
+
+  // One price point per D1 REFRESH, keyed on step 4a's own fetch stamp. This is
+  // what makes the measurement's second leg honest: the series advances on the
+  // daily-candle cadence, NOT on how often the browser happened to be open. The
+  // price archive TSA already keeps is exactly the biased sample this replaces —
+  // it only holds the moments a tab was in front of someone.
+  //
+  // The value is lt.price: the basis the stored positions were measured against,
+  // i.e. the live price at the moment the d1 series was parsed, falling back to
+  // the newest d1 close when no live price had been loaded.
+  //
+  // Appends only. Trimming is dipTrimPx's job and runs after dipSettle.
+  function dipNotePrice(sym, now) {
+    var s = String(sym || "").toUpperCase();
+    var stamp = histLtTs[s] || 0;
+    var lt = histLtStore[s];
+    var px = lt ? histNum(lt.price) : 0;
+    if (!stamp || !(px > 0)) return false;
+    var e = dipPx[s];
+    if (!e || !Array.isArray(e.s)) { e = { t: 0, s: [] }; dipPx[s] = e; }
+    if (e.t === stamp) return false;   // same d1 fetch, already recorded
+    e.t = stamp;
+    e.s.push([stamp, dipRound(px, 2)]);
+    dipSavePx();
+    return true;
+  }
+
+  // COLLAPSE: one call per symbol per horizon, and it is the FIRST one. A zone
+  // that simply persists for three days is one signal, not three — counting it
+  // three times is precisely what makes a small sample look stronger than it is.
+  // Returns the record when a call was opened, null when it collapsed into a call
+  // that is still inside its horizon.
+  function dipNoteCall(sym, pos, price, now) {
+    var s = String(sym || "").toUpperCase();
+    if (!(price > 0)) return null;
+    for (var i = dipCalls.length - 1; i >= 0; i--) {
+      var c = dipCalls[i];
+      if (c.sym !== s) continue;
+      // dipCalls is append-ordered, so the first match walking backwards is this
+      // symbol's newest call. No older one can be inside the horizon if it is not.
+      if (now - c.ts < DIP_HOLD_MS) return null;
+      break;
+    }
+    return dipPushCall(s, pos, price, now);
+  }
+
+  function dipPushCall(sym, pos, price, now) {
+    var rec = { sym: sym, ts: now, price: dipRound(price, 2), pos: dipRound(pos, 1) };
+    dipCalls.push(rec);
+    dipCalls = dipCalls.filter(function (c) { return now - c.ts <= DIP_CALLS_MAX_MS; });
+    if (dipCalls.length > DIP_CALLS_MAX) {
+      dipCalls = dipCalls.slice(dipCalls.length - DIP_CALLS_MAX);
+    }
+    dipSaveCalls();
+    return rec;
+  }
+
+  // Nearest journal point to targetTs, within tolerance. Nearest rather than
+  // first-after: the journal is daily, so an exact horizon match is rare, and
+  // substituting a point from another week would be far worse than the +/-2 d
+  // slack. The lag actually used is frozen onto the call so it stays auditable.
+  function dipPriceAt(sym, targetTs, tolMs) {
+    var e = dipPx[String(sym || "").toUpperCase()];
+    if (!e || !Array.isArray(e.s) || !e.s.length) return null;
+    var best = null, bestD = Infinity;
+    for (var i = 0; i < e.s.length; i++) {
+      var d = Math.abs(e.s[i][0] - targetTs);
+      if (d < bestD) { bestD = d; best = e.s[i]; }
+    }
+    if (!best || bestD > tolMs) return null;
+    return { px: best[1], ts: best[0] };
+  }
+
+  // A call is SCORED ONCE and the result frozen onto the record. The journal is a
+  // rolling 14-day window, so a call left unscored would silently become
+  // unscoreable — freezing is what lets a 180-day sample survive without keeping
+  // 180 days of prices.
+  function dipSettle(now) {
+    var changed = false;
+    for (var i = 0; i < dipCalls.length; i++) {
+      var c = dipCalls[i];
+      if (c.px !== undefined) continue;
+      var due = c.ts + DIP_HOLD_MS;
+      if (now < due) continue;                       // horizon not FULLY expired yet
+      var hit = dipPriceAt(c.sym, due, DIP_PX_TOL_MS);
+      if (!hit) continue;                            // no daily price to score it on
+      c.px = hit.px;
+      c.pd = dipRound((hit.ts - c.ts) / 86400000, 1);
+      changed = true;
+    }
+    if (changed) dipSaveCalls();
+    return changed;
+  }
+
+  // Runs AFTER dipSettle, never before: the trim is what turns an unscored call
+  // into an unscoreable one, so settling has to get first look at the points the
+  // trim is about to drop.
+  function dipTrimPx(now) {
+    var changed = false;
+    Object.keys(dipPx).forEach(function (s) {
+      var e = dipPx[s];
+      if (!e || !Array.isArray(e.s)) return;
+      var keep = e.s.filter(function (r) { return now - r[0] <= DIP_PX_MAX_MS; });
+      if (keep.length > DIP_PX_PER_SYM) keep = keep.slice(keep.length - DIP_PX_PER_SYM);
+      if (keep.length !== e.s.length) { e.s = keep; changed = true; }
+    });
+    if (changed) dipSavePx();
+    return changed;
+  }
+
+  // The measurement. Three rules keep it honest rather than flattering:
+  //   a call counts only once its horizon is FULLY expired — until then it is
+  //   `pending`, so an empty table reads as "not yet" and not as "nothing worked";
+  //   a call whose horizon expired with no daily price to score it against is
+  //   `nodata`, shown, never quietly dropped;
+  //   and NO percentage exists below DIP_MIN_N. 100% on n=2 is worse than no
+  //   number at all, so under the floor only the n is reported.
+  function dipMeasure(now) {
+    var nets = [], pending = 0, nodata = 0, wins = 0;
+    for (var i = 0; i < dipCalls.length; i++) {
+      var c = dipCalls[i];
+      var due = c.ts + DIP_HOLD_MS;
+      if (c.px === undefined) {
+        if (now > due + DIP_PX_TOL_MS) nodata++; else pending++;
+        continue;
+      }
+      var net = (c.px / c.price - 1) * 100;
+      nets.push(net);
+      if (net >= DIP_SELL_TARGET) wins++;
+    }
+    var n = nets.length;
+    var ready = n >= DIP_MIN_N;
+    nets.sort(function (a, b) { return a - b; });
+    var median = n ? (n % 2 ? nets[(n - 1) / 2] : (nets[n / 2 - 1] + nets[n / 2]) / 2) : null;
+    return {
+      n: n, wins: wins, pending: pending, nodata: nodata, ready: ready,
+      hitRate: ready ? (wins / n * 100) : null,
+      medianPct: ready ? median : null
+    };
+  }
+
+  // One pass over every symbol: journal the daily price, decide the zone, log the
+  // call. `log` is false on a cached re-render — the same discipline recordSignals
+  // already applies, because a cached render's price can be minutes stale and a
+  // measurement built on stale entry prices is not a measurement.
+  // The SELL side of the same rule. Every holding with a tradeable SWING gets a
+  // verdict; pure benefit blocks are excluded, because they are held for the perk
+  // and a price target is meaningless there — the same reason calcScore's own
+  // PROFIT badge skips them.
+  //
+  // The number is calcSwingNetPct's, i.e. the SAME one calcScore's badge uses. The
+  // section does not recompute it: a displayed target must come from the formula
+  // that makes the decision, or the two disagree on screen and one of them is
+  // lying. It is the swing avg, never the blended one — a benefit block underneath
+  // can make a whole-position figure read +9% on a swing that is down 56%.
+  //
+  // The threshold is DIP_SELL_TARGET (+1.0%), this rule's own exit, NOT the user's
+  // Sell setting that drives the PROFIT badge. Two different thresholds can be on
+  // screen at once, so the row says which one it is.
+  function dipSells(ownedMap) {
+    var out = [];
+    if (!ownedMap) return out;
+    Object.keys(ownedMap).forEach(function (sym) {
+      var s = String(sym).toUpperCase();
+      var o = ownedMap[sym];
+      if (!o || !(o.swing_shares > 0)) return;
+      var net = calcSwingNetPct(o, histNum(lastLoadPrices[s]));
+      if (net === null) return;
+      out.push({ sym: s, net: net, shares: o.swing_shares,
+                 verdict: net >= DIP_SELL_TARGET ? "SELL" : "HOLD" });
+    });
+    out.sort(function (a, b) { return b.net - a.net; });
+    return out;
+  }
+
+  function dipScan(now, log, ownedMap) {
+    var rows = [], waiting = 0;
+    for (var i = 0; i < STOCKS_LIST.length; i++) {
+      var sym = String(STOCKS_LIST[i]).toUpperCase();
+      var z = dipZone(sym);
+      if (!z) { waiting++; continue; }
+      if (log) dipNotePrice(sym, now);
+      if (z.pos <= DIP_MAX_POS) {
+        // BUY needs BOTH gates: in the band AND settled there. In the band but only
+        // just fallen in is WAIT — the same trade measured better a few days later
+        // (73.9% from day 3 against 66.2% from day 1 in the reference data), so
+        // printing BUY on day 1 would recommend the worse half of the rule.
+        var ripe = z.bandDays >= DIP_RIPE_DAYS;
+        rows.push({ sym: sym, pos: z.pos, price: z.price, high: z.high, low: z.low,
+                    bandDays: z.bandDays, verdict: ripe ? "BUY" : "WAIT",
+                    fresh: (log && ripe) ? !!dipNoteCall(sym, z.pos, z.price, now) : false });
+      }
+    }
+    if (log) { dipSettle(now); dipTrimPx(now); }
+    // ACTION order first, price position second. Sorting by position alone puts the
+    // one row you are meant to act on at the BOTTOM, underneath rows that say WAIT,
+    // and the order then looks arbitrary to a reader who cannot see the sort key.
+    rows.sort(function (a, b) {
+      var ra = a.verdict === "BUY" ? 0 : 1, rb = b.verdict === "BUY" ? 0 : 1;
+      return ra !== rb ? ra - rb : a.pos - b.pos;
+    });
+    return { rows: rows, waiting: waiting, sells: dipSells(ownedMap),
+             stats: dipMeasure(now) };
   }
 
   function fmRoi(n) {
@@ -3102,6 +3440,24 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return swCount > 0 ? swCost / swCount : null;
   }
 
+  // Net % on the SWING portion only, after Torn's 0.1% sale fee.
+  //
+  // Extracted from calcScore so the buy zone's SELL verdict and calcScore's
+  // PROFIT / STOP LOSS badge are the SAME number, not two formulas that happen to
+  // agree today. It must be the SWING avg and never the blended one: a benefit
+  // block underneath can make a whole-position figure read +9% on a swing that is
+  // actually down 56%, which is exactly the defect the dossier hit and fixed.
+  //
+  // Returns null when there is no swing to talk about — a pure benefit block is
+  // held for the perk, so a price target is meaningless there.
+  function calcSwingNetPct(owned, p_live) {
+    if (!owned || !(owned.swing_shares > 0) || !(p_live > 0)) return null;
+    var swingAvg = calcSwingAvgPrice(owned, owned.transactions, owned.avg_price);
+    var base = (swingAvg !== null) ? swingAvg : owned.avg_price;
+    if (!(base > 0)) return null;
+    return (p_live * 0.999 - base) / base * 100;
+  }
+
   function calcScore(stock, raw, ownedMap, priceHistory) {
     var s = stock.toUpperCase();
     var r = raw ? raw.find(function(x) { return x.stock === s; }) : null;
@@ -3158,15 +3514,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         : null;
     }
 
-    if (owned && owned.swing_shares > 0 && p_live > 0) {
-      var swingAvg = calcSwingAvgPrice(owned, owned.transactions, owned.avg_price);
-      var sellBaseAvg = (swingAvg !== null) ? swingAvg : owned.avg_price;
-      if (sellBaseAvg > 0) {
-        var swingNetPct = (p_live * 0.999 - sellBaseAvg) / sellBaseAvg * 100;
-        var stopLoss = getStopLoss();
-        if (swingNetPct >= getProfitTarget())                        sellSignal = "PROFIT";
-        else if (stopLoss > 0 && swingNetPct <= -stopLoss)           sellSignal = "STOP LOSS";
-      }
+    var swingNetPct = calcSwingNetPct(owned, p_live);
+    if (swingNetPct !== null) {
+      var stopLoss = getStopLoss();
+      if (swingNetPct >= getProfitTarget())                        sellSignal = "PROFIT";
+      else if (stopLoss > 0 && swingNetPct <= -stopLoss)           sellSignal = "STOP LOSS";
     }
 
     // Pre-compute weekly peak (used by both the hard filter and indicator 1).
@@ -4068,6 +4420,111 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Buy signals</div>" +
           "<div style=\"color:" + d.muted + ";font-size:11px;padding:8px 0\">No signals right now</div></div>";
       }
+
+      // BUY ZONE — its own section, BESIDE the score and never folded into it.
+      // See the constants block for why: the rule's numbers come from a backtest
+      // that was never validated forward, so it gets its own frame and its own
+      // measured track record instead of a seat in the ranking.
+      //
+      // `!fromCache` is the logging gate, matching recordSignals above: a cached
+      // re-render reuses a price that may be minutes old, and a call logged at a
+      // stale entry price would poison the very measurement this section exists
+      // for. The collapse rule would dedupe it anyway; this is the honest reason.
+      (function () {
+        var dipNow = Date.now();
+        var dip = dipScan(dipNow, !fromCache, ownedMap);
+        var dst = dip.stats;
+        var rateHtml;
+        if (dst.ready) {
+          var rateCol = dst.hitRate >= 50 ? d.green : d.red;
+          rateHtml = "<span style=\"color:" + rateCol + ";font-weight:bold\">" +
+            dst.hitRate.toFixed(0) + "%</span> reached +" + DIP_SELL_TARGET.toFixed(1) +
+            "% within " + DIP_HOLD_DAYS + "d · median " +
+            (dst.medianPct >= 0 ? "+" : "") + dst.medianPct.toFixed(2) +
+            "% · n=" + dst.n;
+        } else {
+          // Under the floor there is no percentage to show. Printing one would be
+          // the single most misleading thing this section could do.
+          rateHtml = "n=" + dst.n + ", too early (needs " + DIP_MIN_N + ")";
+        }
+
+        html += "<div style=\"padding:10px 14px 6px;background:" + d.bg + "\">" +
+          "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted +
+          ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Buy zone" +
+          (dip.rows.length ? " (" + dip.rows.length + ")" : "") + "</div>";
+
+        if (dip.rows.length) {
+          dip.rows.forEach(function (r) {
+            html += "<div style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;margin-bottom:5px;background:" + d.rowBuy + ";border:1px solid " + d.rowBuyBorder + "\">" +
+              "<div style=\"display:flex;flex-direction:column;gap:2px\">" +
+              // The ACTION leads. A measurement is not an instruction: the dossier
+              // shipped "3 days · ready" and a user reported not knowing what it
+              // meant, so the verb comes first and the evidence sits under it.
+              "<span style=\"font-size:13px;font-weight:bold;color:" +
+              (r.verdict === "BUY" ? d.green : d.muted) + ";" + ms + "\">" +
+              r.verdict + " <span style=\"font-size:11px;color:" + d.muted +
+              "\">" + r.sym + "</span></span>" +
+              "<span style=\"font-size:10px;color:" + d.muted + "\">" +
+              (r.verdict === "BUY"
+                ? r.bandDays + "d settled in the band · "
+                : "only " + r.bandDays + "d in the band, " + DIP_RIPE_DAYS + " wanted · ") +
+              "30d range $" +
+              r.low.toFixed(2) + " – $" + r.high.toFixed(2) + " · now $" + r.price.toFixed(2) + "</span>" +
+              "</div><div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:2px\">" +
+              "<span style=\"font-size:14px;font-weight:bold;color:" + d.green + ";" + ms + "\">" + r.pos.toFixed(1) + "%</span>" +
+              "<span style=\"font-size:9px;color:" + d.muted + "\">into its range</span>" +
+              "</div></div>";
+          });
+        } else {
+          html += "<div style=\"color:" + d.muted + ";font-size:11px;padding:8px 0\">" +
+            "Nothing in the bottom " + DIP_MAX_POS + "% of its own 30-day range</div>";
+        }
+
+        // SELL / HOLD — the owner side of the same rule. Only rendered when there
+        // is a swing to talk about, so a user who holds nothing tradeable never
+        // sees an empty frame.
+        if (dip.sells.length) {
+          html += "<div style=\"font-size:9px;letter-spacing:0.12em;color:" + d.muted +
+            ";text-transform:uppercase;margin:8px 0 6px;font-weight:bold\">" +
+            "Your swings · +" + DIP_SELL_TARGET.toFixed(1) + "% target</div>";
+          dip.sells.forEach(function (r) {
+            var isSell = r.verdict === "SELL";
+            html += "<div style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;margin-bottom:5px;background:" +
+              (isDark2 ? "rgba(255,193,7,0.07)" : "#fffbeb") + ";border:1px solid " +
+              (isDark2 ? "rgba(255,193,7,0.25)" : "#fde68a") + "\">" +
+              "<div style=\"display:flex;flex-direction:column;gap:2px\">" +
+              "<span style=\"font-size:13px;font-weight:bold;color:" +
+              (isSell ? d.yellow : d.muted) + ";" + ms + "\">" + r.verdict +
+              " <span style=\"font-size:11px;color:" + d.muted + "\">" + r.sym +
+              "</span></span>" +
+              "<span style=\"font-size:10px;color:" + d.muted + "\">" +
+              r.shares.toLocaleString("en-US") + " swing shares · this rule's +" +
+              DIP_SELL_TARGET.toFixed(1) + "% target, not your Sell setting</span>" +
+              "</div><div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:2px\">" +
+              "<span style=\"font-size:14px;font-weight:bold;color:" +
+              (r.net >= 0 ? d.green : d.red) + ";" + ms + "\">" +
+              (r.net >= 0 ? "+" : "") + r.net.toFixed(2) + "%</span>" +
+              "<span style=\"font-size:9px;color:" + d.muted + "\">net, after the 0.1% fee</span>" +
+              "</div></div>";
+          });
+        }
+
+        // The disclosure, and it is not decoration: the track record, what is not
+        // counted yet, and which symbols have no basis at all.
+        html += "<div style=\"border-top:1px solid " + d.divider + ";margin-top:6px;padding-top:6px;font-size:9px;color:" + d.muted + ";line-height:1.6\">" +
+          "<div>Measured on your own calls: " + rateHtml + "</div>" +
+          "<div>" + dst.pending + " still inside the " + DIP_HOLD_DAYS + "d horizon · " +
+          dst.nodata + " expired unpriced" +
+          (dip.waiting ? " · ⏳ " + dip.waiting + "/" + STOCKS_LIST.length +
+            " waiting for history" : "") + "</div>" +
+          "<div>BUY = in the band and settled there ≥" + DIP_RIPE_DAYS +
+          " days. In the band but newer than that is WAIT — the same trade measured " +
+          "better a few days later. SELL = a swing that has reached +" +
+          DIP_SELL_TARGET.toFixed(1) + "%; HOLD = one that has not. Only BUY calls " +
+          "are scored above, because BUY is the only one of the four this section " +
+          "recommends.</div>" +
+          "</div></div>";
+      })();
 
       // WATCH section — owned stocks with CONSIDER score
       if (getShowWatch() && watchList.length > 0) {
