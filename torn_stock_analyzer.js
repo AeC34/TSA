@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.42.3
+// @version      2.42.4
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -770,6 +770,21 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // Cached torn/?selections=stocks payload. Benefit requirements are game
   // mechanics and change ~never, so one call per user per DAY is plenty.
   var STOCK_CATALOGUE_TTL_MS = 24 * 60 * 60 * 1000;
+  // NEGATIVE CACHE. A FAILED catalogue call leaves stockCatalogue null, and the TTL
+  // guard below only short-circuits when it is non-null — so without this a key that
+  // cannot read the catalogue would spend one wasted API call on EVERY page load,
+  // for as long as the script is installed. One hour, not 24: the usual cause is a
+  // key missing the `stocks` selection under Torn (error 16, distinct from the
+  // `stocks` selection under User that the holdings call uses), and someone who
+  // ticks that box should not have to wait a day to see it work.
+  var STOCK_CATALOGUE_FAIL_TTL_MS = 60 * 60 * 1000;
+  function catalogueFailedRecently() {
+    var t = parseInt(lsGet("tsa_stock_catalogue_fail_ts", "0"), 10) || 0;
+    return t > 0 && (Date.now() - t) < STOCK_CATALOGUE_FAIL_TTL_MS;
+  }
+  function noteCatalogueFailure() {
+    lsSet("tsa_stock_catalogue_fail_ts", String(Date.now()));
+  }
   // A cached payload past its TTL is still USED (it triggers a refresh, it does
   // not stop being true) — expiring it into nothing would drop the whole install
   // back to the hardcoded fallback for one load every 24h.
@@ -791,21 +806,33 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (stockCatalogue && (Date.now() - ts) < STOCK_CATALOGUE_TTL_MS) {
       return Promise.resolve(false);
     }
+    if (!stockCatalogue && catalogueFailedRecently()) {
+      benefitTableStatus = "hardcoded (catalogue not readable by this key)";
+      return Promise.resolve(false);
+    }
     var key = getTornKey();
     if (!key) { benefitTableStatus = "hardcoded (no API key)"; return Promise.resolve(false); }
     return fetchJSON("https://api.torn.com/torn/?selections=stocks&key=" + key)
       .then(function(d) {
         if (!d || d.error || !d.stocks) {
-          benefitTableStatus = "hardcoded (catalogue call: "
-            + (d && d.error ? ("error " + (parseInt(d.error.code, 10) || 0)) : "no stocks in body") + ")";
+          var code = (d && d.error) ? (parseInt(d.error.code, 10) || 0) : 0;
+          noteCatalogueFailure();
+          // 16 is the one worth naming: the key is valid but lacks the `stocks`
+          // selection under Torn. Ticking it is a one-click fix the user can make,
+          // so say so instead of printing a bare number.
+          benefitTableStatus = (code === 16)
+            ? "hardcoded (key lacks Torn>stocks)"
+            : ("hardcoded (catalogue call: " + (code ? ("error " + code) : "no stocks in body") + ")");
           return false;
         }
         stockCatalogue = d.stocks;
+        lsSet("tsa_stock_catalogue_fail_ts", "0");
         lsSet("tsa_stock_catalogue", JSON.stringify(d.stocks));
         lsSet("tsa_stock_catalogue_ts", String(Date.now()));
         return applyStockCatalogue();
       })
       .catch(function(e) {
+        noteCatalogueFailure();
         benefitTableStatus = "hardcoded (catalogue call threw)";
         return false;
       });
