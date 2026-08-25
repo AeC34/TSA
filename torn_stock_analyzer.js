@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.42.2
+// @version      2.42.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -701,6 +701,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // from "the derivation was refused", and the only way to tell them apart is to
   // read the source. One short string, set at every exit the install can take.
   var benefitTableStatus = "hardcoded (no catalogue yet)";
+  // The running @version, read from the manager's own metadata rather than kept in a
+  // second constant that could disagree with the header. Falls back to "?" where the
+  // manager exposes no GM_info (TornPDA).
+  var TSA_VERSION = (function() {
+    try { return (GM_info && GM_info.script && GM_info.script.version) || "?"; }
+    catch (e) { return "?"; }
+  })();
   // The status string is rendered with insertAdjacentHTML and carries symbols that
   // came from Torn's payload, so it is sanitised at the source rather than trusted
   // for being "just acronyms": A-Z, 0-9 and comma, capped at 40 chars. Nothing that
@@ -1825,7 +1832,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }
 
     var html = '<div style="padding:8px 14px;border-bottom:1px solid ' + c.divider + ';background:' + c.bg2 + '">' +
-      '<div style="font-size:9px;letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;margin-bottom:3px">Available capital</div>' +
+      '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px">' +
+        '<span style="font-size:9px;letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase">Available capital</span>' +
+        '<span style="font-size:9px;' + s + 'color:' + (benefitTablesDerived ? c.green : c.yellow) + '">v' + TSA_VERSION + ' · ' + benefitTableStatus + '</span>' +
+      '</div>' +
       '<div style="' + s + 'font-size:14px;font-weight:700;color:' + c.text + '">' + fmRoi(totalCapital) + '</div>' +
       '<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px">' + swingTagsHtml + '</div>' +
       '</div>';
