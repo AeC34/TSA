@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.48.1
+// @version      2.48.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -652,6 +652,14 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   var ITEM_IDS = [364, 365, 366, 367, 368, 369, 370, 817, 818];
   // PTS gives 100 points = $3M fixed
   var PTS_VALUE = 3000000;
+
+  // Torn takes 0.1% on every stock sale. Stored as the MULTIPLIER you apply to a
+  // gross sale (price * SELL_FEE = what actually lands), not as the rate, because
+  // every net-proceeds and net-profit line below wants the multiplier directly.
+  // Divide by it to go the other way (the price that nets a given profit target).
+  // Where the RATE is wanted instead, write (1 - SELL_FEE) rather than restating
+  // the number — one definition, so a change to Torn's fee lands everywhere.
+  var SELL_FEE = 0.999;
 
   // Stocks with item-paying benefits that aren't hardcoded in ROI_TABLE — the
   // script discovers their item ID at runtime (one-shot) by name and synthesises
@@ -2485,7 +2493,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var le = raw ? raw.find(function(x) { return x.stock === sym; }) : null;
     var lp = le ? (parseFloat(le.price) || 0) : 0;
     if (lp <= 0) return 0;
-    return lp * o.swing_shares * 0.999;
+    return lp * o.swing_shares * SELL_FEE;
   }
 
   // FASTEST PATH TO THE BIGGEST BLOCK — the roadmap's ranking.
@@ -2679,8 +2687,6 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var daysWithBridges = daysBaseline;
 
     if (target) {
-      var SELL_FEE = 0.001; // Torn's 0.1% sell fee, lost on the eventual bridge sale
-
       // Candidates: every other next-tier with positive dividend income, ROI-ranked
       // (dynamicNextTiers is already sorted by ROI desc, skip-filtered).
       var candidates = [];
@@ -2696,7 +2702,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       // Days to reach the target if capital is routed through a bridge and sold
       // later to fund it: only the fee is lost, the rest of the cost is recovered.
       function bridgeDays(cost, weekly) {
-        var fee = cost * SELL_FEE;
+        var fee = cost * (1 - SELL_FEE);
         if (cost <= fundCapital) {
           // Affordable now — buy immediately, dividend income boosted from day 0.
           return { daysUntil: 0, days: daysToAfford(target.cost, fundCapital - fee, weeklyIncome + weekly) };
@@ -2736,7 +2742,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       // Goal with the affordable-now bridge applied (capital recovered minus fee,
       // income boosted). Mirrors bridgeDays' "now" branch.
       if (nowBridge) {
-        daysWithBridges = daysToAfford(target.cost, fundCapital - nowBridge.cost * SELL_FEE, weeklyIncome + nowBridge.extraIncome);
+        daysWithBridges = daysToAfford(target.cost, fundCapital - nowBridge.cost * (1 - SELL_FEE), weeklyIncome + nowBridge.extraIncome);
       }
     }
 
@@ -2788,7 +2794,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       var topT = isPassive ? 1 : effTopTier; // passive stocks are single-tier
       for (var t = 1; t <= topT; t++) {
         var marginalShares = isPassive ? req : Math.pow(2, t - 1) * req;
-        var saleValue = marginalShares * livePrice * 0.999; // net of Torn's 0.1% sell fee
+        var saleValue = marginalShares * livePrice * SELL_FEE; // net of Torn's 0.1% sell fee
         if (saleValue <= 0) continue;
         var entry = ROI_MAP[sym + "|T" + t];
         if (!entry) continue;
@@ -2867,7 +2873,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       // Net of Torn's 0.1% sell fee — this is the cash actually deployable if
       // the swing position is liquidated to fund a benefit purchase. Live price
       // already reflects current profit/loss vs the original investment.
-      var val = livePrice * o.swing_shares * 0.999;
+      var val = livePrice * o.swing_shares * SELL_FEE;
       swingCapital += val;
       if (val > 0) swingDetails.push({sym: sym, val: val});
     });
@@ -2914,7 +2920,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         var entryTierNum = parseInt(e.tier.replace("T",""), 10) || 0;
         // Shares belonging to THIS tier only: (2^n - 2^(n-1)) * BENEFIT_REQ
         var tierShares = entryTierNum > 0 ? (Math.pow(2, entryTierNum) - Math.pow(2, entryTierNum - 1)) * req : 0;
-        var saleValue = tierShares * livePrice * 0.999;
+        var saleValue = tierShares * livePrice * SELL_FEE;
         // Live cost of this tier's shares
         var liveTierCost = tierShares * livePrice;
         // Same LIVE per-cycle payout as the buy side (getPerCycle) over this tier's own
@@ -3758,7 +3764,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var swingAvg = calcSwingAvgPrice(owned, owned.transactions, owned.avg_price);
     var base = (swingAvg !== null) ? swingAvg : owned.avg_price;
     if (!(base > 0)) return null;
-    return (p_live * 0.999 - base) / base * 100;
+    return (p_live * SELL_FEE - base) / base * 100;
   }
 
   function calcScore(stock, raw, ownedMap, priceHistory) {
@@ -3811,7 +3817,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
 
     // Profit % for ALL owned stocks — include 0.1% sell fee for accurate P/L
     if (owned && owned.avg_price > 0) {
-      netProfitPct = ((p_live * 0.999 - owned.avg_price) / owned.avg_price * 100);
+      netProfitPct = ((p_live * SELL_FEE - owned.avg_price) / owned.avg_price * 100);
       hoursHeld = owned.time_bought
         ? ((Date.now() / 1000 - owned.time_bought) / 3600).toFixed(0)
         : null;
@@ -4476,7 +4482,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           var swingCost = calcSwingAvgPrice(ownedEntry, ownedEntry.transactions, ownedEntry.avg_price);
           if (swingCost === null) swingCost = ownedEntry.avg_price || 0;
           if (swingCost > 0) {
-            totalProfit += (livePrice * 0.999 - swingCost) * ownedEntry.swing_shares;
+            totalProfit += (livePrice * SELL_FEE - swingCost) * ownedEntry.swing_shares;
           }
         } else {
           // Calculate profit per transaction using bought_price if available,
@@ -4490,7 +4496,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
               if (shares <= 0) return;
               var costPrice = (t.bought_price && t.bought_price > 0) ? t.bought_price : fallbackAvg;
               if (costPrice <= 0) return;
-              txProfit += (livePrice * 0.999 - costPrice) * shares;
+              txProfit += (livePrice * SELL_FEE - costPrice) * shares;
               txCounted = true;
             });
           }
@@ -4888,12 +4894,12 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         var swAvg = s.avg_price;
         if (s.p_live > 0) {
           var fifoAvg = calcSwingAvgPrice(owned, s.transactions, s.avg_price);
-          if (fifoAvg !== null) { swAvg = fifoAvg; swingPct = (s.p_live * 0.999 - swAvg) / swAvg * 100; }
+          if (fifoAvg !== null) { swAvg = fifoAvg; swingPct = (s.p_live * SELL_FEE - swAvg) / swAvg * 100; }
         }
         s._swingDisplayPct = swingPct;
         s._swingShares = swShares;
         // Profit if sold now, net of Torn's 0.1% sales fee
-        s._swingProfit = (s.p_live > 0 && swAvg > 0) ? swShares * (s.p_live * 0.999 - swAvg) : null;
+        s._swingProfit = (s.p_live > 0 && swAvg > 0) ? swShares * (s.p_live * SELL_FEE - swAvg) : null;
         // Total position value (gross market value: shares × live price)
         s._swingValue = (s.p_live > 0 && swShares > 0) ? swShares * s.p_live : null;
       });
@@ -4929,7 +4935,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         if (!isBenefit && s.p_live > 0) {
           swingAvgPrice = calcSwingAvgPrice(owned, s.transactions, s.avg_price);
           if (swingAvgPrice !== null) {
-            swingNetProfitPct = (s.p_live * 0.999 - swingAvgPrice) / swingAvgPrice * 100;
+            swingNetProfitPct = (s.p_live * SELL_FEE - swingAvgPrice) / swingAvgPrice * 100;
           }
         }
         var displayNetProfitPct = swingNetProfitPct !== null ? swingNetProfitPct : s.netProfitPct;
@@ -4941,8 +4947,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           var avgForTarget = swingAvgPrice !== null ? swingAvgPrice : s.avg_price;
           // Price at which NET profit (after Torn's 0.1% sell fee) hits the
           // target — matches the PROFIT signal / 🎯 threshold exactly:
-          // (p * 0.999 - avg) / avg = target%  ⇒  p = avg * (1 + t%) / 0.999
-          var targetPrice = avgForTarget * (1 + profitPct / 100) / 0.999;
+          // (p * SELL_FEE - avg) / avg = target%  ⇒  p = avg * (1 + t%) / SELL_FEE
+          var targetPrice = avgForTarget * (1 + profitPct / 100) / SELL_FEE;
           var currentPctStr = displayNetProfitPct !== null ? (displayNetProfitPct >= 0 ? "+" : "") + displayNetProfitPct.toFixed(2) + "%" : "";
           var currentPctColor = (displayNetProfitPct || 0) >= 0 ? d.green : d.red;
           targetLine = "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">Avg $" + avgForTarget.toFixed(2) + " → Target <strong style=\"color:" + d.green + "\">$" + targetPrice.toFixed(2) + "</strong> (+" + profitPct.toFixed(1) + "%)" +
@@ -4952,10 +4958,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         var pct = displayNetProfitPct !== null
           ? (displayNetProfitPct >= 0 ? "+" : "") + displayNetProfitPct.toFixed(2) + "%"
           : (s.avg_price > 0 && s.p_live > 0
-            ? (((s.p_live * 0.999 - s.avg_price) / s.avg_price * 100) >= 0 ? "+" : "") + ((s.p_live * 0.999 - s.avg_price) / s.avg_price * 100).toFixed(2) + "%"
+            ? (((s.p_live * SELL_FEE - s.avg_price) / s.avg_price * 100) >= 0 ? "+" : "") + ((s.p_live * SELL_FEE - s.avg_price) / s.avg_price * 100).toFixed(2) + "%"
             : "");
         var effectiveProfitPct = displayNetProfitPct !== null ? displayNetProfitPct
-          : (s.avg_price > 0 && s.p_live > 0 ? (s.p_live * 0.999 - s.avg_price) / s.avg_price * 100 : null);
+          : (s.avg_price > 0 && s.p_live > 0 ? (s.p_live * SELL_FEE - s.avg_price) / s.avg_price * 100 : null);
         var isProfit = (effectiveProfitPct || 0) >= 0;
         var col = isBenefit
           ? (effectiveProfitPct !== null ? (isProfit ? d.green : d.red) : d.blue)
@@ -4973,7 +4979,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
             var txPrice = t.bought_price ? "$" + t.bought_price.toFixed(2) : "?";
             var txCurrentVal = t.shares && s.p_live ? t.shares * s.p_live : 0;
             var txInvested = t.shares && t.bought_price ? t.shares * t.bought_price : 0;
-            var txProfit = txCurrentVal - txInvested - txCurrentVal * 0.001;
+            var txProfit = txCurrentVal * SELL_FEE - txInvested;
             var txPct = txInvested > 0 ? ((txProfit / txInvested) * 100).toFixed(2) : "?";
             var txSign = txProfit >= 0 ? "+" : "";
             var txColD = txProfit >= 0 ? d.green : d.red;
@@ -5001,7 +5007,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
             }
           });
         }
-        var totalProfit = totalCurrentVal - totalInvested - totalCurrentVal * 0.001;
+        var totalProfit = totalCurrentVal * SELL_FEE - totalInvested;
         var totalPct = totalInvested > 0 ? ((totalProfit / totalInvested) * 100).toFixed(2) : null;
         var totalCol = (totalPct === null) ? d.muted : (totalProfit >= 0 ? d.green : d.red);
         var totalSign = totalProfit >= 0 ? "+" : "";
@@ -5494,7 +5500,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
             var liveP = rpRaw ? (parseFloat(rpRaw.price) || 0) : 0;
             var costP = prevEntry.avg_price || 0;
             if (liveP <= 0 || costP <= 0) continue;
-            var realizedProfit = (liveP * 0.999 - costP) * soldShares;
+            var realizedProfit = (liveP * SELL_FEE - costP) * soldShares;
             realizedEvents.push({ ts: nowTs, profit: realizedProfit, sym: rpSym, sell_price: liveP });
           }
           // Trim events older than 90 days. Keep entries that are missing `ts`
@@ -6260,7 +6266,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     if (price <= 0) { showToast("Could not read price for " + sym, "error"); return; }
     var owned = qtGetOwnedShares(sym);
     if (owned <= 0) { showToast("You have no shares of " + sym, "warn"); return; }
-    var shares = Math.ceil((dollarAmt / 0.999) / price);
+    var shares = Math.ceil((dollarAmt / SELL_FEE) / price);
     if (shares > owned) shares = owned;
     shares = qtApplyBenefitLock(sym, shares);
     if (shares === null) return;
@@ -6410,7 +6416,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       } else {
         // Mirrors qtExecuteSell: gross up for the fee, round UP, clamp to owned,
         // then apply the lock. qtBenefitLockMax is the lock's single source of truth.
-        var want = btnInfo.all ? owned : Math.ceil((btnInfo.amt / 0.999) / price);
+        var want = btnInfo.all ? owned : Math.ceil((btnInfo.amt / SELL_FEE) / price);
         if (want > owned) want = owned;
         var maxSell = $("#qt-lock-benefit").is(":checked") ? qtBenefitLockMax(sym) : Infinity;
         if (maxSell === -1) {
@@ -6686,7 +6692,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         nextSell = { sym: u.sym, tier: u.tier, shares: sh, sellPrice: sp };
       }
       ownedRemaining[u.sym] -= sh;
-      liveProceeds += sh * sp * 0.999;
+      liveProceeds += sh * sp * SELL_FEE;
     }
     var cashAfterAll = cashAvail + liveProceeds;
     return {
@@ -6727,7 +6733,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         if (!o || o.swing_shares <= 0) return;
         var le = lastRaw.find(function(x) { return x.stock === s; });
         // Net of Torn's 0.1% sell fee — deployable cash if liquidated (planner parity).
-        if (le) bpSwingCap += (parseFloat(le.price) || 0) * o.swing_shares * 0.999;
+        if (le) bpSwingCap += (parseFloat(le.price) || 0) * o.swing_shares * SELL_FEE;
       });
       bpPlan = computeBridgePlan(lastOwnedMap, lastRaw,
         lastCashBalance + bpSwingCap + lastArmoryFunds,
@@ -6863,7 +6869,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
             .then(function(fired) {
               if (fired) {
                 pend.sells = pend.sells.slice(1);
-                pend.expectedCash = (pend.expectedCash || 0) + sns.shares * sns.sellPrice * 0.999;
+                pend.expectedCash = (pend.expectedCash || 0) + sns.shares * sns.sellPrice * SELL_FEE;
                 renderQtPills();
               }
             });
@@ -6955,7 +6961,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
                 if (fired) {
                   qtPendingUpgrade = {
                     sells: upSwap.sells.slice(1), total: nSells, buy: upSwap.buy,
-                    buyPrice: lc.buyPrice, expectedCash: lc.cashNow + sns.shares * sns.sellPrice * 0.999
+                    buyPrice: lc.buyPrice, expectedCash: lc.cashNow + sns.shares * sns.sellPrice * SELL_FEE
                   };
                   renderQtPills();
                 }
@@ -7072,7 +7078,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           if (partial) {
             var price = qtGetPrice(p.sym);
             if (price <= 0) { showToast("Could not read price for " + p.sym, "error"); return; }
-            shares = Math.ceil((sellAmt / 0.999) / price); // shares worth ~$sellAmt net of the 0.1% fee
+            shares = Math.ceil((sellAmt / SELL_FEE) / price); // shares worth ~$sellAmt net of the 0.1% fee
           } else {
             shares = p.shares; // whole swing position
           }
