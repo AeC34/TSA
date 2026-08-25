@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.46.0
+// @version      2.47.0
 // @author       AeC3
-// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
+// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
 // @run-at       document-end
 // @license      MIT
@@ -1444,6 +1444,63 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
              // 0 on a summary derived before band_days existed, which reads as
              // "not settled yet" — the cautious direction.
              bandDays: histNum(lt.band_days) || 0 };
+  }
+
+  // TOP-5 RANGE GATE — a DISPLAY filter over the buy list. It does NOT touch
+  // calcScore: the score, weekPeak, the four indicators and their weights are
+  // untouched by this block, and nothing here writes back onto a scored row.
+  //
+  // Why the list needed a gate at all. Measured on the live archive over 43,960
+  // points, the score's BUY+ calls hit 45.7% (n=35) and were beaten by the buy
+  // zone's dip rule on all five horizons. The score is not weak, it is UNFOCUSED:
+  // 44% of its BUY+ calls sat ABOVE the middle of the symbol's own 30-day range,
+  // because `reversal` (40p) and `macd` (25p) both reward a price that has ALREADY
+  // risen. The same list bought low hits 89.2% (position 0-10%). So the half that
+  // loses is removed from view and the half that works is left exactly as it was.
+  //
+  // The position is dipZone's, not a second derivation of the same idea — one
+  // formula, one high/low pair, one answer on screen.
+  var TOP5_MAX_POS = 50;
+
+  // A symbol without 30 daily rows has NO position, and hiding it would be a
+  // guess dressed as a filter. It stays in the list and is marked unknown.
+  //
+  // The gate runs over the WHOLE candidate pool, before the top-5 slice, so the
+  // list still fills to five out of the qualifying half instead of showing two
+  // rows and three gaps. `hidden` is therefore every candidate the gate removed,
+  // not only those that would have made the visible five — the panel prints it,
+  // because a filter that hides in silence is worse than no filter.
+  function top5RangeGate(list) {
+    var rows = [], pos = {}, hidden = 0;
+    for (var i = 0; i < (list || []).length; i++) {
+      var s = list[i];
+      var z = dipZone(s.symbol);
+      if (z && z.pos > TOP5_MAX_POS) { hidden++; continue; }
+      pos[s.symbol] = z ? z.pos : null;
+      rows.push(s);
+    }
+    return { rows: rows, pos: pos, hidden: hidden };
+  }
+
+  // The two lines the gate puts on screen. Both take the theme object, so the
+  // light and the dark palette are covered by the same call — no colour is
+  // defined for one theme only.
+  //
+  // Shown for every row: the position that let it through, or an explicit
+  // "unknown" for a symbol with no 30-day basis. Same detail style as the
+  // score's own "Drop -0.3% · Low pos 15%", and deliberately labelled 30d so it
+  // cannot be read as calcScore's short-term "Low pos".
+  function top5PosHtml(d, pos) {
+    if (pos === null || pos === undefined) {
+      return " · <span style=\"color:" + d.yellow + "\">30d pos unknown</span>";
+    }
+    return " · 30d pos " + pos.toFixed(0) + "%";
+  }
+
+  function top5HiddenHtml(d, hidden) {
+    if (!(hidden > 0)) return "";
+    return " <span style=\"font-weight:normal;letter-spacing:0;text-transform:none;color:" +
+           d.muted + "\">· " + hidden + " above mid-range hidden</span>";
   }
 
   // One price point per D1 REFRESH, keyed on step 4a's own fetch stamp. This is
@@ -4090,7 +4147,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         if (ap !== bp) return ap - bp;
         return b.score - a.score;
       });
-      var top5Buy = top5BuyAll.slice(0, 5);
+      // RANGE GATE, applied to the ranked candidates before the slice. Display
+      // only — see top5RangeGate: no score, weight or indicator is changed here.
+      var top5Gate = top5RangeGate(top5BuyAll);
+      var top5Pos = top5Gate.pos;          // SYM -> position %, or null = unknown
+      var top5Hidden = top5Gate.hidden;    // candidates above mid-range, printed below
+      var top5Buy = top5Gate.rows.slice(0, 5);
       // Buy pills are ordered by 24h investor growth (most new investors first),
       // stocks without enough history last. Doesn't affect the buy-section order.
       lastBuySymbols = top5Buy.slice().sort(function(a, b) {
@@ -4359,7 +4421,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (top5Buy.length > 0) {
         html += "<div style=\"padding:10px 14px 6px;background:" + d.bg + "\">" +
           "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">" +
-          "Top " + top5Buy.length + " buy</div>";
+          "Top " + top5Buy.length + " buy" + top5HiddenHtml(d, top5Hidden) + "</div>";
         top5Buy.forEach(function(s) {
           var breakdownId = "tsa-breakdown-" + s.symbol;
           var bd = s.scoreBreakdown || {};
@@ -4397,7 +4459,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             "<div class=\"tsa-buy-row\" data-symbol=\"" + s.symbol + "\" data-breakdown=\"" + breakdownId + "\" style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;cursor:pointer;background:" + rowBg + ";border:1px solid " + rowBorder + "\">" +
             "<div style=\"display:flex;flex-direction:column;gap:2px\">" +
             "<span style=\"font-size:13px;font-weight:bold;color:" + symColor + ";" + ms + "\">" + s.symbol + trendHtml + " " + pinBtnHtml + "</span>" +
-            "<span style=\"font-size:10px;color:" + d.muted + "\">" + s.reasons.split(" | ").slice(0,2).join(" · ") + invHtml + "</span>" +
+            "<span style=\"font-size:10px;color:" + d.muted + "\">" + s.reasons.split(" | ").slice(0,2).join(" · ") + top5PosHtml(d, top5Pos[s.symbol]) + invHtml + "</span>" +
             "</div><div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:2px\">" +
             "<span style=\"font-size:14px;font-weight:bold;color:" + symColor + ";" + ms + "\">" + s.score + "</span>" +
             "<span style=\"font-size:9px;color:" + signalColor + ";font-weight:bold\">" + s.signal + "</span>" +
@@ -4417,7 +4479,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         html += "</div>";
       } else {
         html += "<div style=\"padding:10px 14px 6px;background:" + d.bg + "\">" +
-          "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Buy signals</div>" +
+          "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Buy signals" + top5HiddenHtml(d, top5Hidden) + "</div>" +
           "<div style=\"color:" + d.muted + ";font-size:11px;padding:8px 0\">No signals right now</div></div>";
       }
 
