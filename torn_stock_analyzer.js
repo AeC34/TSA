@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.48.2
+// @version      2.49.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -2625,7 +2625,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   // Trade bridge pill so both always agree on the target and on bridgeChain.
   // Logic extracted 1:1 from renderROIPlanner; chain entries additionally
   // carry tierInfo (sharesNeeded/livePrice) for the pill's click handler.
-  function computeBridgePlan(ownedMap, raw, totalCapital, weeklyIncome) {
+  function computeBridgePlan(ownedMap, raw, totalCapital, weeklyIncome, roadmapRows) {
     // Build dynamic next tier list for all 35 stocks with benefit data
     var benefitSyms = Object.keys(BENEFIT_REQ);
     var dynamicNextTiers = [];
@@ -2675,74 +2675,119 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
 
     // Bridgebuilder chain (sell-later model): a bridge is a benefit tier you buy
     // (or drip into via the pills), hold to collect dividends, then SELL again to
-    // help fund the Next Move target. The capital is recovered on sale, so it does
-    // NOT permanently reduce your capital — only Torn's 0.1% sell fee is lost (at
-    // live price, which already reflects any profit/loss on the position). The days
-    // saved therefore come purely from the extra dividend income while held.
-    // We surface up to two: the top-ROI tier affordable NOW (acted on first so the
-    // capital starts earning), and the top-ROI tier we're closest to affording (the
-    // one to drip into). Both must save days vs. just waiting, or it isn't a bridge.
+    // help fund the goal. The capital is recovered on sale, so it does NOT
+    // permanently reduce your capital — only Torn's 0.1% sell fee is lost (at live
+    // price, which already reflects any profit/loss on the position). The days saved
+    // therefore come purely from the extra dividend income while held.
+    //
+    // ITS GOAL IS *NOT* `target`, AND THAT IS THE WHOLE FIX (2026-08-25).
+    // `target` is the best-ROI next increment, and it stays that way because the bank
+    // pill and the upgrade swap are built on it. But ROI falls strictly with tier
+    // inside one symbol, so the best-ROI open row is ALWAYS the next increment of the
+    // best symbol — a goal one buy away. daysToAfford then returned 0, every
+    // candidate scored saved <= 0, and this chain came back EMPTY every single time.
+    // The owner reported exactly that on 2026-08-25 and it was not a data problem.
+    //
+    // So the chain now aims at its own goal: the highest-INCOME open row he can
+    // actually be inside within BRIDGE_HORIZON_DAYS. Two rules, both needed —
+    // highest income alone picks a block years away and makes the whole roadmap read
+    // as "you cannot get there", while affordability alone picks something trivial.
+    // Mirrors app/signals.py's sibling engine in the dashboard, which is the ground
+    // truth for this maths; the departures from the OLD TSA behaviour are deliberate:
+    //   * a step is judged against capital minus its OWN swing (no share counts
+    //     twice — the rule computeFastestPath already applies);
+    //   * the goal's whole SYMBOL is excluded, not just its tier: in a sell-later
+    //     model those shares are the very ones the goal is missing;
+    //   * the best bridge is the one that SAVES THE MOST DAYS, not the first in ROI
+    //     order — saving days is the entire purpose of the feature.
+    var BRIDGE_HORIZON_DAYS = 90;
     var bridgeChain = [];
     var daysBaseline = target ? daysToAfford(target.cost, fundCapital, weeklyIncome) : 0;
-    var daysWithBridges = daysBaseline;
+    var rmRows = roadmapRows || computeRoadmap(ownedMap, raw);
+    var openRows = rmRows.filter(function(r) {
+      return !r.owned && !r.pending && r.cost > 0 && r.roi > 0;
+    });
+    // Capital a given row can actually be funded from: its own swing cannot pay for
+    // its own block, because selling those shares shrinks the block being built.
+    function capFor(sym) {
+      return Math.max(0, totalCapital - symSwingValue(sym, ownedMap, raw));
+    }
+    var reachable = openRows.filter(function(r) {
+      return daysToAfford(r.cost, capFor(r.sym), weeklyIncome) <= BRIDGE_HORIZON_DAYS;
+    });
+    // HIGHEST ABSOLUTE INCOME among those, same key computeFastestPath ranks on:
+    // monthlyInc is built from dailyInc, which already sums every tier the buy
+    // switches on, so goal and cost are priced off the same purchase.
+    var bridgeGoal = reachable.slice().sort(function(a, b) {
+      return (b.monthlyInc - a.monthlyInc) || a.sym.localeCompare(b.sym) || (a.tierNum - b.tierNum);
+    })[0] || null;
+    var bridgeBaselineDays = bridgeGoal
+      ? daysToAfford(bridgeGoal.cost, capFor(bridgeGoal.sym), weeklyIncome) : 0;
+    var bridgeDaysWith = bridgeBaselineDays;
 
-    if (target) {
-      // Candidates: every other next-tier with positive dividend income, ROI-ranked
-      // (dynamicNextTiers is already sorted by ROI desc, skip-filtered).
-      var candidates = [];
-      dynamicNextTiers.forEach(function(e) {
-        if (e.sym === target.sym && e.tierInfo.nextIncrement === target.tierInfo.nextIncrement) return;
-        if (!e.payoutEntry) return;
-        var perCycle = getPerCycle(e.payoutEntry);
-        var weekly = perCycle / getCycleDays(e.payoutEntry, ownedMap) * 7;
-        if (weekly <= 0) return;
-        candidates.push({ e: e, weekly: weekly });
-      });
-
-      // Days to reach the target if capital is routed through a bridge and sold
-      // later to fund it: only the fee is lost, the rest of the cost is recovered.
-      function bridgeDays(cost, weekly) {
-        var fee = cost * (1 - SELL_FEE);
-        if (cost <= fundCapital) {
-          // Affordable now — buy immediately, dividend income boosted from day 0.
-          return { daysUntil: 0, days: daysToAfford(target.cost, fundCapital - fee, weeklyIncome + weekly) };
+    if (bridgeGoal) {
+      var goalCap = capFor(bridgeGoal.sym);
+      // Days to the goal if capital detours through `st` and is sold later to fund
+      // it: only the fee is lost, the rest of the cost is recovered. null when the
+      // step can never be reached at all — an infinite wait would poison the
+      // arithmetic below (income/7 x Infinity is NaN, which compares false against
+      // everything and would travel silently).
+      function bridgeDays(st) {
+        var stepCap = Math.max(0, goalCap - symSwingValue(st.sym, ownedMap, raw));
+        var fee = st.cost * (1 - SELL_FEE);
+        var boosted = weeklyIncome + st.dailyInc * 7;
+        if (st.cost <= stepCap) {
+          return { daysUntil: 0, days: daysToAfford(bridgeGoal.cost, stepCap - fee, boosted) };
         }
-        // Not yet — save up at current income, then buy, then collect boosted income.
-        var daysUntil = daysToAfford(cost, fundCapital, weeklyIncome);
-        if (daysUntil === Infinity || daysUntil > 365) return null;
-        var capAtBuy = fundCapital + (weeklyIncome / 7 * daysUntil) - fee;
-        return { daysUntil: daysUntil, days: daysUntil + daysToAfford(target.cost, capAtBuy, weeklyIncome + weekly) };
+        var daysUntil = daysToAfford(st.cost, stepCap, weeklyIncome);
+        if (daysUntil === Infinity) return null;
+        var capAtBuy = stepCap + (weeklyIncome / 7 * daysUntil) - fee;
+        return { daysUntil: daysUntil, days: daysUntil + daysToAfford(bridgeGoal.cost, capAtBuy, boosted) };
       }
 
-      // nowBridge = top-ROI tier affordable now (first hit wins, candidates are
-      // ROI-ranked). nextBridge = the tier we're CLOSEST to affording (smallest
-      // daysUntil) among those that still save days — ties broken by ROI, since
-      // ROI-ranked iteration reaches the higher-ROI tie first and we compare with <.
-      var nowBridge = null, nextBridge = null;
-      candidates.forEach(function(c) {
-        var info = bridgeDays(c.e.cost, c.weekly);
+      var candidates = [];
+      openRows.forEach(function(st) {
+        if (st.sym === bridgeGoal.sym) return;   // its own shares cannot bridge it
+        var info = bridgeDays(st);
         if (!info) return;
-        var saved = daysBaseline - info.days;
-        if (saved <= 0) return; // doesn't save days — not a bridge
-        var b = {
-          sym: c.e.sym, tier: "T" + c.e.tierInfo.nextIncrement, tierInfo: c.e.tierInfo,
-          cost: c.e.cost, extraIncome: c.weekly, roi: c.e.roi,
+        var saved = bridgeBaselineDays - info.days;
+        if (!(saved > 0)) return;                // buys no time — not a bridge
+        var le = raw ? raw.find(function(x) { return x.stock === st.sym; }) : null;
+        candidates.push({
+          sym: st.sym, tier: st.tier, cost: st.cost,
+          extraIncome: st.dailyInc * 7, roi: st.roi,
           status: info.daysUntil === 0 ? "now" : "later",
-          daysUntil: info.daysUntil, daysSaved: saved
-        };
-        if (b.status === "now") { if (!nowBridge) nowBridge = b; }
-        else if (!nextBridge || b.daysUntil < nextBridge.daysUntil) nextBridge = b;
+          daysUntil: info.daysUntil, daysSaved: saved,
+          // Shape the pill's click handler reads. sharesNeeded is the roadmap row's
+          // own "still missing" count, so a click can never overshoot the tier.
+          tierInfo: {
+            nextIncrement: st.tierNum,
+            sharesNeeded: st.sharesNeeded,
+            livePrice: le ? (parseFloat(le.price) || 0) : 0
+          }
+        });
       });
-
-      // Show the affordable-now bridge first (capital can work immediately), then
-      // the drip target — even if the now bridge has the lower ROI of the two.
+      // Most days saved wins in each slot; ROI, symbol and tier break ties so the
+      // order is fully determined rather than dependent on row order.
+      candidates.sort(function(a, b) {
+        return (b.daysSaved - a.daysSaved) || (b.roi - a.roi)
+            || a.sym.localeCompare(b.sym) || a.tier.localeCompare(b.tier);
+      });
+      var nowBridge = null, nextBridge = null;
+      candidates.forEach(function(b) {
+        if (b.status === "now") { if (!nowBridge) nowBridge = b; }
+        else if (!nextBridge) nextBridge = b;
+      });
+      // The affordable-now bridge is listed first even when the later one saves more:
+      // its capital can start working today, and the drip target is what to aim at
+      // afterwards.
       if (nowBridge) bridgeChain.push(nowBridge);
       if (nextBridge) bridgeChain.push(nextBridge);
 
-      // Goal with the affordable-now bridge applied (capital recovered minus fee,
-      // income boosted). Mirrors bridgeDays' "now" branch.
       if (nowBridge) {
-        daysWithBridges = daysToAfford(target.cost, fundCapital - nowBridge.cost * (1 - SELL_FEE), weeklyIncome + nowBridge.extraIncome);
+        bridgeDaysWith = daysToAfford(bridgeGoal.cost,
+          goalCap - nowBridge.cost * (1 - SELL_FEE),
+          weeklyIncome + nowBridge.extraIncome);
       }
     }
 
@@ -2751,8 +2796,16 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       target: target,
       fundCapital: fundCapital,
       bridgeChain: bridgeChain,
+      // `daysBaseline` belongs to `target` — it is the "Goal in ~Nd" line on the
+      // Next-move block and nothing else. The chain no longer touches it, and the
+      // old `daysWithBridges` companion is gone: it described a chain aimed at
+      // `target`, which is exactly the arrangement that kept the panel empty.
       daysBaseline: daysBaseline,
-      daysWithBridges: daysWithBridges
+      // The chain's OWN goal and its own day counts, kept separate for that reason.
+      bridgeGoal: bridgeGoal,
+      bridgeHorizonDays: BRIDGE_HORIZON_DAYS,
+      bridgeBaselineDays: bridgeBaselineDays,
+      bridgeDaysWith: bridgeDaysWith
     };
   }
 
@@ -2901,8 +2954,6 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var bridgeChain = plan.bridgeChain;
     var fundCapital = plan.fundCapital; // deployable toward target (excl. its own swing)
     var daysWait = plan.daysBaseline;
-    var daysBaseline = plan.daysBaseline;
-    var daysWithBridges = plan.daysWithBridges;
 
     if (target) {
       // Sell candidates: owned benefit blocks with lower ROI than target
@@ -3008,11 +3059,25 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       html += nmRow("Available", fmRoi(fundCapital), c.text);
 
       // Bridgebuilder chain — buy (or drip into) a tier, collect dividends, then
-      // sell it again to help fund the target. Each row saves days vs. just waiting.
+      // sell it again to help fund the BRIDGE GOAL. Each row saves days vs. waiting.
+      //
+      // THE GOAL NAMED HERE IS NOT "Next move" ABOVE, and the line below says so
+      // rather than leaving two different day counts on one panel to read as a
+      // contradiction. "Next move" is the best-ROI next increment; this chain aims at
+      // the biggest income reachable inside the horizon — see computeBridgePlan.
       html += '<div style="border-top:1px solid ' + c.divider + ';margin:6px 0"></div>';
-      html += '<div style="font-size:var(--tsa-fs-micro);color:var(--tsa-bridge);letter-spacing:0.08em;' + s + ';margin-bottom:5px">🔗 Bridgebuilder · sell later for target</div>';
+      html += '<div style="font-size:var(--tsa-fs-micro);color:var(--tsa-bridge);letter-spacing:0.08em;' + s + ';margin-bottom:5px">🔗 Bridgebuilder · sell later for goal</div>';
 
       var hasSell = sellCandidates && sellCandidates.length > 0;
+      var bGoal = plan.bridgeGoal;
+
+      if (bGoal) {
+        html += nmRow(
+          "Goal · " + bGoal.sym + " " + bGoal.tier,
+          fmRoi(bGoal.cost) + " · +" + fmRoi(bGoal.dailyInc * 7) + "/7d · ~" + plan.bridgeBaselineDays + "d",
+          c.text
+        );
+      }
 
       if (bridgeChain.length > 0) {
         bridgeChain.forEach(function(b) {
@@ -3027,14 +3092,18 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
             statusColor
           );
         });
-        var savedDays = daysBaseline - daysWithBridges;
+        var savedDays = plan.bridgeBaselineDays - plan.bridgeDaysWith;
         if (savedDays > 0) {
           html += nmRow(
             "Goal with bridges",
-            "~" + daysWithBridges + "d (saves " + savedDays + "d)",
+            "~" + plan.bridgeDaysWith + "d (saves " + savedDays + "d)",
             c.green
           );
         }
+      } else if (!bGoal) {
+        // Distinguish "nothing to aim at" from "nothing shortens the wait" — they are
+        // different facts and the fix for each is different.
+        html += nmRow("", "No block is reachable within " + plan.bridgeHorizonDays + "d", c.muted);
       } else {
         html += nmRow("", "No bridgebuilder options", c.muted);
       }
