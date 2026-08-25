@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.42.1
+// @version      2.42.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -696,6 +696,18 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
 
   var benefitTablesDerived = false;
+  // WHY the planner is showing the numbers it is showing. Rendered in the ROI
+  // Planner footer: without it, "the table looks unchanged" is indistinguishable
+  // from "the derivation was refused", and the only way to tell them apart is to
+  // read the source. One short string, set at every exit the install can take.
+  var benefitTableStatus = "hardcoded (no catalogue yet)";
+  // The status string is rendered with insertAdjacentHTML and carries symbols that
+  // came from Torn's payload, so it is sanitised at the source rather than trusted
+  // for being "just acronyms": A-Z, 0-9 and comma, capped at 40 chars. Nothing that
+  // reaches the DOM through this string can be markup.
+  function safeSyms(list) {
+    return String((list || []).join(",")).replace(/[^A-Za-z0-9,]/g, "").slice(0, 40);
+  }
 
   // Install a derived set over the hardcoded fallback. Returns true if it landed.
   //
@@ -714,11 +726,17 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // even with not one item price available.
   function installDerivedBenefitTables(stocksDict) {
     var d = deriveBenefitTables(stocksDict, itemMarketValues, itemIdsByName);
-    if (!d) return false;
+    if (!d) { benefitTableStatus = "hardcoded (empty payload)"; return false; }
     var lost = BASELINE_ROI.syms.filter(function(sym) {
       return !d.roiRows.some(function(r) { return r.sym === sym; });
     });
-    if (Object.keys(d.req).length < 30 || d.passive.length < 1 || lost.length) return false;
+    if (Object.keys(d.req).length < 30) {
+      benefitTableStatus = "hardcoded (only " + Object.keys(d.req).length + " reqs)"; return false;
+    }
+    if (d.passive.length < 1) { benefitTableStatus = "hardcoded (no passives)"; return false; }
+    if (lost.length) {
+      benefitTableStatus = "hardcoded (would lose " + safeSyms(lost) + ")"; return false;
+    }
 
     PASSIVE_STOCKS.length = 0;
     d.passive.forEach(function(sym) { PASSIVE_STOCKS.push(sym); });
@@ -736,6 +754,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     });
 
     benefitTablesDerived = true;
+    benefitTableStatus = "derived " + ROI_TABLE.length + " rows"
+      + (d.degraded.length ? " (" + d.degraded.length + " on baseline price)" : "")
+      + (d.unpriceable.length ? " (dropped " + safeSyms(d.unpriceable) + ")" : "");
     return true;
   }
 
@@ -764,16 +785,23 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return Promise.resolve(false);
     }
     var key = getTornKey();
-    if (!key) return Promise.resolve(false);
+    if (!key) { benefitTableStatus = "hardcoded (no API key)"; return Promise.resolve(false); }
     return fetchJSON("https://api.torn.com/torn/?selections=stocks&key=" + key)
       .then(function(d) {
-        if (!d || d.error || !d.stocks) return false;
+        if (!d || d.error || !d.stocks) {
+          benefitTableStatus = "hardcoded (catalogue call: "
+            + (d && d.error ? ("error " + (parseInt(d.error.code, 10) || 0)) : "no stocks in body") + ")";
+          return false;
+        }
         stockCatalogue = d.stocks;
         lsSet("tsa_stock_catalogue", JSON.stringify(d.stocks));
         lsSet("tsa_stock_catalogue_ts", String(Date.now()));
         return applyStockCatalogue();
       })
-      .catch(function() { return false; });
+      .catch(function(e) {
+        benefitTableStatus = "hardcoded (catalogue call threw)";
+        return false;
+      });
   }
 
   // Warm-cache install, before anything reads the tables. On a cold profile both
@@ -2276,7 +2304,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         content.insertAdjacentHTML("beforeend",
           '<div style="padding:7px 14px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid ' + footerDivider + ';background:' + footerBg + '">' +
             '<span style="font-size:9px;color:#555">✕ skip + unlock &nbsp;·&nbsp; ↩ restore</span>' +
-            '<span style="font-size:9px;color:#555;font-family:monospace">Updated ' + new Date().toLocaleTimeString("en-GB") + '</span>' +
+            '<span style="font-size:9px;color:#555;font-family:monospace">' + benefitTableStatus + ' &nbsp;·&nbsp; ' + new Date().toLocaleTimeString("en-GB") + '</span>' +
           '</div>'
         );
       });
