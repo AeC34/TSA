@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.48.0
+// @version      2.48.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -3150,8 +3150,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     html += '</div>';
 
     // Table header
-    html += '<div style="display:grid;grid-template-columns:42px 26px 1fr 54px 32px;gap:4px;padding:5px 14px;font-size:var(--tsa-fs-micro);letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;border-bottom:1px solid ' + c.divider + ';' + s + ';position:sticky;top:0;background:' + c.bg + ';z-index:2;">' +
-      '<span>Stock</span><span>Tier</span><span>Shares needed / Cost</span><span style="text-align:right">ROI</span><span></span></div>';
+    html += '<div style="display:grid;grid-template-columns:50px 34px 1fr 54px 32px;overflow:hidden;gap:4px;padding:5px 14px;font-size:var(--tsa-fs-micro);letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;border-bottom:1px solid ' + c.divider + ';' + s + ';position:sticky;top:0;background:' + c.bg + ';z-index:2;">' +
+      '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis">Stock</span><span style="min-width:0;overflow:hidden">Tier</span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis">Needed / Cost</span><span style="text-align:right">ROI</span><span></span></div>';
 
 
     // Show all benefit stocks: owned tiers first (green), then next tiers sorted by ROI
@@ -3213,7 +3213,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       var buyAttrs = (!row.isOwned && row.sharesNeeded > 0)
         ? ' class="tsa-roi-buyrow" data-buy-sym="' + row.sym + '" data-buy-shares="' + row.sharesNeeded + '" data-buy-tier="' + row.tier + '" data-buy-state="0"'
         : '';
-      html += '<div data-roi-key="' + key + '"' + buyAttrs + ' style="display:grid;grid-template-columns:42px 26px 1fr 54px 32px;gap:4px;align-items:center;padding:7px 14px;border-bottom:1px solid ' + c.row_border + ';background:' + rowBg + ';border-left:2px solid ' + borderLeft + ';cursor:' + (buyAttrs ? 'pointer' : 'default') + ';transition:background 0.15s">' +
+      html += '<div data-roi-key="' + key + '"' + buyAttrs + ' style="display:grid;grid-template-columns:50px 34px 1fr 54px 32px;overflow:hidden;gap:4px;align-items:center;padding:7px 14px;border-bottom:1px solid ' + c.row_border + ';background:' + rowBg + ';border-left:2px solid ' + borderLeft + ';cursor:' + (buyAttrs ? 'pointer' : 'default') + ';transition:background 0.15s">' +
         '<span style="' + s + ';font-weight:700;font-size:var(--tsa-fs-micro);color:' + symColor + '">' + row.sym + '</span>' +
         '<span style="' + s + ';font-size:var(--tsa-fs-micro);color:' + c.muted + '">' + row.tier + '</span>' +
         '<div style="display:flex;flex-direction:column;gap:1px;overflow:hidden;min-width:0">' +
@@ -3278,7 +3278,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           detail = fmRoi(r.cost) + " · cum " + fmRoi(rmCum);
         }
         var secColor = secured ? c.green : c.text;
-        return '<div style="display:grid;grid-template-columns:42px 26px 1fr 60px;gap:4px;align-items:center;padding:6px 14px;border-bottom:1px solid ' + c.row_border + ';' + (secured ? 'background:' + c.owned_bg + ';' : '') + '">' +
+        return '<div style="display:grid;grid-template-columns:50px 34px 1fr 60px;overflow:hidden;gap:4px;align-items:center;padding:6px 14px;border-bottom:1px solid ' + c.row_border + ';' + (secured ? 'background:' + c.owned_bg + ';' : '') + '">' +
           '<span style="' + s + ';font-weight:700;font-size:var(--tsa-fs-micro);color:' + secColor + '">' + r.sym + '</span>' +
           '<span style="' + s + ';font-size:var(--tsa-fs-micro);color:' + c.muted + '">' + r.tier + '</span>' +
           '<div style="display:flex;flex-direction:column;gap:1px;overflow:hidden;min-width:0">' +
@@ -3302,7 +3302,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
               ? ' · via ' + fastest.best.sym + ' ' + fastest.best.tier + ': ' + fmDays(fastest.best.days) + ' (' + fmSaved(fastest.best.daysSaved) + ')'
               : ' · no affordable buy shortens it') +
             '</div>' : '') +
-          '<div style="display:grid;grid-template-columns:42px 26px 1fr 60px;gap:4px;padding:5px 14px;font-size:var(--tsa-fs-micro);letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;border-bottom:1px solid ' + c.divider + ';' + s + '"><span>Stock</span><span>Tier</span><span>Cost / cumulative</span><span style="text-align:right">Payback</span></div>' +
+          '<div style="display:grid;grid-template-columns:50px 34px 1fr 60px;overflow:hidden;gap:4px;padding:5px 14px;font-size:var(--tsa-fs-micro);letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;border-bottom:1px solid ' + c.divider + ';' + s + '"><span>Stock</span><span>Tier</span><span>Cost / cumulative</span><span style="text-align:right">Payback</span></div>' +
           ((fastest && fastest.steps.length > 0)
             ? '<div style="padding:2px 14px 5px;font-size:var(--tsa-fs-micro);color:' + c.muted + ';' + s + '">Order: goal-shortening steps first, then payback</div>'
             : '') +
