@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.39.0
+// @version      2.41.0
 // @author       AeC3
-// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes ROI planner, benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
+// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
 // @run-at       document-end
 // @license      MIT
@@ -574,6 +574,39 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return (itemId && itemNames[itemId]) ? itemNames[itemId] : "";
   }
 
+  // Per-cycle payout of ONE benefit tier, in dollars. Item-paying stocks are valued
+  // at the LIVE item market price; ROI_TABLE.payout is only the baseline used until
+  // that price has loaded (and is the real figure for cash stocks, where item is 0).
+  // Every income / ROI / payback figure in the planner - buy side AND sell side -
+  // goes through this one function, so the two sides cannot drift onto different
+  // price bases again. ONE DOCUMENTED EXCEPTION, display only: the tier table's second
+  // line prints the raw ROI_TABLE.payout baseline next to "live <value>" so both
+  // numbers are visible side by side. No ROI, payback or income figure is derived from
+  // that print.
+  function getPerCycle(entry) {
+    if (!entry) return 0;
+    var iv = getItemValue(entry);
+    return (entry.item && iv > 0) ? iv : (entry.payout || 0);
+  }
+
+  // Length of one payout cycle, in DAYS. Torn reports it per stock as
+  // dividend.frequency / benefit.frequency and buildOwnedMap stores it as
+  // dividend_frequency, so that value wins whenever it exists. ROI_TABLE.freq is
+  // only the FALLBACK for stocks the user does not hold yet (the API reports a
+  // frequency for held positions).
+  // Both fallback values are VERIFIED against the live API (2026-08-24, raw response
+  // archived out of repo): the 27
+  // weekly stocks return frequency 7, and all eight monthly stocks (TSB, IOU, GRN,
+  // TCT, CNC, TMI, HRG, TCC) return exactly 31 — Torn uses a fixed 31-day cycle,
+  // never the current calendar month's length. Reading the API value anyway means a
+  // future change on Torn's side lands here on its own instead of silently.
+  function getCycleDays(entry, ownedMap) {
+    var o = (entry && ownedMap) ? ownedMap[entry.sym] : null;
+    var apiFreq = o ? (o.dividend_frequency || 0) : 0;
+    if (apiFreq > 0) return apiFreq;
+    return (entry && entry.freq) ? entry.freq : 7;
+  }
+
   // Calculate Bollinger Bands using all stored price history
   // Returns { upper, middle, lower, pctB } or null if insufficient data
   // pctB = position within bands: 0 = at lower, 1 = at upper, <0 = below lower
@@ -766,19 +799,23 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         if (entry.sym !== sym) return;
         var tierNum = parseInt(entry.tier.replace("T",""), 10);
         if (tierNum > increments) return;
-        var itemVal = getItemValue(entry);
-        var perCycle = (entry.item && itemVal > 0) ? itemVal : entry.payout;
-        weeklyTotal += (perCycle / entry.freq) * 7;
+        weeklyTotal += (getPerCycle(entry) / getCycleDays(entry, ownedMap)) * 7;
       });
     });
     // Add extra entry (bridgebuilder)
     if (extraEntry) {
-      var exItemVal = getItemValue(extraEntry);
-      var exPerCycle = (extraEntry.item && exItemVal > 0) ? exItemVal : extraEntry.payout;
-      weeklyTotal += (exPerCycle / extraEntry.freq) * 7;
+      weeklyTotal += (getPerCycle(extraEntry) / getCycleDays(extraEntry, ownedMap)) * 7;
     }
     return weeklyTotal;
   }
+
+  // A CALENDAR MONTH, NOT A PAYOUT CYCLE. 365/12 = 30.4167 days, the same 365-day
+  // year TSA already annualises ROI with, so "per month" and "per year" describe one
+  // calendar. Deliberately NOT 31: 31 is Torn's CYCLE length for the monthly benefit
+  // stocks (getCycleDays), a property of the payout, and using it as a month length
+  // would silently mix the two. Deliberately not 30 either - that would disagree with
+  // the ROI denominator.
+  var DAYS_PER_MONTH = 365 / 12;
 
   // Calculate days until target is affordable with given weekly income + capital
   function daysToAfford(target, capital, weeklyIncome) {
@@ -790,37 +827,254 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
 
   // Full snowball roadmap: every real benefit tier across all payout stocks,
-  // ranked by payback (days for the block to earn back its own price). Cost
-  // uses live share price; income uses live item value when available, else the
-  // baked-in baseline payout. Owned tiers are flagged (kept as income, not
-  // re-bought). Incremental shares for a single tier n = 2^(n-1) * requirement.
+  // ranked by payback (days for the block to earn back its own price). Cost is
+  // priced the same way the buy side prices it (calcNextTier): the shares STILL
+  // MISSING to reach the tier, at live share price - so one tier carries one ROI
+  // number everywhere. Income uses the live item value when available. Owned tiers
+  // are flagged (kept as income, not re-bought).
   function computeRoadmap(ownedMap, raw) {
     var rows = [];
     ROI_TABLE.forEach(function(entry) {
       var req = BENEFIT_REQ[entry.sym];
       if (!req) return;
+      // THE USER'S OPT-OUTS BIND HERE TOO. computeBridgePlan (the buy side) filters on
+      // roiSymSkipped and roiSymTierCap; this table did not, so a symbol switched off
+      // with the planner's X, or a tier above that symbol's cap, could still be ranked
+      // - and since the roadmap now leads with "Goal X T5 ... via Y T2", it could
+      // become the HEADLINE recommendation, contradicting an explicit choice. An
+      // explicit opt-out applies to every view, so it is filtered at the source of the
+      // table: no row, therefore no step, therefore no goal.
+      if (roiSymSkipped(entry.sym)) return;
       var liveEntry = raw ? raw.find(function(x) { return x.stock === entry.sym; }) : null;
       var livePrice = liveEntry ? (parseFloat(liveEntry.price) || 0) : 0;
       if (livePrice <= 0) return;
       var tierNum = parseInt(entry.tier.replace("T", ""), 10);
       if (!tierNum) return;
-      var incShares = Math.pow(2, tierNum - 1) * req;
-      var cost = incShares * livePrice;
-      var itemVal = getItemValue(entry);
-      var perCycle = (entry.item && itemVal > 0) ? itemVal : entry.payout;
-      if (!perCycle || cost <= 0) return;
-      var dailyInc = perCycle / entry.freq;
+      if (tierNum > roiSymTierCap(entry.sym)) return;   // above the user's tier cap
       var o = ownedMap[entry.sym];
+      var held = o ? (o.shares || 0) : 0;
+      var curInc = o ? (o.dividend_increment || 0) : 0;
+      var owned = tierNum <= curInc;
+      // Tiers are cumulative: reaching tier n needs (2^n - 1) * req shares in total,
+      // and shares already held count toward it. marginalShares is the tier's OWN
+      // parcel - used only for the secured rows below (the cumulative column in the
+      // renderer is built from `cost`, not from this).
+      var marginalShares = Math.pow(2, tierNum - 1) * req;
+      var sharesNeeded = Math.max(0, (Math.pow(2, tierNum) - 1) * req - held);
+      // PENDING TIER - BOUGHT BUT NOT YET CREDITED. Torn only bumps
+      // dividend_increment on the payout day, so between the buy and the next payout
+      // held is already at or above (2^n - 1) * req while curInc is still below n.
+      // sharesNeeded === 0 && !owned IS exactly that state and nothing else, because
+      // sharesNeeded === 0 <=> held >= (2^n - 1) * req. Same condition as
+      // enrichOwnedMap's effectiveIncrement loop, which exists for this case but only
+      // reclassifies benefit_shares/swing_shares and never reaches this table.
+      // A pending tier is NOT a step: pricing it as an unpaid buy invented money the
+      // user has already spent, which (a) put a phantom row into computeFastestPath's
+      // `open` where it could even be picked as the GOAL, displacing a real target,
+      // and (b) added that phantom price to the renderer's running `cum`, shifting the
+      // capital figure of every row below it.
+      var pending = !owned && sharesNeeded === 0;
+      var perCycle = getPerCycle(entry);
+      if (!perCycle) return;
+      var freq = getCycleDays(entry, ownedMap);
+      var cost, dailyInc;
+      if (sharesNeeded > 0) {
+        cost = sharesNeeded * livePrice;
+        // COST AND INCOME MUST DESCRIBE THE SAME PURCHASE. `cost` is every share still
+        // missing to REACH tier n, which for n > increment+1 pays for the intermediate
+        // tiers too - and Torn pays out EVERY tier up to your increment (calcWeeklyIncome
+        // sums them). So the income side has to be the sum of every tier this one buy
+        // switches on, from increment+1 to n. Pairing that cost with tier n's payout
+        // alone understated ROI and payback for every multi-step row and pushed the far
+        // tiers down the ranking; the buy side (calcNextTier) never had the bug because
+        // it only ever looks one increment ahead.
+        dailyInc = 0;
+        for (var t = curInc + 1; t <= tierNum; t++) {
+          var e2 = ROI_MAP[entry.sym + "|T" + t];
+          if (!e2) continue;
+          var pc2 = getPerCycle(e2);
+          if (pc2 > 0) dailyInc += pc2 / getCycleDays(e2, ownedMap);
+        }
+        // Increment claims the tier is reached while the shares say otherwise (a sale
+        // the API has not caught up with): the loop is empty, so price the tier's own
+        // payout rather than dropping the row.
+        if (dailyInc <= 0) dailyInc = perCycle / freq;
+      } else {
+        // Already secured - either owned, or pending the next payout. Zero further
+        // shares, which priced at zero would rank the row ahead of every real buy, so
+        // it falls back to the tier's own parcel at live price: the liquidation value
+        // of the block being held, i.e. the same basis the sell side uses, so a
+        // secured row's ROI stays comparable to a sell unit's, and the income is that
+        // one tier's payout for the same reason. DISPLAY ONLY - `owned` and `pending`
+        // both keep the row out of `open` and out of the renderer's `cum`, so this
+        // price is never charged to anybody.
+        cost = marginalShares * livePrice;
+        dailyInc = perCycle / freq;
+      }
+      if (cost <= 0 || dailyInc <= 0) return;
+      // sharesNeeded/marginalShares/perCycle/freq have no reader in the UI - they are
+      // the deliberate TEST SURFACE of this function: an out-of-repo logic guard
+      // extracts these functions from the file and asserts on them. Do not trim them
+      // without updating that guard.
       rows.push({
         sym: entry.sym, tier: entry.tier, tierNum: tierNum,
-        cost: cost, sharesNeeded: incShares, perCycle: perCycle, freq: entry.freq,
-        roi: perCycle / cost * (365 / entry.freq) * 100,
-        payback: dailyInc > 0 ? Math.round(cost / dailyInc) : Infinity,
-        owned: o ? (tierNum <= (o.dividend_increment || 0)) : false
+        cost: cost, sharesNeeded: sharesNeeded, marginalShares: marginalShares,
+        perCycle: perCycle, dailyInc: dailyInc, freq: freq,
+        // ONE definition of "income per month", so the goal rule and the line that
+        // displays the goal cannot drift apart: dailyInc (= sum of perCycle/cycleDays
+        // over every tier this buy switches on) times a calendar month.
+        monthlyInc: dailyInc * DAYS_PER_MONTH,
+        roi: dailyInc * 365 / cost * 100,
+        payback: Math.round(cost / dailyInc),
+        owned: owned, pending: pending
       });
     });
-    rows.sort(function(a, b) { return a.payback - b.payback; });
+    // Payback ascending, then symbol alphabetically, then tier - a deterministic
+    // tie-break instead of ROI_TABLE insertion order.
+    rows.sort(function(a, b) {
+      return (a.payback - b.payback) || a.sym.localeCompare(b.sym) || (a.tierNum - b.tierNum);
+    });
     return rows;
+  }
+
+  // Live swing value of one symbol's tradable shares, net of Torn's 0.1% sell fee.
+  // One definition, so every "this capital cannot fund THAT block" rule agrees.
+  // KNOWN 0.1% ASYMMETRY: this side is net of the sell fee, while computeRoadmap
+  // credits shares already held against sharesNeeded at FULL price (they are not
+  // being sold, so no fee applies to them). The two sides therefore differ by up to
+  // 0.1% of the held parcel - intentional, and far below any ranking threshold here.
+  function symSwingValue(sym, ownedMap, raw) {
+    var o = ownedMap ? ownedMap[sym] : null;
+    if (!o || !(o.swing_shares > 0)) return 0;
+    var le = raw ? raw.find(function(x) { return x.stock === sym; }) : null;
+    var lp = le ? (parseFloat(le.price) || 0) : 0;
+    if (lp <= 0) return 0;
+    return lp * o.swing_shares * 0.999;
+  }
+
+  // FASTEST PATH TO THE BIGGEST BLOCK — the roadmap's ranking.
+  //
+  // Ranking a benefit tier by its own payback or raw ROI answers the wrong
+  // question: what the owner wants is the largest income this book can eventually
+  // reach, and what matters is how soon it can be reached. So rank by TIME TO THE
+  // GOAL instead:
+  //
+  //   goal = the tier with the HIGHEST ABSOLUTE INCOME that is neither owned nor
+  //          pending, using the corrected inputs (live per-cycle payout, live cost
+  //          of only the shares still missing, Torn's own cycle length).
+  //
+  //   WHY INCOME AND NOT ROI. Within one symbol, ROI is STRICTLY DECREASING in tier:
+  //   roi(n) is proportional to (n - curInc) / ((2^n - 1) * req - held), so
+  //   roi(k+2) > roi(k+1) would require -req - held > 0, impossible for req > 0 and
+  //   held >= 0. The highest-ROI open row is therefore ALWAYS the next increment of
+  //   the best symbol - exactly the tier computeBridgePlan already offers as its
+  //   target. A goal that is one buy away by construction can have no path to it, so
+  //   the whole stepping-stone mechanism was dead code under the old rule (it
+  //   reported 0 qualifying steps on any book, which was not a property of the book).
+  //   Absolute income rises with tier, so an expensive high tier can now be the goal
+  //   and the steps have something to shorten.
+  //
+  //   Income is compared as monthlyInc (dailyInc * 365/12). Per month and per week
+  //   RANK IDENTICALLY - both are the same positive constant times dailyInc, and
+  //   multiplying every row by one constant cannot reorder them - so the unit is a
+  //   display choice (the owner's horizon is a month), never a ranking choice.
+  //   D0   = daysToAfford(goal.cost, capital, weeklyIncome)          — just wait.
+  //
+  //   step s = any unowned tier buyable RIGHT NOW (s.cost <= Cs). Buying it
+  //   spends its cost but raises weekly income, which pulls the goal closer:
+  //       Ws = weeklyIncome + s.dailyInc * 7   — EVERY tier the buy switches on
+  //       Cs = capital - swing(s.sym) - s.cost — s's own swing shares are already
+  //            counted inside s.cost as progress made, so they are not also cash
+  //       Gs = goal.cost, less s.cost whenever s is ANY other tier of the goal's OWN
+  //            stock — tiers are cumulative, so those shares are part of the goal's
+  //            remaining requirement and the step pre-pays that part of it. A HIGHER
+  //            tier of the goal's stock costs at least what the goal costs, so it
+  //            pre-pays the goal in full and Gs clamps to 0. DEFENCE IN DEPTH, not a
+  //            live case: income is cumulative, so the goal is always the TOP open
+  //            tier of its own symbol and no higher tier of it exists to be a step -
+  //            and even if one were injected, st.cost >= goal.cost while a qualifying
+  //            step needs goalCapital < goal.cost, so it could never be affordable.
+  //            The branch is nevertheless written correctly rather than left wrong.
+  //       Ds = daysToAfford(Gs, Cs, Ws)
+  //
+  //   A step is recommended ONLY when Ds < D0. Its own ROI is irrelevant: a
+  //   high-ROI block that does not shorten the time to the goal is not a step.
+  //   Winner = smallest Ds; ties break on symbol, then tier.
+  //
+  // capital: the goal's own swing value is excluded, because selling those shares
+  // shrinks the very block being completed — the same rule computeBridgePlan uses
+  // for its target, via the shared symSwingValue.
+  //
+  // Pure function: no DOM, no fetch. Give it an ownedMap, live prices, capital and
+  // weekly income and it is fully testable on its own.
+  function computeFastestPath(ownedMap, raw, capital, weeklyIncome, roadmapRows) {
+    ownedMap = ownedMap || {};
+    var rows = roadmapRows || computeRoadmap(ownedMap, raw);
+    // Pending rows are excluded with the owned ones: the shares are already bought,
+    // so the row is not a purchase and its display price is not money to be spent.
+    var open = rows.filter(function(r) { return !r.owned && !r.pending && r.cost > 0 && r.roi > 0; });
+    if (open.length === 0) return null;
+
+    // HIGHEST ABSOLUTE INCOME, not highest ROI — see the header. monthlyInc is the
+    // roadmap row's own field, so the goal is chosen with the very number the goal
+    // line displays.
+    var goal = open.slice().sort(function(a, b) {
+      return (b.monthlyInc - a.monthlyInc) || a.sym.localeCompare(b.sym) || (a.tierNum - b.tierNum);
+    })[0];
+
+    var goalCapital = Math.max(0, capital - symSwingValue(goal.sym, ownedMap, raw));
+    var baselineDays = daysToAfford(goal.cost, goalCapital, weeklyIncome);
+
+    var steps = [];
+    open.forEach(function(st) {
+      if (st.sym === goal.sym && st.tierNum === goal.tierNum) return;
+      // ANY other tier of the goal's own stock is nested, above the goal as well as
+      // below it. Restricting this to lower tiers left a higher tier of the goal's
+      // stock on the non-nested branch, where stepCapital would subtract that symbol's
+      // swing a SECOND time (goalCapital already did) and goalCost would stay at the
+      // full goal.cost even though the step buys every share the goal is missing.
+      // No live fixture reaches it (see Gs above), so this is correctness of the
+      // branch, not a bug fix - do not build a guard on it: with rows computeRoadmap
+      // can actually produce, such a guard passes either way and can never fail.
+      var nested = (st.sym === goal.sym);
+      // NO SHARE COUNTS TWICE. st.cost is only the shares still MISSING, i.e. the ones
+      // already held are counted as progress made - while `capital` separately counts
+      // those same shares at their liquidation value. Judging the step against the full
+      // capital would spend them twice, and a stock held mostly as swing would look
+      // nearly free. So a step is judged against capital minus its OWN swing, exactly
+      // as the goal already is. A nested step is the goal's own stock, whose swing
+      // symSwingValue has removed from goalCapital already.
+      var stepCapital = nested ? goalCapital
+        : Math.max(0, goalCapital - symSwingValue(st.sym, ownedMap, raw));
+      if (st.cost > stepCapital) return; // not buyable right now — not a step
+      var goalCost = nested ? Math.max(0, goal.cost - st.cost) : goal.cost;
+      // Every tier the step switches on, not just its own - see computeRoadmap.
+      var stepWeekly = (st.dailyInc || 0) * 7;
+      var days = daysToAfford(goalCost, stepCapital - st.cost, weeklyIncome + stepWeekly);
+      var saved = (baselineDays === Infinity)
+        ? (days === Infinity ? 0 : Infinity)
+        : (baselineDays - days);
+      if (!(saved > 0)) return; // buys no time — not a step, whatever its own ROI
+      // extraWeekly/nested and (on the return value) capital/weeklyIncome have no UI
+      // reader either - same test surface as the roadmap row fields above.
+      steps.push({
+        sym: st.sym, tier: st.tier, tierNum: st.tierNum, cost: st.cost, roi: st.roi,
+        extraWeekly: stepWeekly, nested: nested, days: days, daysSaved: saved
+      });
+    });
+
+    steps.sort(function(a, b) {
+      return (a.days - b.days) || a.sym.localeCompare(b.sym) || (a.tierNum - b.tierNum);
+    });
+
+    return {
+      goal: goal,
+      capital: goalCapital,
+      weeklyIncome: weeklyIncome,
+      baselineDays: baselineDays,
+      steps: steps,
+      best: steps[0] || null
+    };
   }
 
   // Target + bridgebuilder chain — shared by the ROI Planner and the Quick
@@ -837,21 +1091,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // Find payout data from ROI_MAP for this next increment
       var payoutEntry = ROI_MAP[sym + "|T" + tierInfo.nextIncrement] || null;
       // If no ROI_MAP entry — passive stock, skip (no sellable payout)
-      // ROI uses LIVE item value for item-paying stocks (falls back to the baked-in
-      // baseline until the item price loads), matching computeRoadmap and the bridge
-      // candidate income below — otherwise the target picker ranks item stocks on a
-      // stale baseline and disagrees with the roadmap the user sees alongside it.
-      var npCycle = 0;
-      if (payoutEntry) {
-        var npIv = getItemValue(payoutEntry);
-        npCycle = (payoutEntry.item && npIv > 0) ? npIv : payoutEntry.payout;
-      }
+      // ROI uses the LIVE per-cycle payout (getPerCycle) and Torn's own cycle length
+      // (getCycleDays) - the same two inputs computeRoadmap, the upgrade swap and the
+      // planner's sell candidates now use, so every view ranks a tier identically.
+      var npCycle = getPerCycle(payoutEntry);
       dynamicNextTiers.push({
         sym: sym,
         tierInfo: tierInfo,
         payoutEntry: payoutEntry,
         cost: tierInfo.cost,
-        roi: payoutEntry ? (npCycle / tierInfo.cost * (365 / payoutEntry.freq) * 100) : 0
+        roi: payoutEntry ? (npCycle / tierInfo.cost * (365 / getCycleDays(payoutEntry, ownedMap)) * 100) : 0
       });
     });
 
@@ -862,7 +1111,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (roiSymSkipped(e.sym)) return false;
       return e.tierInfo.nextIncrement <= roiSymTierCap(e.sym);
     });
-    dynamicNextTiers.sort(function(a, b) { return b.roi - a.roi; });
+    // ROI descending, then symbol alphabetically - one candidate per symbol, so the
+    // symbol key makes the order fully deterministic instead of ownedMap key order.
+    dynamicNextTiers.sort(function(a, b) {
+      return (b.roi - a.roi) || a.sym.localeCompare(b.sym);
+    });
 
     // Target = best ROI entry regardless of affordability
     var target = dynamicNextTiers[0] || null;
@@ -873,15 +1126,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // excluded from every affordability/days calculation below (and from the
     // renderer's verdict, which reads plan.fundCapital). Mirrors the swing
     // valuation in renderROIPlanner (livePrice × swing_shares net of 0.1% fee).
-    var ownTargetSwing = 0;
-    if (target) {
-      var tgtOwned = ownedMap[target.sym];
-      var tgtLive = raw ? raw.find(function(x) { return x.stock === target.sym; }) : null;
-      var tgtPrice = tgtLive ? (parseFloat(tgtLive.price) || 0) : 0;
-      if (tgtOwned && tgtOwned.swing_shares > 0 && tgtPrice > 0) {
-        ownTargetSwing = tgtPrice * tgtOwned.swing_shares * 0.999;
-      }
-    }
+    var ownTargetSwing = target ? symSwingValue(target.sym, ownedMap, raw) : 0;
     var fundCapital = Math.max(0, totalCapital - ownTargetSwing);
 
     // Bridgebuilder chain (sell-later model): a bridge is a benefit tier you buy
@@ -906,9 +1151,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       dynamicNextTiers.forEach(function(e) {
         if (e.sym === target.sym && e.tierInfo.nextIncrement === target.tierInfo.nextIncrement) return;
         if (!e.payoutEntry) return;
-        var iv = getItemValue(e.payoutEntry);
-        var perCycle = (e.payoutEntry.item && iv > 0) ? iv : e.payoutEntry.payout;
-        var weekly = perCycle / e.payoutEntry.freq * 7;
+        var perCycle = getPerCycle(e.payoutEntry);
+        var weekly = perCycle / getCycleDays(e.payoutEntry, ownedMap) * 7;
         if (weekly <= 0) return;
         candidates.push({ e: e, weekly: weekly });
       });
@@ -1012,24 +1256,35 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         if (saleValue <= 0) continue;
         var entry = ROI_MAP[sym + "|T" + t];
         if (!entry) continue;
-        var iv = getItemValue(entry);
-        var perCycle = (entry.item && iv > 0) ? iv : entry.payout;
-        var weekly = perCycle ? perCycle / (entry.freq || 7) * 7 : 0;
+        var perCycle = getPerCycle(entry);
+        var cycleDays = getCycleDays(entry, ownedMap);
+        var weekly = perCycle ? perCycle / cycleDays * 7 : 0;
         var tierCost = marginalShares * livePrice;
-        // payout-based ROI to match the buy-side roi from computeBridgePlan (comparable)
-        var roi = (tierCost > 0 && entry.payout) ? (entry.payout / tierCost * (365 / (entry.freq || 7)) * 100) : 0;
-        sellUnits.push({ sym: sym, tier: "T" + t, roi: roi, shares: marginalShares, saleValue: saleValue, weekly: weekly });
+        // ROI on the LIVE per-cycle payout the buy side uses (getPerCycle), so the two
+        // sides are genuinely comparable for the 9 item-paying stocks. The cost basis
+        // stays this tier's own parcel at live price: that is what selling the block
+        // actually returns, which is the right denominator for a sell decision.
+        var roi = (tierCost > 0 && perCycle) ? (perCycle / tierCost * (365 / cycleDays) * 100) : 0;
+        sellUnits.push({ sym: sym, tier: "T" + t, tierNum: t, roi: roi, shares: marginalShares, saleValue: saleValue, weekly: weekly });
       }
     });
     if (sellUnits.length === 0) return null;
-    sellUnits.sort(function(a, b) { return a.roi - b.roi; }); // lowest ROI first
+    // Lowest ROI first, then symbol alphabetically (deterministic instead of
+    // Object.keys order), then tier DESCENDING. The tier key is defence in depth
+    // only: within one symbol ROI is strictly decreasing in tier (the parcel doubles
+    // while the payout does not), so the ROI key already orders one stock's tiers
+    // top-down and the tier key cannot currently be reached. It stays as the explicit
+    // statement of the ordering the accumulate-a-prefix loop below depends on - it
+    // must never drop a lower tier while a higher one is still held.
+    sellUnits.sort(function(a, b) {
+      return (a.roi - b.roi) || a.sym.localeCompare(b.sym) || (b.tierNum - a.tierNum);
+    });
 
     var best = null;
     plan.dynamicNextTiers.forEach(function(b) {
       if (!b.payoutEntry || b.cost <= 0 || !b.tierInfo) return;
-      var biv = getItemValue(b.payoutEntry);
-      var bPerCycle = (b.payoutEntry.item && biv > 0) ? biv : b.payoutEntry.payout;
-      var buyWeekly = bPerCycle ? bPerCycle / (b.payoutEntry.freq || 7) * 7 : 0;
+      var bPerCycle = getPerCycle(b.payoutEntry);
+      var buyWeekly = bPerCycle ? bPerCycle / getCycleDays(b.payoutEntry, ownedMap) * 7 : 0;
       if (buyWeekly <= 0) return;
       if (liquidCash >= b.cost) return; // affordable with cash alone — no sell needed, not an upgrade swap
       // Accumulate lowest-ROI sell units until on-hand cash + proceeds cover the buy.
@@ -1113,9 +1368,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var targetRoi = target.roi || 0;
       var sellCandidates = [];
       ownedEntries.forEach(function(e) {
-        var sItemVal = getItemValue(e);
-        var sPerCycle = (e.item && sItemVal > 0) ? sItemVal : e.payout;
-        var weekly = sPerCycle ? sPerCycle / (e.freq || 7) * 7 : 0;
+        var sPerCycle = getPerCycle(e);
+        var sCycleDays = getCycleDays(e, ownedMap);
+        var weekly = sPerCycle ? sPerCycle / sCycleDays * 7 : 0;
         var liveEntry = raw ? raw.find(function(x) { return x.stock === e.sym; }) : null;
         var livePrice = liveEntry ? (parseFloat(liveEntry.price) || 0) : 0;
         var req = BENEFIT_REQ[e.sym] || 0;
@@ -1126,18 +1381,25 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var saleValue = tierShares * livePrice * 0.999;
         // Live cost of this tier's shares
         var liveTierCost = tierShares * livePrice;
-        var entryRoi = liveTierCost > 0 && e.payout ? (e.payout / liveTierCost * (365 / (e.freq || 7)) * 100) : 0;
+        // Same LIVE per-cycle payout as the buy side (getPerCycle) over this tier's own
+        // parcel at live price - the cash a sale of this block actually returns.
+        var entryRoi = (liveTierCost > 0 && sPerCycle) ? (sPerCycle / liveTierCost * (365 / sCycleDays) * 100) : 0;
         if (entryRoi > 0 && entryRoi < targetRoi && saleValue > 0) {
           sellCandidates.push({
             sym: e.sym,
             tier: e.tier,
+            tierNum: entryTierNum,
             roi: entryRoi,
             saleValue: saleValue,
             weekly: weekly
           });
         }
       });
-      sellCandidates.sort(function(a, b) { return a.roi - b.roi; }); // lowest ROI first
+      // Lowest ROI first, then symbol alphabetically, then tier - deterministic
+      // instead of ROI_TABLE insertion order.
+      sellCandidates.sort(function(a, b) {
+        return (a.roi - b.roi) || a.sym.localeCompare(b.sym) || (a.tierNum - b.tierNum);
+      });
     }
 
     // Build HTML
@@ -1287,9 +1549,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           if (entry.sym !== sym) return;
           var tierNum = parseInt(entry.tier.replace("T",""), 10);
           if (tierNum > increments) return;
-          var bItemVal = getItemValue(entry);
-          var bPerCycle = (entry.item && bItemVal > 0) ? bItemVal : entry.payout;
-          stockWeekly += bPerCycle / entry.freq * 7;
+          stockWeekly += getPerCycle(entry) / getCycleDays(entry, ownedMap) * 7;
           if (entry.item) itemName = getItemName(entry.item) || itemName;
         });
         if (stockWeekly > 0) {
@@ -1366,7 +1626,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     ownedEntries.forEach(function(e) {
       var o = ownedMap[e.sym];
       // Days remaining = frequency - progress (both already stored from API)
-      var freq = (o && o.dividend_frequency) || e.freq || 0;
+      var freq = getCycleDays(e, ownedMap);
       var prog = (o && o.dividend_progress) || 0;
       var daysLeft = (freq > 0 && prog >= 0) ? Math.max(0, freq - prog) : -1;
       tableRows.push({ sym: e.sym, tier: e.tier, isOwned: true, cost: 0, roi: 0, sharesNeeded: 0, payout: e.payout || 0, freq: freq, daysLeft: daysLeft });
@@ -1388,7 +1648,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         roi: e.roi,
         sharesNeeded: e.tierInfo.sharesNeeded,
         payout: e.payoutEntry ? e.payoutEntry.payout : 0,
-        freq: e.payoutEntry ? e.payoutEntry.freq : 7,
+        freq: e.payoutEntry ? getCycleDays(e.payoutEntry, ownedMap) : 7,
         item: e.payoutEntry ? e.payoutEntry.item : 0,
         key: key
       });
@@ -1431,29 +1691,68 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         '</div>';
     });
 
-    // Full snowball roadmap (collapsible): every benefit tier ranked by payback.
-    // Owned tiers flagged ✓; for unowned tiers a running "cum" shows the total
-    // capital needed to reach that rung. Buying in this order = best ROI first.
+    // Full snowball roadmap (collapsible). Ranked by TIME TO THE BIGGEST BLOCK — the
+    // goal is the highest absolute income still open, not the best ROI and not the
+    // shortest payback — see computeFastestPath. Buys that shorten the
+    // time to the goal lead, in the order they shorten it most; every other tier
+    // follows in payback order. Owned tiers flagged ✓; for unowned tiers a running
+    // "cum" shows the capital needed to reach that rung buying in this order.
     var roadmap = computeRoadmap(ownedMap, raw);
+    var fastest = computeFastestPath(ownedMap, raw, totalCapital, weeklyIncome, roadmap);
+    var rmStepMap = {};
+    if (fastest) {
+      fastest.steps.forEach(function(st, i) { rmStepMap[st.sym + "|" + st.tier] = { step: st, rank: i }; });
+      // Array#sort is stable, so non-steps keep computeRoadmap's payback order.
+      roadmap = roadmap.slice().sort(function(a, b) {
+        var ra = rmStepMap[a.sym + "|" + a.tier], rb = rmStepMap[b.sym + "|" + b.tier];
+        if (ra && rb) return ra.rank - rb.rank;
+        if (ra) return -1;
+        if (rb) return 1;
+        return 0;
+      });
+    }
+    var fmDays = function(v) { return (v === Infinity || v == null) ? "—" : Math.round(v).toLocaleString("en-US") + "d"; };
+    // daysSaved is Infinity when the goal is unreachable by waiting but reachable via
+    // this step - the strongest possible recommendation. fmDays would print "—" for it,
+    // which reads as "saves nothing", so say what actually happened instead.
+    // "−123d" read as a penalty next to a day count. Days saved are a GAIN, so
+    // both call sites say it in words.
+    var fmSaved = function(v) {
+      if (v === Infinity) return "now reachable";
+      return fmDays(v) + " sooner";
+    };
     if (roadmap.length > 0) {
       var rmCum = 0;
+      var rmSymSpent = {}; // highest per-symbol cost already counted into rmCum
       var rmRows = roadmap.map(function(r) {
-        var pbStr = (r.payback === Infinity) ? "—" : r.payback.toLocaleString("en-US") + "d";
+        // payback is always finite: computeRoadmap drops any row with dailyInc <= 0,
+        // so the old Infinity branch here could not be reached.
+        var pbStr = r.payback.toLocaleString("en-US") + "d";
+        // A pending tier is already paid for, so it is shown (the user should see it
+        // is on its way) but it is NOT a step and contributes nothing to `cum`.
+        var secured = r.owned || r.pending;
         var detail;
-        if (r.owned) {
-          detail = "Owned";
+        if (secured) {
+          detail = r.pending ? "⏳ pending — shares held, tier lands on next payout" : "✓ owned";
         } else {
-          rmCum += r.cost;
+          // r.cost is the shares still missing to REACH this tier, so consecutive
+          // tiers of one stock overlap - adding them raw would double-count. Only the
+          // increment over the highest tier of that stock already counted goes in.
+          var spent = rmSymSpent[r.sym] || 0;
+          rmCum += Math.max(0, r.cost - spent);
+          rmSymSpent[r.sym] = Math.max(spent, r.cost);
           detail = fmRoi(r.cost) + " · cum " + fmRoi(rmCum);
         }
-        return '<div style="display:grid;grid-template-columns:42px 26px 1fr 60px;gap:4px;align-items:center;padding:6px 14px;border-bottom:1px solid ' + c.row_border + ';' + (r.owned ? 'background:' + c.owned_bg + ';' : '') + '">' +
-          '<span style="' + s + ';font-weight:700;font-size:12px;color:' + (r.owned ? c.green : c.text) + '">' + r.sym + '</span>' +
+        var secColor = secured ? c.green : c.text;
+        return '<div style="display:grid;grid-template-columns:42px 26px 1fr 60px;gap:4px;align-items:center;padding:6px 14px;border-bottom:1px solid ' + c.row_border + ';' + (secured ? 'background:' + c.owned_bg + ';' : '') + '">' +
+          '<span style="' + s + ';font-weight:700;font-size:12px;color:' + secColor + '">' + r.sym + '</span>' +
           '<span style="' + s + ';font-size:9px;color:' + c.muted + '">' + r.tier + '</span>' +
           '<div style="display:flex;flex-direction:column;gap:1px;overflow:hidden;min-width:0">' +
-            '<span style="' + s + ';font-size:10px;color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (r.owned ? "✓ owned" : detail) + '</span>' +
-            '<span style="font-size:9px;color:' + c.muted + '">ROI ' + r.roi.toFixed(2) + '%</span>' +
+            '<span style="' + s + ';font-size:10px;color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + detail + '</span>' +
+            '<span style="font-size:9px;color:' + c.muted + '">ROI ' + r.roi.toFixed(2) + '%' +
+              (rmStepMap[r.sym + "|" + r.tier] ? ' · goal in ' + fmDays(rmStepMap[r.sym + "|" + r.tier].step.days) + ' (' + fmSaved(rmStepMap[r.sym + "|" + r.tier].step.daysSaved) + ')' : '') + '</span>' +
           '</div>' +
-          '<span style="' + s + ';font-size:10px;font-weight:700;text-align:right;color:' + (r.owned ? c.green : c.blue) + '">' + pbStr + '</span>' +
+          '<span style="' + s + ';font-size:10px;font-weight:700;text-align:right;color:' + (secured ? c.green : c.blue) + '">' + pbStr + '</span>' +
           '</div>';
       }).join("");
       html += '<div style="border-bottom:1px solid ' + c.divider + ';background:' + c.bg2 + '">' +
@@ -1462,7 +1761,17 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           '<span id="tsa-roadmap-caret" style="font-size:10px;color:' + c.muted + '">▶</span>' +
         '</button>' +
         '<div id="tsa-roadmap-list" style="display:none">' +
+          (fastest ? '<div style="padding:6px 14px;border-bottom:1px solid ' + c.divider + ';font-size:9px;color:' + c.muted + ';' + s + ';line-height:1.5">' +
+            'Goal ' + fastest.goal.sym + ' ' + fastest.goal.tier + ' · ' + fmRoi(fastest.goal.monthlyInc) + '/mo · ' + fmRoi(fastest.goal.cost) + ' · ROI ' + fastest.goal.roi.toFixed(2) + '%<br>' +
+            'Wait only: ' + fmDays(fastest.baselineDays) +
+            (fastest.best
+              ? ' · via ' + fastest.best.sym + ' ' + fastest.best.tier + ': ' + fmDays(fastest.best.days) + ' (' + fmSaved(fastest.best.daysSaved) + ')'
+              : ' · no affordable buy shortens it') +
+            '</div>' : '') +
           '<div style="display:grid;grid-template-columns:42px 26px 1fr 60px;gap:4px;padding:5px 14px;font-size:9px;letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;border-bottom:1px solid ' + c.divider + ';' + s + '"><span>Stock</span><span>Tier</span><span>Cost / cumulative</span><span style="text-align:right">Payback</span></div>' +
+          ((fastest && fastest.steps.length > 0)
+            ? '<div style="padding:2px 14px 5px;font-size:9px;color:' + c.muted + ';' + s + '">Order: goal-shortening steps first, then payback</div>'
+            : '') +
           rmRows +
         '</div>' +
       '</div>';
@@ -1712,6 +2021,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // whichever is present so passive benefit blocks are detected too.
       var bonus = s.dividend || s.benefit;
       var apiIncrement = (bonus && bonus.increment) || 0;
+      // A holding is a PASSIVE perk when the API gives it no `dividend` object at
+      // all (verified 2026-08-24: `dividend` exists only where the benefit type is
+      // "active"). Passive perks are permanent — WSU's 10% education-time cut is
+      // simply on — so their `benefit.frequency` is a static market attribute, NOT a
+      // countdown. Flag them here so no view invents a "next payout in Xd" for a
+      // benefit that never pays out. PASSIVE_STOCKS is the belt-and-braces check.
+      var isPassivePerk = !s.dividend || PASSIVE_STOCKS.indexOf(acronym) >= 0;
 
       // benefit_shares and swing_shares will be calculated by enrichOwnedMap
       // after live prices are available — store raw data only for now
@@ -1725,6 +2041,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         has_swing: false,        // recalculated in enrichOwnedMap
         dividend_progress: (bonus && bonus.progress) || 0,
         dividend_frequency: (bonus && bonus.frequency) || 0,
+        is_passive_perk: isPassivePerk,
         dividend_increment: apiIncrement,
         dividend_next: 0, // not exposed by API — calculated from progress/frequency
         transactions: transactions.sort(function(a, b) { return b.time_bought - a.time_bought; })
@@ -1758,6 +2075,36 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         o.has_dividend = false;
         o.has_swing = totalShares > 0;
         return;
+      }
+
+      // FAIL-SAFE for a fulfilled passive perk block with NO increment reported.
+      //
+      // Torn omits the `dividend` object entirely for a passive perk but still reports
+      // the increment under `benefit` (VERIFIED against the live API 2026-08-24, raw
+      // response archived out of repo: WSU
+      // returns `benefit:{ready:0,increment:1,progress:1,frequency:7}` on a fulfilled
+      // holding). buildOwnedMap reads `s.dividend || s.benefit`, so the normal path
+      // below already holds the block back — this guard only catches the day that
+      // increment goes missing (Torn changes the field, or a proxy/PDA strips it),
+      // which would otherwise dump a live perk block into sellable swing capital.
+      // A fulfilled perk block can be worth many millions, and the planner would
+      // happily spend it.
+      //
+      // FULFILMENT IS SHARES, NOTHING ELSE: `shares >= requirement`. Never `ready` or
+      // `progress` — WSU reports ready:0/progress:1 while the perk is fully on (that
+      // is day 1 of the 7-day cycle), so gating on either locks the wrong blocks.
+      // Below the requirement there is no perk yet, so those shares stay ordinary
+      // swing and keep their price signals. `roiSymSkipped` above and a tier cap of 0
+      // still release the block — an explicit user opt-out wins over the fail-safe.
+      if (increment <= 0 && PASSIVE_STOCKS.indexOf(sym) >= 0) {
+        var passReq = BENEFIT_REQ[sym] || 0;
+        if (passReq > 0 && totalShares >= passReq && roiSymTierCap(sym) >= 1) {
+          o.benefit_shares = passReq;
+          o.swing_shares = totalShares - passReq;
+          o.has_dividend = true;
+          o.has_swing = (totalShares - passReq) > 0;
+          return;
+        }
       }
 
       if (increment <= 0) {
@@ -1947,6 +2294,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         hasDividend: (owned && owned.has_dividend) || false,
         dividendProgress: (owned && owned.dividend_progress) || 0,
         dividendFrequency: (owned && owned.dividend_frequency) || 0,
+        isPassivePerk: (owned && owned.is_passive_perk) || false,
         p_live, reasons: "tornsy unavailable — no signal data",
         netProfitPct: netProfitPct,
         hoursHeld: hoursHeld,
@@ -1972,6 +2320,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         hasDividend: (owned && owned.has_dividend) || false,
         dividendProgress: (owned && owned.dividend_progress) || 0,
         dividendFrequency: (owned && owned.dividend_frequency) || 0,
+        isPassivePerk: (owned && owned.is_passive_perk) || false,
         p_live, reasons: "Above weekly peak",
         netProfitPct: netProfitPct,
         hoursHeld: hoursHeld,
@@ -2173,6 +2522,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       hasDividend: (owned && owned.has_dividend) || false,
       dividendProgress: (owned && owned.dividend_progress) || 0,
       dividendFrequency: (owned && owned.dividend_frequency) || 0,
+      isPassivePerk: (owned && owned.is_passive_perk) || false,
       p_live, reasons: reasons.join(" | "), netProfitPct, hoursHeld,
       shares: (owned && owned.shares) || 0,
       avg_price: (owned && owned.avg_price) || 0,
@@ -2975,7 +3325,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           "<span style=\"font-size:10px;color:" + d.muted + "\">Score " + s.score + (s.hasDividend ? " · DIV" : "") + (s.reasons ? " · " + s.reasons.split(" | ").slice(0,2).join(" · ") : "") + "</span>" +
           "</div><div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:2px\">" +
           "<span style=\"font-size:13px;font-weight:bold;color:" + col + ";" + ms + "\">" + pct + "</span>" +
-          (s.hasDividend ? "<span style=\"font-size:9px;padding:2px 6px;border-radius:10px;font-weight:bold;background:rgba(255,193,7,0.12);color:" + d.yellow + ";border:1px solid rgba(255,193,7,0.3)\">DIV " + s.dividendProgress + "/" + s.dividendFrequency + "d</span>" : "") +
+          // A passive perk has no payout cycle, so it gets a plain PERK badge:
+          // showing progress/frequency there would be a countdown to nothing.
+          (s.hasDividend ? "<span style=\"font-size:9px;padding:2px 6px;border-radius:10px;font-weight:bold;background:rgba(255,193,7,0.12);color:" + d.yellow + ";border:1px solid rgba(255,193,7,0.3)\">" + (s.isPassivePerk ? "PERK" : "DIV " + s.dividendProgress + "/" + s.dividendFrequency + "d") + "</span>" : "") +
           (s.sellSignal ? "<span style=\"font-size:9px;font-weight:bold;color:" + d.red + "\">" + s.sellSignal + "</span>" : "") +
           "</div></div>" +
           "</div>" +
