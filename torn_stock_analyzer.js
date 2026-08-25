@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.43.0
+// @version      2.44.0
 // @author       AeC3
-// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
+// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
 // @run-at       document-end
 // @license      MIT
@@ -2634,9 +2634,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (!Array.isArray(stocks)) return;
       stocks.forEach(function(s) {
         if (!merged[s.stock]) {
-          merged[s.stock] = Object.assign({}, s, {interval: {}});
+          merged[s.stock] = Object.assign({}, s, {interval: {}, ohlc: {}});
         }
         Object.assign(merged[s.stock].interval, s.interval || {});
+        // ohlc rides along inside the same four responses (one `ohlc=` param per
+        // batch, no extra call), so it merges exactly like `interval`: per symbol,
+        // a later batch overwrites the same bucket key. Rows are
+        // {open, high, low} as STRINGS — every reader must parseFloat.
+        Object.assign(merged[s.stock].ohlc, s.ohlc || {});
         if (s.price) merged[s.stock].price = s.price;
         if (s.investors) merged[s.stock].investors = s.investors;
       });
@@ -2730,9 +2735,24 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       }
     }
 
-    // Pre-compute weekly peak (used by both the hard filter and indicator 1)
+    // Pre-compute weekly peak (used by both the hard filter and indicator 1).
+    // weekPrices are seven POINT samples — the d1..d5/d7/w1 CLOSES. The max of a
+    // sample is not the week's HIGH, and the gap is not academic: measured on live
+    // tornsy data for all 35 stocks, 19 were off by more than 10 percentage points,
+    // 12 of those read a flat 0% drop because live sat below every sample, and TMI
+    // showed 18.8% where the true drop from the weekly high was 46.6%.
+    // So the w1 CANDLE high wins when tornsy sent one, and the sampled max stays as
+    // the fallback for when it did not (a failed tornsy batch, or prices read off
+    // the page by buildRawFromDom, which has no history at all).
     var weekPrices = [p_d1,p_d2,p_d3,p_d4,p_d5,p_d7,p_w1].filter(function(x){ return x > 0; });
-    var weekPeak = weekPrices.length > 0 ? Math.max.apply(null, weekPrices) : 0;
+    var sampledPeak = weekPrices.length > 0 ? Math.max.apply(null, weekPrices) : 0;
+    var w1Candle = (r.ohlc && r.ohlc.w1) || null;
+    var w1High = w1Candle ? parseFloat(w1Candle.high) : NaN;
+    var w1Low  = w1Candle ? parseFloat(w1Candle.low)  : NaN;
+    // A candle whose high is not above its low is not a range: reject it whole
+    // rather than half-trusting one side of it.
+    var haveW1Candle = isFinite(w1High) && isFinite(w1Low) && w1Low > 0 && w1High > w1Low;
+    var weekPeak = haveW1Candle ? w1High : sampledPeak;
 
     // ── NO INTERVAL HISTORY (tornsy unreachable; price came off the page) ──
     // Every indicator below reads interval prices, and with them all defaulting to 0 the
@@ -2808,7 +2828,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       }
     }
 
-    if (weekPrices.length > 0) {
+    if (weekPeak > 0) {
       dropFromWeekPeak = ((p_live - weekPeak) / weekPeak) * 100;
       // Score relative to dynamic threshold; halved during sustained downtrend
       var dt = dynamicDropThreshold; // negative value e.g. -1.2
@@ -2974,6 +2994,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       alreadyRallied: alreadyRallied,
       rsiOverbought: rsiOverbought,
       priceAboveWeek: p_w1 > 0 && p_live > p_w1,
+      // The week the drop/position points were scored against. low is 0 when no
+      // candle arrived — the sampled fallback knows a max, not a range.
+      weekRange: { high: weekPeak, low: haveW1Candle ? w1Low : 0, fromCandle: haveW1Candle },
       has_swing: (owned && owned.has_swing) || false,
       has_benefit: (owned && owned.has_dividend) || false,
       hasDividend: (owned && owned.has_dividend) || false,
@@ -3445,7 +3468,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         })() +
         "</div>";
 
-      function buildBreakdownHtml(bd) {
+      function buildBreakdownHtml(bd, st) {
         var rows = [
           { label: "Drop from weekly peak",    pts: bd.drop || 0,     max: 60 },
           { label: "Position in range",         pts: bd.position || 0, max: 35 },
@@ -3465,7 +3488,25 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             "<div style=\"height:4px;background:" + d.border + ";border-radius:2px\">" +
             "<div style=\"height:4px;width:" + barW + "%;background:" + barColor + ";border-radius:2px\"></div>" +
             "</div></div>";
-        }).join("");
+        }).join("") + buildWeekRangeHtml(st);
+      }
+
+      // One line under the bars: the week that the drop and position points were
+      // actually scored against, so the honest high/low sits next to them.
+      // "sampled" marks the fallback — no w1 candle, so the high is the max of the
+      // daily closes and can sit below the real weekly high.
+      function buildWeekRangeHtml(st) {
+        var wr = st && st.weekRange;
+        if (!wr || !(wr.high > 0)) return "";
+        var txt = "Week " + (wr.low > 0 ? "$" + wr.low.toFixed(2) + "–" : "high ") + "$" + wr.high.toFixed(2);
+        if (st.p_live > 0) {
+          txt += " · live $" + st.p_live.toFixed(2);
+          if (wr.low > 0 && wr.high > wr.low) {
+            txt += " (" + Math.round((st.p_live - wr.low) / (wr.high - wr.low) * 100) + "% of range)";
+          }
+        }
+        if (!wr.fromCandle) txt += " · sampled";
+        return "<div style=\"font-size:10px;color:" + d.muted + ";margin:-2px 0 6px\">" + txt + "</div>";
       }
 
       function buildBbHtml(bbCtx) {
@@ -3543,7 +3584,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             var invSign = invDelta > 0 ? "+" : "";
             invHtml = " <span style=\"font-size:9px;color:" + invColor + ";font-weight:bold\">" + invSign + invDelta.toLocaleString("en-US") + " inv 24h</span>";
           }
-          var bdHtml = buildBreakdownHtml(bd);
+          var bdHtml = buildBreakdownHtml(bd, s);
           var signalColor = s.signal === "STRONG BUY" ? "#FFD700" : s.signal === "BUY" ? d.green : s.signal === "CONSIDER" ? "#FFA500" : d.muted;
           // Color based on ownership: unowned=green, owned swing=amber, owned benefit=blue
           var symColor = !s.owned ? d.green : s.has_benefit ? d.blue : d.yellow;
@@ -3601,7 +3642,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         watchList.forEach(function(s) {
           var watchBreakdownId = "tsa-watch-breakdown-" + s.symbol;
           var bd = s.scoreBreakdown || {};
-          var bdHtml = buildBreakdownHtml(bd);
+          var bdHtml = buildBreakdownHtml(bd, s);
           var watchSymColor = s.has_benefit ? d.blue : d.yellow;
           var watchRowBg = s.has_benefit ? d.rowBenefit : (isDark2 ? "rgba(255,193,7,0.07)" : "#fffbeb");
           var watchRowBorder = s.has_benefit ? d.rowBenefitBorder : (isDark2 ? "rgba(255,193,7,0.25)" : "#fde68a");
@@ -4179,8 +4220,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var cataloguePromise = refreshStockCatalogue();
     var t1p = tornsyFetch("https://tornsy.com/api/stocks?interval=m30,h1,h2,h3,h4");
     var t2p = tornsyFetch("https://tornsy.com/api/stocks?interval=h6,h8,h10,h12,h16");
-    var t3p = tornsyFetch("https://tornsy.com/api/stocks?interval=h20,d1,d2,d3,d4");
-    var t4p = tornsyFetch("https://tornsy.com/api/stocks?interval=d5,d6,d7,w1,h5");
+    // `ohlc=` rides along in a request that is already being made — same response,
+    // no extra call, no extra rate cost. It gives the week's real high/low instead
+    // of the max of seven daily closes (see the weekPeak comment in calcScore).
+    // TRAP: ohlc accepts a SMALLER key set than interval — h1/h6/h12/d1/w1/n1/y1
+    // are 200, but an OFFSET like d7 (or d2/d3/h20) is a 400 that kills the whole
+    // batch. d7 stays in `interval`, never in `ohlc`. Verified 2026-08-25.
+    // w1 is asked for on two batches on purpose: either one landing keeps the
+    // candle path alive if the other fails.
+    var t3p = tornsyFetch("https://tornsy.com/api/stocks?interval=h20,d1,d2,d3,d4&ohlc=w1");
+    var t4p = tornsyFetch("https://tornsy.com/api/stocks?interval=d5,d6,d7,w1,h5&ohlc=w1");
 
     // Instant holdings: the Torn user call is fast, the tornsy price batches are
     // the slow part. Paint a price-independent holdings list the moment the user
