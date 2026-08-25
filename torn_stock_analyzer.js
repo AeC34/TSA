@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.42.4
+// @version      2.42.5
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -103,6 +103,7 @@
       var val = (document.getElementById("tsa-key-input").value || "").trim();
       if (!val) return;
       lsSet("tsa-torn-apikey", val);
+      lsSet("tsa_stock_catalogue_fail_ts", "0");   // new key, fresh attempt
       TORN_API_KEY = val;
       if (onSave) onSave();
     });
@@ -6699,6 +6700,10 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         if (keyVal && keyVal !== TORN_API_KEY) {
           TORN_API_KEY = keyVal;
           lsSet("tsa-torn-apikey", keyVal);
+          // The catalogue failure marker records that A KEY could not read the
+          // catalogue, so it must not outlive that key — otherwise upgrading the
+          // key looks like it changed nothing for up to an hour.
+          lsSet("tsa_stock_catalogue_fail_ts", "0");
         }
         var saveBtn = document.getElementById("tsa-settings-save");
         if (saveBtn) {
