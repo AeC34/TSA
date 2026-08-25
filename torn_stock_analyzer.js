@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.47.0
+// @version      2.48.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -92,21 +92,21 @@
   var KEY_BUILDER_URL = "https://www.torn.com/preferences.php#tab=api?step=addNewKey&user=basic,money,stocks&faction=donations&market=itemmarket&title=TORN%20STOCK%20ANALYZER";
 
   function showKeyOnboarding(contentEl, onSave) {
-    var isDark = document.getElementById("tsa-overlay") ? document.getElementById("tsa-overlay").classList.contains("tsa-dark") : false;
-    var bg   = isDark ? "#0f0f1a" : "#ffffff";
-    var bg2  = isDark ? "#1a1a2e" : "#f7f9fc";
-    var text = isDark ? "#c8c8d8" : "#222";
-    var muted = isDark ? "#6a6a8a" : "#888";
-    var border = isDark ? "#2a2a4a" : "#e0e0e0";
+    // renders inside #tsa-overlay, so the tokens resolve and switch themselves
+    var bg   = "var(--tsa-bg)";
+    var bg2  = "var(--tsa-bg-raised)";
+    var text = "var(--tsa-fg)";
+    var muted = "var(--tsa-fg-muted)";
+    var border = "var(--tsa-border)";
     contentEl.innerHTML =
-      "<div style=\"padding:18px;background:" + bg + ";font-family:sans-serif\">" +
-        "<div style=\"font-size:13px;font-weight:bold;color:" + text + ";margin-bottom:6px\">API Key Required</div>" +
-        "<div style=\"font-size:11px;color:" + muted + ";margin-bottom:14px;line-height:1.5\">Torn Stock Analyzer needs a Torn API key to load stock and portfolio data. Your key is stored only in your browser and sent exclusively to api.torn.com.</div>" +
-        "<a href=\"" + KEY_BUILDER_URL + "\" target=\"_blank\" style=\"display:block;text-align:center;padding:10px;border-radius:8px;background:#4a6fa5;color:#fff;font-size:12px;font-weight:bold;text-decoration:none;margin-bottom:14px\">Create custom key (recommended)</a>" +
-        "<div style=\"font-size:10px;color:" + muted + ";margin-bottom:6px;text-align:center\">— or enter an existing key below —</div>" +
-        "<div style=\"font-size:10px;color:" + muted + ";margin-bottom:6px\">Limited Access key or custom key</div>" +
-        "<input id=\"tsa-key-input\" type=\"text\" placeholder=\"Paste API key here\" style=\"width:100%;box-sizing:border-box;padding:8px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:12px;margin-bottom:10px\">" +
-        "<button id=\"tsa-key-save\" style=\"width:100%;padding:9px;border-radius:7px;border:none;background:#4a6fa5;color:#fff;font-size:13px;font-weight:bold;cursor:pointer\">Save key</button>" +
+      "<div style=\"padding:18px;background:" + bg + ";font-family:var(--tsa-sans)\">" +
+        "<div style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + text + ";margin-bottom:6px\">API Key Required</div>" +
+        "<div style=\"font-size:var(--tsa-fs-micro);color:" + muted + ";margin-bottom:14px;line-height:1.5\">Torn Stock Analyzer needs a Torn API key to load stock and portfolio data. Your key is stored only in your browser and sent exclusively to api.torn.com.</div>" +
+        "<a href=\"" + KEY_BUILDER_URL + "\" target=\"_blank\" style=\"display:block;text-align:center;padding:10px;border-radius:var(--tsa-r-3);background:var(--tsa-accent);color:var(--tsa-on-accent);font-size:var(--tsa-fs-micro);font-weight:bold;text-decoration:none;margin-bottom:14px\">Create custom key (recommended)</a>" +
+        "<div style=\"font-size:var(--tsa-fs-micro);color:" + muted + ";margin-bottom:6px;text-align:center\">— or enter an existing key below —</div>" +
+        "<div style=\"font-size:var(--tsa-fs-micro);color:" + muted + ";margin-bottom:6px\">Limited Access key or custom key</div>" +
+        "<input id=\"tsa-key-input\" type=\"text\" placeholder=\"Paste API key here\" style=\"width:100%;box-sizing:border-box;padding:8px 10px;border-radius:var(--tsa-r-2);border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:var(--tsa-fs-micro);margin-bottom:10px\">" +
+        "<button id=\"tsa-key-save\" style=\"width:100%;padding:9px;border-radius:var(--tsa-r-2);border:none;background:var(--tsa-accent);color:var(--tsa-on-accent);font-size:var(--tsa-fs-body);font-weight:bold;cursor:pointer\">Save key</button>" +
       "</div>";
     document.getElementById("tsa-key-save").addEventListener("click", function() {
       var val = (document.getElementById("tsa-key-input").value || "").trim();
@@ -266,7 +266,260 @@
     "pts","sym","sys","tcc","tci","tcm","tcp","tct","tgp","ths",
     "tmi","tsb","wlt","wsu","yaz"];
 
-var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 16px; z-index: 2147483647;\n\n      background: #4a6fa5; color: #ffffff; border: none;\n\n      border-radius: 50px; padding: 10px 18px; font-size: 13px;\n\n      font-family: Arial, sans-serif; cursor: pointer; font-weight: bold;\n\n      box-shadow: 0 2px 8px rgba(0,0,0,0.3);\n\n      -webkit-tap-highlight-color: transparent; touch-action: none;\n\n    }\n\n    #tsa-btn:hover { background: #3a5f95; }\n\n    #tsa-overlay {\n\n      position: fixed; bottom: 130px; right: 16px; z-index: 2147483646;\n\n      max-height: 75vh; overflow-y: auto;\n\n      background: #ffffff; border: 1px solid #ddd; border-radius: 12px;\n\n      font-family: Arial, sans-serif; font-size: 12px; color: #222;\n\n      box-shadow: 0 4px 20px rgba(0,0,0,0.15); display: none;\n\n    }\n\n    #tsa-overlay::-webkit-scrollbar { width: 4px; }\n\n    #tsa-overlay::-webkit-scrollbar-thumb { background: #ccc; border-radius: 2px; }\n\n    .tsa-header {\n\n      display: flex; align-items: center; justify-content: space-between;\n\n      padding: 12px 14px; border-bottom: 1px solid #eee;\n\n      position: sticky; top: 0; background: #ffffff; z-index: 1;\n\n    }\n\n    .tsa-header-left { display: flex; align-items: center; gap: 8px; }\n\n    .tsa-title { font-size: 13px; font-weight: bold; color: #4a6fa5; letter-spacing: 0.05em; }\n\n    .tsa-theme-btn {\n\n      font-size: 14px; cursor: pointer; background: none; border: none;\n\n      padding: 2px 4px; line-height: 1; opacity: 0.7;\n\n    }\n\n    .tsa-theme-btn:hover { opacity: 1; }\n\n    .tsa-close { cursor: pointer; color: #777; font-size: 18px; padding: 0 4px; line-height: 1; }\n\n    .tsa-close:hover { color: #333; }\n\n    .tsa-stats {\n\n      display: grid; grid-template-columns: repeat(3, 1fr);\n\n      gap: 8px; padding: 12px 14px; border-bottom: 1px solid #eee;\n\n    }\n\n    .tsa-stat { background: #f7f9fc; border-radius: 8px; padding: 8px; text-align: center; border: 1px solid #e8edf5; }\n\n    .tsa-stat-label { font-size: 10px; color: #666; margin-bottom: 4px; }\n\n    .tsa-stat-value { font-size: 16px; font-weight: bold; color: #222; }\n\n    .tsa-stat-value.green { color: #1a8a45; }\n\n    .tsa-stat-value.red { color: #cc2222; }\n\n    .tsa-section { padding: 10px 14px 6px; }\n\n    .tsa-section-title { font-size: 10px; letter-spacing: 0.12em; color: #777; text-transform: uppercase; margin-bottom: 8px; font-weight: bold; }\n\n    .tsa-row {\n\n      display: flex; align-items: center; justify-content: space-between;\n\n      padding: 8px 10px; border-radius: 8px; margin-bottom: 5px; cursor: pointer;\n\n    }\n\n    .tsa-row.buy { background: #edfaf3; border: 1px solid #a8e6c0; }\n\n    .tsa-row.sell { background: #fff0f0; border: 1px solid #ffb3b3; }\n\n    .tsa-row.hold { background: #f0f4ff; border: 1px solid #c0d0ff; }\n\n    .tsa-row.buy:active { background: #d0f5e3; }\n\n    .tsa-row.sell:active { background: #ffd8d8; }\n\n    .tsa-row.hold:active { background: #dce6ff; }\n\n    .tsa-row-left { display: flex; flex-direction: column; gap: 2px; }\n\n    .tsa-symbol { font-size: 13px; font-weight: bold; }\n\n    .tsa-symbol.buy { color: #1a8a45; }\n\n    .tsa-symbol.sell { color: #cc2222; }\n\n    .tsa-symbol.hold { color: #4a6fa5; }\n\n    .tsa-detail { font-size: 10px; color: #666; }\n\n    .tsa-row-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }\n\n    .tsa-score { font-size: 14px; font-weight: bold; }\n\n    .tsa-score.buy { color: #1a8a45; }\n\n    .tsa-score.sell { color: #cc2222; }\n\n    .tsa-score.hold { color: #4a6fa5; }\n\n    .tsa-badge { font-size: 9px; padding: 2px 6px; border-radius: 10px; font-weight: bold; }\n\n    .tsa-badge.benefit { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }\n\n    .tsa-divider { border: none; border-top: 1px solid #eee; margin: 6px 14px; }\n\n    .tsa-footer {\n\n      padding: 10px 14px; display: flex; justify-content: space-between;\n\n      align-items: center; border-top: 1px solid #eee; background: #fafafa;\n\n      border-radius: 0 0 12px 12px;\n\n    }\n\n    .tsa-updated { font-size: 10px; color: #888; }\n\n    .tsa-refresh {\n\n      font-size: 11px; background: #4a6fa5; border: none;\n\n      color: #fff; border-radius: 6px; padding: 5px 12px; cursor: pointer;\n\n      font-family: Arial, sans-serif; font-weight: bold;\n\n    }\n\n    .tsa-refresh:hover { background: #3a5f95; }\n\n    .tsa-loading { padding: 30px; text-align: center; color: #888; font-size: 12px; }\n\n    @keyframes tsa-spin { to { transform: rotate(360deg); } }\n\n    .tsa-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: tsa-spin 0.7s linear infinite; vertical-align: middle; margin-right: 6px; opacity: 0.6; }\n\n    .tsa-error { padding: 16px; color: #cc2222; font-size: 11px; text-align: center; }\n\n    /* DARK MODE */\n\n    #tsa-overlay.tsa-dark {\n\n      background: #0f0f1a; border-color: #3a3a6a; color: #c8c8d8;\n\n    }\n\n    #tsa-overlay.tsa-dark::-webkit-scrollbar-thumb { background: #3a3a6a; }\n\n    #tsa-overlay.tsa-dark .tsa-header { background: #0f0f1a; border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-stats { border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-stat { background: #1a1a2e; border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-label { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-value { color: #e0e0ff; }\n\n    #tsa-overlay.tsa-dark .tsa-section-title { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-detail { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-row.buy { background: rgba(76,255,145,0.08); border-color: rgba(76,255,145,0.2); }\n\n    #tsa-overlay.tsa-dark .tsa-row.sell { background: rgba(255,76,106,0.08); border-color: rgba(255,76,106,0.2); }\n\n    #tsa-overlay.tsa-dark .tsa-row.hold { background: rgba(160,160,255,0.05); border-color: rgba(160,160,255,0.1); }\n\n    #tsa-overlay.tsa-dark .tsa-row.buy:active { background: rgba(76,255,145,0.18); }\n\n    #tsa-overlay.tsa-dark .tsa-row.sell:active { background: rgba(255,76,106,0.18); }\n\n    #tsa-overlay.tsa-dark .tsa-row.hold:active { background: rgba(160,160,255,0.14); }\n\n    #tsa-overlay.tsa-dark .tsa-symbol.buy { color: #4cff91; }\n\n    #tsa-overlay.tsa-dark .tsa-symbol.sell { color: #ff4c6a; }\n\n    #tsa-overlay.tsa-dark .tsa-symbol.hold { color: #a0a0ff; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-value.green { color: #4cff91; }\n\n    #tsa-overlay.tsa-dark .tsa-stat-value.red { color: #ff4c6a; }\n\n    #tsa-overlay.tsa-dark .tsa-divider { border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-footer { background: #0f0f1a; border-color: #2a2a4a; }\n\n    #tsa-overlay.tsa-dark .tsa-updated { color: #666; }\n\n    #tsa-overlay.tsa-dark .tsa-loading { color: #666; }\n\n    #tsa-overlay.tsa-dark .tsa-close { color: #888; }\n\n    #tsa-overlay.tsa-dark .tsa-close:hover { color: #aaa; }\n\n    #tsa-overlay.tsa-dark .tsa-theme-btn { color: #c8c8d8; opacity: 1; }\n\n    #tsa-overlay.tsa-dark .tsa-theme-btn:hover { color: #ffffff; }\n\n    #tsa-overlay.tsa-dark .tsa-title { color: #7a9fd4; }\n\n \\n"
+// ============================================================
+// DESIGN TOKENS
+// ============================================================
+// One token set for the whole UI. Emitted as scoped CSS custom properties on the
+// four roots below (plus .tsa-scope, which the two body-level toasts and the chart
+// tooltip carry because they are appended outside the overlay). Every name is
+// prefixed --tsa-* so Torn's own cascade cannot collide with it.
+//
+// Both themes, always: the light values are the BASE rule, so every colour token
+// exists unconditionally; the dark rule only ever REDEFINES. A colour that lived in
+// one branch only would break for whoever runs the other theme, and nothing here can
+// do that.
+//
+// Sizes are px, not rem: rem would resolve against Torn's own <html> font-size,
+// which this script does not control. 12/14/16/24px is the same four-step scale as
+// dossier's .75/.875/1/1.5rem at a 16px root.
+var TSA_TOKEN_CSS = [
+  "#tsa-btn, #tsa-overlay, #qt-bar, #qt-pills, .tsa-scope {",
+  // type: four steps, 12px floor. hierarchy comes from weight and colour, never size
+  "  --tsa-fs-micro: 12px; --tsa-lh-micro: 1.4;",
+  "  --tsa-fs-body: 14px; --tsa-lh-body: 1.55;",
+  "  --tsa-fs-lead: 16px; --tsa-lh-lead: 1.4;",
+  // declared for completeness, applied nowhere: the overlay has no single dominant
+  // number, it has three stat tiles side by side in a 358px-wide grid, where 24px
+  // would overflow the column. Same call dossier made ("intet hero-trin").
+  "  --tsa-fs-stat: 24px; --tsa-lh-stat: 1.15;",
+  // platform faces only. The two webfont families this script used to name (a mono and
+  // a sans) were declared 34 times with no @font-face and no webfont, so both silently
+  // fell back already; naming the fallback makes the real rendering explicit. No
+  // external font is fetched.
+  "  --tsa-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;",
+  "  --tsa-sans: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;",
+  // radius: one scale, anchored on .5rem = 8px; the four steps are px for the same
+  // reason the type steps are
+  "  --tsa-radius: .5rem;",
+  "  --tsa-r-1: 4px; --tsa-r-2: 6px; --tsa-r-3: 8px; --tsa-r-4: 12px;",
+  // a circle is a shape, not a step on the scale: the only non-scale radius left,
+  // and it has to stay 50% to stay round on a square box
+  "  --tsa-r-circle: 50%;",
+  // ---- light palette (the base) ----
+  "  --tsa-bg: #ffffff;",
+  "  --tsa-bg-raised: #f7f9fc;",
+  "  --tsa-bg-bar: #f0f4ff;",
+  "  --tsa-bg-input: #ffffff;",
+  "  --tsa-bg-chart: #f7f9fc;",
+  "  --tsa-border: #e5e9f0;",
+  "  --tsa-border-strong: #c0d0ff;",
+  "  --tsa-fg: #222222;",
+  "  --tsa-fg-strong: #111827;",
+  "  --tsa-fg-muted: #5a6472;",
+  "  --tsa-fg-faint: #6d7684;",
+  "  --tsa-accent: #4a6fa5;",
+  "  --tsa-accent-hover: #3a5f95;",
+  "  --tsa-accent-bg: #f0f4ff;",
+  "  --tsa-accent-border: #c0d0ff;",
+  "  --tsa-on-accent: #ffffff;",
+  "  --tsa-on-badge: #ffffff;",
+  // money polarity, CVD-safe. The two green/red pairs this script used before (one
+  // per theme) were the exact hue pair dossier measured at deltaE 2.2 for deutan:
+  // profit and loss
+  // were practically the same colour for a red-green colour-blind reader. Green is
+  // pushed toward teal, red toward rose: deltaE 7.7. That band is only legal WITH a
+  // secondary encoding, so the sign character stays on every signed number.
+  "  --tsa-pos: #107569;",
+  // STRONG BUY sits a step deeper in the SAME hue rather than on a second hue -
+  // hierarchy from value, not from a new colour. The old #FFD700 measured 1.4:1 on
+  // white, so light-theme readers could barely see the strongest signal.
+  "  --tsa-pos-strong: #0b5d54;",
+  "  --tsa-neg: #c81e3f;",
+  "  --tsa-pos-bg: rgba(16,117,105,.08);",
+  "  --tsa-pos-bg-hi: rgba(16,117,105,.16);",
+  "  --tsa-pos-border: rgba(16,117,105,.35);",
+  "  --tsa-neg-bg: rgba(200,30,63,.08);",
+  "  --tsa-neg-bg-hi: rgba(200,30,63,.16);",
+  "  --tsa-neg-border: rgba(200,30,63,.35);",
+  // neutral = no direction (hold rows, the hold score)
+  "  --tsa-neutral: #4a6fa5;",
+  "  --tsa-neutral-bg: rgba(74,111,165,.08);",
+  "  --tsa-neutral-bg-hi: rgba(74,111,165,.16);",
+  "  --tsa-neutral-border: rgba(74,111,165,.30);",
+  "  --tsa-warn: #8a5c00;",
+  "  --tsa-warn-bg: #fffbeb;",
+  "  --tsa-warn-border: #fde68a;",
+  // categorical pill hues: bank = ROI, bridge = bridgebuilder, swap = upgrade swap.
+  // Not polarity, and never used for a signed number.
+  "  --tsa-bank: #1d4ed8;",
+  "  --tsa-bank-bg: rgba(29,78,216,.08);",
+  "  --tsa-bank-border: rgba(29,78,216,.35);",
+  "  --tsa-bridge: #155e75;",
+  "  --tsa-bridge-bg: rgba(21,94,117,.08);",
+  "  --tsa-bridge-border: rgba(21,94,117,.35);",
+  "  --tsa-swap: #7e22ce;",
+  "  --tsa-swap-bg: rgba(126,34,206,.08);",
+  "  --tsa-swap-border: rgba(126,34,206,.35);",
+  "  --tsa-shadow: rgba(0,0,0,.15);",
+  "  --tsa-grid: rgba(74,111,165,.20);",
+  // toasts are appended to document.body, outside every root, so they carry
+  // class="tsa-scope tsa-dark": they are a dark scrim in both themes by design.
+  "  --tsa-scrim: rgba(16,20,28,.95);",
+  "  --tsa-toast-fg: #ffffff;",
+  "  --tsa-scroll-thumb: #c9d2e0;",
+  "}",
+  // ---- dark branch: redefines, never introduces ----
+  "#tsa-overlay.tsa-dark, #qt-bar.tsa-dark, #qt-pills.tsa-dark, .tsa-scope.tsa-dark {",
+  "  --tsa-bg: #0f0f1a;",
+  "  --tsa-bg-raised: #1a1a2e;",
+  "  --tsa-bg-bar: #0c0c14;",
+  "  --tsa-bg-input: #13131f;",
+  "  --tsa-bg-chart: #0a0a12;",
+  "  --tsa-border: #2a2a4a;",
+  "  --tsa-border-strong: #3a3a6a;",
+  "  --tsa-fg: #c8c8d8;",
+  "  --tsa-fg-strong: #e0e0ff;",
+  "  --tsa-fg-muted: #8b93a8;",
+  "  --tsa-fg-faint: #7d7dab;",
+  "  --tsa-accent: #7a9fd4;",
+  "  --tsa-accent-hover: #a8c4e8;",
+  "  --tsa-accent-bg: rgba(122,159,212,.12);",
+  "  --tsa-accent-border: rgba(122,159,212,.40);",
+  "  --tsa-on-accent: #0f0f1a;",
+  "  --tsa-on-badge: #0c0c14;",
+  "  --tsa-pos: #34d399;",
+  "  --tsa-pos-strong: #6ee7b7;",
+  "  --tsa-neg: #fb5c73;",
+  "  --tsa-pos-bg: rgba(52,211,153,.10);",
+  "  --tsa-pos-bg-hi: rgba(52,211,153,.20);",
+  "  --tsa-pos-border: rgba(52,211,153,.35);",
+  "  --tsa-neg-bg: rgba(251,92,115,.10);",
+  "  --tsa-neg-bg-hi: rgba(251,92,115,.20);",
+  "  --tsa-neg-border: rgba(251,92,115,.35);",
+  "  --tsa-neutral: #a0a0ff;",
+  "  --tsa-neutral-bg: rgba(160,160,255,.07);",
+  "  --tsa-neutral-bg-hi: rgba(160,160,255,.16);",
+  "  --tsa-neutral-border: rgba(160,160,255,.22);",
+  "  --tsa-warn: #ffc107;",
+  "  --tsa-warn-bg: rgba(255,193,7,.08);",
+  "  --tsa-warn-border: rgba(255,193,7,.30);",
+  "  --tsa-bank: #93c5fd;",
+  "  --tsa-bank-bg: rgba(147,197,253,.10);",
+  "  --tsa-bank-border: rgba(147,197,253,.35);",
+  "  --tsa-bridge: #22d3ee;",
+  "  --tsa-bridge-bg: rgba(34,211,238,.10);",
+  "  --tsa-bridge-border: rgba(34,211,238,.35);",
+  "  --tsa-swap: #d8b4fe;",
+  "  --tsa-swap-bg: rgba(216,180,254,.10);",
+  "  --tsa-swap-border: rgba(216,180,254,.35);",
+  "  --tsa-shadow: rgba(0,0,0,.5);",
+  "  --tsa-grid: rgba(160,160,255,.18);",
+  "  --tsa-scroll-thumb: #3a3a6a;",
+  "}"
+].join("\n");
+
+// Canvas cannot read var(), so the chart resolves the same tokens off a live element.
+// One token set, two readers - the CSS above is the only place a value is written.
+function tsaToken(name, el) {
+  var host = el || document.getElementById("qt-bar") || document.getElementById("tsa-overlay");
+  if (!host) return "";
+  return getComputedStyle(host).getPropertyValue("--tsa-" + name).trim();
+}
+
+var STYLES = TSA_TOKEN_CSS + "\n" + [
+  "#tsa-btn {",
+  "  position: fixed; bottom: 80px; right: 16px; z-index: 2147483647;",
+  "  background: var(--tsa-accent); color: var(--tsa-on-accent); border: none;",
+  "  border-radius: var(--tsa-r-4); padding: 10px 18px;",
+  "  font-size: var(--tsa-fs-body); line-height: var(--tsa-lh-lead);",
+  "  font-family: var(--tsa-sans); cursor: pointer; font-weight: 700;",
+  "  box-shadow: 0 2px 8px var(--tsa-shadow);",
+  "  -webkit-tap-highlight-color: transparent; touch-action: none;",
+  "}",
+  "#tsa-btn:hover { background: var(--tsa-accent-hover); }",
+  "#tsa-overlay {",
+  "  position: fixed; bottom: 130px; right: 16px; z-index: 2147483646;",
+  // overflow-X too, not only Y. The 12px type floor made 121 text sites 20-33%
+  // wider, and a nowrap row wider than the mobile width (innerWidth-32, i.e. as
+  // little as 358px) would otherwise break OUT of the panel instead of scrolling
+  // inside it. Wide content scrolls in its own box; the panel never does.
+  "  max-height: 75vh; overflow-y: auto; overflow-x: auto;",
+  "  background: var(--tsa-bg); border: 1px solid var(--tsa-border);",
+  "  border-radius: var(--tsa-r-4);",
+  "  font-family: var(--tsa-sans); font-size: var(--tsa-fs-micro);",
+  "  line-height: var(--tsa-lh-micro); color: var(--tsa-fg);",
+  "  box-shadow: 0 4px 20px var(--tsa-shadow); display: none;",
+  "}",
+  "#tsa-overlay::-webkit-scrollbar { width: 4px; }",
+  "#tsa-overlay::-webkit-scrollbar-thumb { background: var(--tsa-scroll-thumb); border-radius: var(--tsa-r-1); }",
+  ".tsa-header {",
+  "  display: flex; align-items: center; justify-content: space-between;",
+  "  padding: 12px 14px; border-bottom: 1px solid var(--tsa-border);",
+  "  position: sticky; top: 0; background: var(--tsa-bg); z-index: 1;",
+  "}",
+  ".tsa-header-left { display: flex; align-items: center; gap: 8px; }",
+  ".tsa-title { font-size: var(--tsa-fs-body); font-weight: 700; color: var(--tsa-accent); letter-spacing: 0.05em; }",
+  ".tsa-theme-btn {",
+  "  font-size: var(--tsa-fs-body); cursor: pointer; background: none; border: none;",
+  "  padding: 2px 4px; line-height: 1; opacity: 0.7;",
+  "}",
+  ".tsa-theme-btn:hover { opacity: 1; }",
+  ".tsa-close { cursor: pointer; color: var(--tsa-fg-muted); font-size: var(--tsa-fs-lead); padding: 0 4px; line-height: 1; }",
+  ".tsa-close:hover { color: var(--tsa-fg); }",
+  ".tsa-stats {",
+  "  display: grid; grid-template-columns: repeat(3, 1fr);",
+  "  gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--tsa-border);",
+  "}",
+  ".tsa-stat { background: var(--tsa-bg-raised); border-radius: var(--tsa-r-3); padding: 8px; text-align: center; border: 1px solid var(--tsa-border); }",
+  ".tsa-stat-label { font-size: var(--tsa-fs-micro); color: var(--tsa-fg-muted); margin-bottom: 4px; }",
+  ".tsa-stat-value { font-size: var(--tsa-fs-lead); line-height: var(--tsa-lh-lead); font-weight: 700; color: var(--tsa-fg); }",
+  ".tsa-stat-value.green { color: var(--tsa-pos); }",
+  ".tsa-stat-value.red { color: var(--tsa-neg); }",
+  ".tsa-section { padding: 10px 14px 6px; }",
+  ".tsa-section-title { font-size: var(--tsa-fs-micro); letter-spacing: 0.12em; color: var(--tsa-fg-muted); text-transform: uppercase; margin-bottom: 8px; font-weight: 700; }",
+  ".tsa-row {",
+  "  display: flex; align-items: center; justify-content: space-between;",
+  "  padding: 8px 10px; border-radius: var(--tsa-r-3); margin-bottom: 5px; cursor: pointer;",
+  "}",
+  ".tsa-row.buy { background: var(--tsa-pos-bg); border: 1px solid var(--tsa-pos-border); }",
+  ".tsa-row.sell { background: var(--tsa-neg-bg); border: 1px solid var(--tsa-neg-border); }",
+  ".tsa-row.hold { background: var(--tsa-neutral-bg); border: 1px solid var(--tsa-neutral-border); }",
+  ".tsa-row.buy:active { background: var(--tsa-pos-bg-hi); }",
+  ".tsa-row.sell:active { background: var(--tsa-neg-bg-hi); }",
+  ".tsa-row.hold:active { background: var(--tsa-neutral-bg-hi); }",
+  ".tsa-row-left { display: flex; flex-direction: column; gap: 2px; }",
+  ".tsa-symbol { font-size: var(--tsa-fs-body); line-height: var(--tsa-lh-body); font-weight: 700; }",
+  ".tsa-symbol.buy { color: var(--tsa-pos); }",
+  ".tsa-symbol.sell { color: var(--tsa-neg); }",
+  ".tsa-symbol.hold { color: var(--tsa-neutral); }",
+  ".tsa-detail { font-size: var(--tsa-fs-micro); line-height: var(--tsa-lh-micro); color: var(--tsa-fg-muted); }",
+  ".tsa-row-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }",
+  ".tsa-score { font-size: var(--tsa-fs-body); line-height: var(--tsa-lh-body); font-weight: 700; }",
+  ".tsa-score.buy { color: var(--tsa-pos); }",
+  ".tsa-score.sell { color: var(--tsa-neg); }",
+  ".tsa-score.hold { color: var(--tsa-neutral); }",
+  ".tsa-badge { font-size: var(--tsa-fs-micro); padding: 2px 6px; border-radius: var(--tsa-r-2); font-weight: 700; }",
+  ".tsa-badge.benefit { background: var(--tsa-warn-bg); color: var(--tsa-warn); border: 1px solid var(--tsa-warn-border); }",
+  ".tsa-divider { border: none; border-top: 1px solid var(--tsa-border); margin: 6px 14px; }",
+  ".tsa-footer {",
+  "  padding: 10px 14px; display: flex; justify-content: space-between;",
+  "  align-items: center; border-top: 1px solid var(--tsa-border); background: var(--tsa-bg-raised);",
+  "  border-radius: 0 0 var(--tsa-r-4) var(--tsa-r-4);",
+  "}",
+  ".tsa-updated { font-size: var(--tsa-fs-micro); color: var(--tsa-fg-faint); }",
+  ".tsa-refresh {",
+  "  font-size: var(--tsa-fs-micro); background: var(--tsa-accent); border: none;",
+  "  color: var(--tsa-on-accent); border-radius: var(--tsa-r-2); padding: 5px 12px; cursor: pointer;",
+  "  font-family: var(--tsa-sans); font-weight: 700;",
+  "}",
+  ".tsa-refresh:hover { background: var(--tsa-accent-hover); }",
+  ".tsa-loading { padding: 30px; text-align: center; color: var(--tsa-fg-faint); font-size: var(--tsa-fs-micro); }",
+  "@keyframes tsa-spin { to { transform: rotate(360deg); } }",
+  // 50% here is a circle, not a step on the radius scale - the only survivor of the
+  // old eight radius values, and it has to be 50% to stay round.
+  ".tsa-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: var(--tsa-r-circle); animation: tsa-spin 0.7s linear infinite; vertical-align: middle; margin-right: 6px; opacity: 0.6; }",
+  ".tsa-error { padding: 16px; color: var(--tsa-neg); font-size: var(--tsa-fs-micro); text-align: center; }"
+].join("\n");
 
   // ============================================================
   // ROI PLANNER
@@ -2686,24 +2939,19 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     }
 
     // Build HTML
-    var isDark = document.getElementById("tsa-overlay").classList.contains("tsa-dark");
-    var c = isDark ? {
-      bg:"#0f0f1a", border:"#2a2a4a", bg2:"#0d0d18", bg3:"#0c0c16",
-      text:"#c8c8d8", muted:"#7a7a9a", mono:"JetBrains Mono,monospace",
-      blue:"#7a9fd4", green:"#4cff91", red:"#cc4444", yellow:"#f5c542", owned_bg:"rgba(40,180,100,0.07)",
-      owned_border:"rgba(76,255,145,0.4)", next_bg:"rgba(74,111,165,0.1)",
-      next_border:"rgba(122,159,212,0.5)", skip_bg:"rgba(180,40,40,0.06)",
-      skip_border:"rgba(255,80,80,0.3)", neutral:"#7a7a9a", row_border:"#13131f",
-      divider:"#1a1a2e", tag_bg:"rgba(120,140,200,0.08)", tag_border:"rgba(120,140,200,0.15)", tag_text:"#8898bb",
-      bridge_bg:"rgba(90,180,80,0.09)", bridge_border:"rgba(76,255,145,0.45)", bridge:"#5ab450"
-    } : {
-      bg:"#ffffff", border:"#ddd", bg2:"#f7f9fc", bg3:"#f0f4ff",
-      text:"#222", muted:"#666", mono:"Arial,sans-serif",
-      blue:"#4a6fa5", green:"#1a8a45", red:"#cc2222", yellow:"#b07800", owned_bg:"#edfaf3",
-      owned_border:"#a8e6c0", next_bg:"#f0f4ff", next_border:"#c0d0ff",
-      skip_bg:"#fff0f0", skip_border:"#ffb3b3", neutral:"#aaa", row_border:"#eee",
-      divider:"#eee", tag_bg:"#f0f4ff", tag_border:"#c0d0ff", tag_text:"#4a6fa5",
-      bridge_bg:"#edfff0", bridge_border:"#80c880", bridge:"#1a7a35"
+    // Every value is a --tsa-* token, so the theme branch that used to live here is
+    // gone: the tokens themselves switch on #tsa-overlay.tsa-dark. This markup is
+    // rendered inside the overlay, so var() always resolves.
+    var c = {
+      bg:"var(--tsa-bg)", border:"var(--tsa-border)", bg2:"var(--tsa-bg-raised)", bg3:"var(--tsa-bg-bar)",
+      text:"var(--tsa-fg)", muted:"var(--tsa-fg-faint)", mono:"var(--tsa-mono)",
+      blue:"var(--tsa-accent)", green:"var(--tsa-pos)", red:"var(--tsa-neg)", yellow:"var(--tsa-warn)",
+      owned_bg:"var(--tsa-pos-bg)", owned_border:"var(--tsa-pos-border)",
+      next_bg:"var(--tsa-accent-bg)", next_border:"var(--tsa-accent-border)",
+      skip_bg:"var(--tsa-neg-bg)", skip_border:"var(--tsa-neg-border)",
+      neutral:"var(--tsa-fg-faint)", row_border:"var(--tsa-border)", divider:"var(--tsa-border)",
+      tag_bg:"var(--tsa-accent-bg)", tag_border:"var(--tsa-accent-border)", tag_text:"var(--tsa-accent)",
+      bridge_bg:"var(--tsa-bridge-bg)", bridge_border:"var(--tsa-bridge-border)", bridge:"var(--tsa-bridge)"
     };
 
     var s = 'font-family:' + c.mono + ';';
@@ -2713,21 +2961,21 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // the tag breakdown always reconciles with the Available capital sum.
     swingDetails.sort(function(a, b) { return b.val - a.val; });
     var swingTagsHtml = swingDetails.map(function(d){
-      return '<span style="font-size:9px;padding:2px 6px;border-radius:8px;background:' + c.tag_bg + ';border:1px solid ' + c.tag_border + ';color:' + c.tag_text + ';' + s + 'margin-right:4px">' + d.sym + ' ' + fmRoi(d.val) + '</span>';
+      return '<span style="font-size:var(--tsa-fs-micro);padding:2px 6px;border-radius:var(--tsa-r-3);background:' + c.tag_bg + ';border:1px solid ' + c.tag_border + ';color:' + c.tag_text + ';' + s + 'margin-right:4px">' + d.sym + ' ' + fmRoi(d.val) + '</span>';
     }).join('');
     if (armoryFunds > 0) {
-      swingTagsHtml = '<span style="font-size:9px;padding:2px 6px;border-radius:8px;background:' + c.tag_bg + ';border:1px solid ' + c.tag_border + ';color:' + c.tag_text + ';' + s + 'margin-right:4px">Armory ' + fmRoi(armoryFunds) + '</span>' + swingTagsHtml;
+      swingTagsHtml = '<span style="font-size:var(--tsa-fs-micro);padding:2px 6px;border-radius:var(--tsa-r-3);background:' + c.tag_bg + ';border:1px solid ' + c.tag_border + ';color:' + c.tag_text + ';' + s + 'margin-right:4px">Armory ' + fmRoi(armoryFunds) + '</span>' + swingTagsHtml;
     }
     if (cashBalance > 0) {
-      swingTagsHtml = '<span style="font-size:9px;padding:2px 6px;border-radius:8px;background:' + c.tag_bg + ';border:1px solid ' + c.tag_border + ';color:' + c.tag_text + ';' + s + 'margin-right:4px">Cash ' + fmRoi(cashBalance) + '</span>' + swingTagsHtml;
+      swingTagsHtml = '<span style="font-size:var(--tsa-fs-micro);padding:2px 6px;border-radius:var(--tsa-r-3);background:' + c.tag_bg + ';border:1px solid ' + c.tag_border + ';color:' + c.tag_text + ';' + s + 'margin-right:4px">Cash ' + fmRoi(cashBalance) + '</span>' + swingTagsHtml;
     }
 
     var html = '<div style="padding:8px 14px;border-bottom:1px solid ' + c.divider + ';background:' + c.bg2 + '">' +
       '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px">' +
-        '<span style="font-size:9px;letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase">Available capital</span>' +
-        '<span style="font-size:9px;' + s + 'color:' + (benefitTablesDerived ? c.green : c.yellow) + '">v' + TSA_VERSION + ' · ' + benefitTableStatus + '</span>' +
+        '<span style="font-size:var(--tsa-fs-micro);letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase">Available capital</span>' +
+        '<span style="font-size:var(--tsa-fs-micro);' + s + 'color:' + (benefitTablesDerived ? c.green : c.yellow) + '">v' + TSA_VERSION + ' · ' + benefitTableStatus + '</span>' +
       '</div>' +
-      '<div style="' + s + 'font-size:14px;font-weight:700;color:' + c.text + '">' + fmRoi(totalCapital) + '</div>' +
+      '<div style="' + s + 'font-size:var(--tsa-fs-body);font-weight:700;color:' + c.text + '">' + fmRoi(totalCapital) + '</div>' +
       '<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px">' + swingTagsHtml + '</div>' +
       '</div>';
 
@@ -2735,13 +2983,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (target) {
       var nmRow = function(label, val, color) {
         return '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px">' +
-          '<span style="font-size:9px;color:' + c.muted + ';text-transform:uppercase;letter-spacing:0.08em;' + s + '">' + label + '</span>' +
-          '<span style="font-size:10px;color:' + (color||c.text) + ';' + s + ';text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:65%">' + val + '</span>' +
+          '<span style="font-size:var(--tsa-fs-micro);color:' + c.muted + ';text-transform:uppercase;letter-spacing:0.08em;' + s + '">' + label + '</span>' +
+          '<span style="font-size:var(--tsa-fs-micro);color:' + (color||c.text) + ';' + s + ';text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:65%">' + val + '</span>' +
           '</div>';
       };
 
       html += '<div style="padding:10px 14px;border-bottom:2px solid ' + c.divider + ';background:' + c.bg3 + '">';
-      html += '<div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:' + c.blue + ';' + s + ';font-weight:700;margin-bottom:8px">💡 Next move</div>';
+      html += '<div style="font-size:var(--tsa-fs-micro);letter-spacing:0.12em;text-transform:uppercase;color:' + c.blue + ';' + s + ';font-weight:700;margin-bottom:8px">💡 Next move</div>';
 
       // Target — affordability is judged against plan.fundCapital (totalCapital
       // minus the target stock's own swing value), since selling the target stock
@@ -2756,7 +3004,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // Bridgebuilder chain — buy (or drip into) a tier, collect dividends, then
       // sell it again to help fund the target. Each row saves days vs. just waiting.
       html += '<div style="border-top:1px solid ' + c.divider + ';margin:6px 0"></div>';
-      html += '<div style="font-size:9px;color:#5a7a4a;letter-spacing:0.08em;' + s + ';margin-bottom:5px">🔗 Bridgebuilder · sell later for target</div>';
+      html += '<div style="font-size:var(--tsa-fs-micro);color:var(--tsa-bridge);letter-spacing:0.08em;' + s + ';margin-bottom:5px">🔗 Bridgebuilder · sell later for target</div>';
 
       var hasSell = sellCandidates && sellCandidates.length > 0;
 
@@ -2787,7 +3035,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
       if (hasSell) {
         html += '<div style="margin:4px 0;border-top:1px dashed ' + c.divider + '"></div>';
-        html += '<div style="font-size:9px;color:#5a6a7a;letter-spacing:0.08em;' + s + ';margin-bottom:5px">💸 Alt: Sell lower ROI blocks</div>';
+        html += '<div style="font-size:var(--tsa-fs-micro);color:var(--tsa-fg-muted);letter-spacing:0.08em;' + s + ';margin-bottom:5px">💸 Alt: Sell lower ROI blocks</div>';
         var cumulativeSale = 0;
         var cumulativeLostIncome = 0;
         sellCandidates.slice(0, 4).forEach(function(sc) {
@@ -2807,7 +3055,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (upSwap) {
         var upSellLabel = upSwap.sells.map(function(sc){ return sc.sym + " " + sc.tier; }).join(" + ");
         html += '<div style="border-top:1px solid ' + c.divider + ';margin:6px 0"></div>';
-        html += '<div style="font-size:9px;color:#9333ea;letter-spacing:0.08em;' + s + ';margin-bottom:5px">⤴ Upgrade · swap to better ROI'
+        html += '<div style="font-size:var(--tsa-fs-micro);color:var(--tsa-swap);letter-spacing:0.08em;' + s + ';margin-bottom:5px">⤴ Upgrade · swap to better ROI'
           + (upSwap.sells.length > 1 ? " (" + upSwap.sells.length + " blocks)" : "") + '</div>';
         html += nmRow(
           "Sell " + upSellLabel + " → " + upSwap.buy.sym + " " + upSwap.buy.tier + " (" + upSwap.buy.roi.toFixed(1) + "%)",
@@ -2819,7 +3067,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
       // Alt: Wait
       html += '<div style="border-top:1px solid ' + c.divider + ';margin:6px 0"></div>';
-      html += '<div style="font-size:9px;color:#5a6a7a;letter-spacing:0.08em;' + s + ';margin-bottom:5px">⏱ Alt: Wait</div>';
+      html += '<div style="font-size:var(--tsa-fs-micro);color:var(--tsa-fg-muted);letter-spacing:0.08em;' + s + ';margin-bottom:5px">⏱ Alt: Wait</div>';
       html += nmRow("Income", fmRoi(weeklyIncome) + " / 7d (current benefits)");
 
       // Income breakdown
@@ -2854,14 +3102,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (roiSkipped.length > 0) {
       html += '<div id="tsa-hidden-stocks-bar" style="border-bottom:1px solid ' + c.divider + ';background:' + c.bg2 + '">' +
         '<button id="tsa-hidden-stocks-toggle" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:7px 14px;background:none;border:none;cursor:pointer;font-family:' + c.mono + '">' +
-          '<span style="font-size:10px;color:' + c.red + ';font-weight:600;letter-spacing:0.06em;text-transform:uppercase">Hidden &amp; unlocked (' + roiSkipped.length + ')</span>' +
-          '<span id="tsa-hidden-stocks-caret" style="font-size:10px;color:' + c.muted + '">▶</span>' +
+          '<span style="font-size:var(--tsa-fs-micro);color:' + c.red + ';font-weight:600;letter-spacing:0.06em;text-transform:uppercase">Hidden &amp; unlocked (' + roiSkipped.length + ')</span>' +
+          '<span id="tsa-hidden-stocks-caret" style="font-size:var(--tsa-fs-micro);color:' + c.muted + '">▶</span>' +
         '</button>' +
         '<div id="tsa-hidden-stocks-list" style="display:none">' +
           roiSkipped.map(function(sym) {
             return '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 14px;border-top:1px solid ' + c.divider + '">' +
-              '<span style="' + s + ';font-size:12px;font-weight:700;color:' + c.red + '">' + sym + '</span>' +
-              '<button class="tsa-roi-skip" data-key="' + sym + '" data-owned="0" title="Restore — show in planner &amp; re-lock benefit shares" style="width:28px;height:28px;border-radius:50%;border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:12px;color:' + c.muted + ';display:flex;align-items:center;justify-content:center">↩</button>' +
+              '<span style="' + s + ';font-size:var(--tsa-fs-micro);font-weight:700;color:' + c.red + '">' + sym + '</span>' +
+              '<button class="tsa-roi-skip" data-key="' + sym + '" data-owned="0" title="Restore — show in planner &amp; re-lock benefit shares" style="width:28px;height:28px;border-radius:var(--tsa-r-circle);border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:var(--tsa-fs-micro);color:' + c.muted + ';display:flex;align-items:center;justify-content:center">↩</button>' +
             '</div>';
           }).join("") +
         '</div>' +
@@ -2877,23 +3125,23 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       return '<option value="' + sym + '">' + sym + '</option>';
     }).join("");
     html += '<div style="padding:8px 14px;border-bottom:1px solid ' + c.divider + ';background:' + c.bg2 + '">' +
-      '<div style="font-size:9px;letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;margin-bottom:5px">Tier cap · shares above tier N → swing</div>' +
+      '<div style="font-size:var(--tsa-fs-micro);letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;margin-bottom:5px">Tier cap · shares above tier N → swing</div>' +
       '<div style="display:flex;gap:6px;align-items:center">' +
-        '<select id="tsa-tiercap-sym" style="flex:1;min-width:0;font-size:11px;padding:5px 6px;border-radius:6px;border:1px solid ' + c.border + ';background:' + c.bg + ';color:' + c.text + ';' + s + '">' + stockOpts + '</select>' +
-        '<input id="tsa-tiercap-n" type="number" min="0" step="1" placeholder="N" style="width:52px;font-size:11px;padding:5px 6px;border-radius:6px;border:1px solid ' + c.border + ';background:' + c.bg + ';color:' + c.text + ';' + s + '">' +
-        '<button id="tsa-tiercap-set" style="font-size:11px;font-weight:700;padding:5px 12px;border-radius:6px;border:none;background:' + c.blue + ';color:#fff;cursor:pointer;' + s + '">Set</button>' +
+        '<select id="tsa-tiercap-sym" style="flex:1;min-width:0;font-size:var(--tsa-fs-micro);padding:5px 6px;border-radius:var(--tsa-r-2);border:1px solid ' + c.border + ';background:' + c.bg + ';color:' + c.text + ';' + s + '">' + stockOpts + '</select>' +
+        '<input id="tsa-tiercap-n" type="number" min="0" step="1" placeholder="N" style="width:52px;font-size:var(--tsa-fs-micro);padding:5px 6px;border-radius:var(--tsa-r-2);border:1px solid ' + c.border + ';background:' + c.bg + ';color:' + c.text + ';' + s + '">' +
+        '<button id="tsa-tiercap-set" style="font-size:var(--tsa-fs-micro);font-weight:700;padding:5px 12px;border-radius:var(--tsa-r-2);border:none;background:' + c.blue + ';color:var(--tsa-on-accent);cursor:pointer;' + s + '">Set</button>' +
       '</div>';
     if (capSyms.length > 0) {
-      html += '<div style="margin-top:6px;border:1px solid ' + c.divider + ';border-radius:6px;overflow:hidden">' +
+      html += '<div style="margin-top:6px;border:1px solid ' + c.divider + ';border-radius:var(--tsa-r-2);overflow:hidden">' +
         '<button id="tsa-tiercap-toggle" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:none;border:none;cursor:pointer;font-family:' + c.mono + '">' +
-          '<span style="font-size:10px;color:' + c.blue + ';font-weight:600;letter-spacing:0.06em;text-transform:uppercase">Tier-capped (' + capSyms.length + ')</span>' +
-          '<span id="tsa-tiercap-caret" style="font-size:10px;color:' + c.muted + '">▶</span>' +
+          '<span style="font-size:var(--tsa-fs-micro);color:' + c.blue + ';font-weight:600;letter-spacing:0.06em;text-transform:uppercase">Tier-capped (' + capSyms.length + ')</span>' +
+          '<span id="tsa-tiercap-caret" style="font-size:var(--tsa-fs-micro);color:' + c.muted + '">▶</span>' +
         '</button>' +
         '<div id="tsa-tiercap-list" style="display:none">' +
           capSyms.map(function(sym) {
             return '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-top:1px solid ' + c.divider + '">' +
-              '<span style="' + s + ';font-size:12px;font-weight:700;color:' + c.text + '">' + sym + ' <span style="font-size:9px;color:' + c.muted + ';font-weight:400">· cap T' + roiTierCap[sym] + '</span></span>' +
-              '<button class="tsa-tiercap-del" data-sym="' + sym + '" title="Remove cap — restore full benefit-block treatment" style="width:26px;height:26px;border-radius:50%;border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:11px;color:' + c.muted + ';display:flex;align-items:center;justify-content:center">✕</button>' +
+              '<span style="' + s + ';font-size:var(--tsa-fs-micro);font-weight:700;color:' + c.text + '">' + sym + ' <span style="font-size:var(--tsa-fs-micro);color:' + c.muted + ';font-weight:400">· cap T' + roiTierCap[sym] + '</span></span>' +
+              '<button class="tsa-tiercap-del" data-sym="' + sym + '" title="Remove cap — restore full benefit-block treatment" style="width:26px;height:26px;border-radius:var(--tsa-r-circle);border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:var(--tsa-fs-micro);color:' + c.muted + ';display:flex;align-items:center;justify-content:center">✕</button>' +
             '</div>';
           }).join("") +
         '</div>' +
@@ -2902,7 +3150,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     html += '</div>';
 
     // Table header
-    html += '<div style="display:grid;grid-template-columns:42px 26px 1fr 54px 32px;gap:4px;padding:5px 14px;font-size:9px;letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;border-bottom:1px solid ' + c.divider + ';' + s + ';position:sticky;top:0;background:' + c.bg + ';z-index:2;">' +
+    html += '<div style="display:grid;grid-template-columns:42px 26px 1fr 54px 32px;gap:4px;padding:5px 14px;font-size:var(--tsa-fs-micro);letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;border-bottom:1px solid ' + c.divider + ';' + s + ';position:sticky;top:0;background:' + c.bg + ';z-index:2;">' +
       '<span>Stock</span><span>Tier</span><span>Shares needed / Cost</span><span style="text-align:right">ROI</span><span></span></div>';
 
 
@@ -2955,7 +3203,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var costLine = row.isOwned ? "Owned" :
         row.sharesNeeded.toLocaleString("en-US") + " shares · " + fmRoi(row.cost) +
         (paybackDays > 0 ? " · pb " + paybackDays.toLocaleString("en-US") + "d" : "");
-      var skipBtnStyle = 'width:28px;height:28px;border-radius:50%;border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:10px;color:' + c.muted + ';display:flex;align-items:center;justify-content:center;justify-self:center;' + (row.isOwned ? 'opacity:0.2;pointer-events:none;' : '');
+      var skipBtnStyle = 'width:28px;height:28px;border-radius:var(--tsa-r-circle);border:1px solid ' + c.divider + ';background:none;cursor:pointer;font-size:var(--tsa-fs-micro);color:' + c.muted + ';display:flex;align-items:center;justify-content:center;justify-self:center;' + (row.isOwned ? 'opacity:0.2;pointer-events:none;' : '');
       var skipLabel = row.isSkipped ? "↩" : "✕";
       var skipTitle = row.isSkipped
         ? "Restore — show in planner &amp; re-lock benefit shares"
@@ -2966,13 +3214,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         ? ' class="tsa-roi-buyrow" data-buy-sym="' + row.sym + '" data-buy-shares="' + row.sharesNeeded + '" data-buy-tier="' + row.tier + '" data-buy-state="0"'
         : '';
       html += '<div data-roi-key="' + key + '"' + buyAttrs + ' style="display:grid;grid-template-columns:42px 26px 1fr 54px 32px;gap:4px;align-items:center;padding:7px 14px;border-bottom:1px solid ' + c.row_border + ';background:' + rowBg + ';border-left:2px solid ' + borderLeft + ';cursor:' + (buyAttrs ? 'pointer' : 'default') + ';transition:background 0.15s">' +
-        '<span style="' + s + ';font-weight:700;font-size:12px;color:' + symColor + '">' + row.sym + '</span>' +
-        '<span style="' + s + ';font-size:9px;color:' + c.muted + '">' + row.tier + '</span>' +
+        '<span style="' + s + ';font-weight:700;font-size:var(--tsa-fs-micro);color:' + symColor + '">' + row.sym + '</span>' +
+        '<span style="' + s + ';font-size:var(--tsa-fs-micro);color:' + c.muted + '">' + row.tier + '</span>' +
         '<div style="display:flex;flex-direction:column;gap:1px;overflow:hidden;min-width:0">' +
-          '<span style="' + s + ';font-size:10px;color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + costLine + (nextPayoutStr ? '<span style="color:' + nextPayoutColor + '">' + nextPayoutStr + '</span>' : '') + '</span>' +
-          '<span style="font-size:9px;color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + fmRoi(row.payout) + " / " + row.freq + "d" + (itemVal > 0 ? " · live " + fmRoi(itemVal) : "") + "</span>" +
+          '<span style="' + s + ';font-size:var(--tsa-fs-micro);color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + costLine + (nextPayoutStr ? '<span style="color:' + nextPayoutColor + '">' + nextPayoutStr + '</span>' : '') + '</span>' +
+          '<span style="font-size:var(--tsa-fs-micro);color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + fmRoi(row.payout) + " / " + row.freq + "d" + (itemVal > 0 ? " · live " + fmRoi(itemVal) : "") + "</span>" +
         '</div>' +
-        '<span style="' + s + ';font-size:11px;font-weight:700;text-align:right;color:' + symColor + '">' + roiPct + '</span>' +
+        '<span style="' + s + ';font-size:var(--tsa-fs-micro);font-weight:700;text-align:right;color:' + symColor + '">' + roiPct + '</span>' +
         '<button class="tsa-roi-skip" data-key="' + key + '" data-owned="' + (row.isOwned?1:0) + '" title="' + skipTitle + '" style="' + skipBtnStyle + '">' + skipLabel + '</button>' +
         '</div>';
     });
@@ -3031,32 +3279,32 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         }
         var secColor = secured ? c.green : c.text;
         return '<div style="display:grid;grid-template-columns:42px 26px 1fr 60px;gap:4px;align-items:center;padding:6px 14px;border-bottom:1px solid ' + c.row_border + ';' + (secured ? 'background:' + c.owned_bg + ';' : '') + '">' +
-          '<span style="' + s + ';font-weight:700;font-size:12px;color:' + secColor + '">' + r.sym + '</span>' +
-          '<span style="' + s + ';font-size:9px;color:' + c.muted + '">' + r.tier + '</span>' +
+          '<span style="' + s + ';font-weight:700;font-size:var(--tsa-fs-micro);color:' + secColor + '">' + r.sym + '</span>' +
+          '<span style="' + s + ';font-size:var(--tsa-fs-micro);color:' + c.muted + '">' + r.tier + '</span>' +
           '<div style="display:flex;flex-direction:column;gap:1px;overflow:hidden;min-width:0">' +
-            '<span style="' + s + ';font-size:10px;color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + detail + '</span>' +
-            '<span style="font-size:9px;color:' + c.muted + '">ROI ' + r.roi.toFixed(2) + '%' +
+            '<span style="' + s + ';font-size:var(--tsa-fs-micro);color:' + c.muted + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + detail + '</span>' +
+            '<span style="font-size:var(--tsa-fs-micro);color:' + c.muted + '">ROI ' + r.roi.toFixed(2) + '%' +
               (rmStepMap[r.sym + "|" + r.tier] ? ' · goal in ' + fmDays(rmStepMap[r.sym + "|" + r.tier].step.days) + ' (' + fmSaved(rmStepMap[r.sym + "|" + r.tier].step.daysSaved) + ')' : '') + '</span>' +
           '</div>' +
-          '<span style="' + s + ';font-size:10px;font-weight:700;text-align:right;color:' + (secured ? c.green : c.blue) + '">' + pbStr + '</span>' +
+          '<span style="' + s + ';font-size:var(--tsa-fs-micro);font-weight:700;text-align:right;color:' + (secured ? c.green : c.blue) + '">' + pbStr + '</span>' +
           '</div>';
       }).join("");
       html += '<div style="border-bottom:1px solid ' + c.divider + ';background:' + c.bg2 + '">' +
         '<button id="tsa-roadmap-toggle" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:none;border:none;cursor:pointer;font-family:' + c.mono + '">' +
-          '<span style="font-size:10px;color:' + c.blue + ';font-weight:700;letter-spacing:0.08em;text-transform:uppercase">📋 Full snowball roadmap (' + roadmap.length + ')</span>' +
-          '<span id="tsa-roadmap-caret" style="font-size:10px;color:' + c.muted + '">▶</span>' +
+          '<span style="font-size:var(--tsa-fs-micro);color:' + c.blue + ';font-weight:700;letter-spacing:0.08em;text-transform:uppercase">📋 Full snowball roadmap (' + roadmap.length + ')</span>' +
+          '<span id="tsa-roadmap-caret" style="font-size:var(--tsa-fs-micro);color:' + c.muted + '">▶</span>' +
         '</button>' +
         '<div id="tsa-roadmap-list" style="display:none">' +
-          (fastest ? '<div style="padding:6px 14px;border-bottom:1px solid ' + c.divider + ';font-size:9px;color:' + c.muted + ';' + s + ';line-height:1.5">' +
+          (fastest ? '<div style="padding:6px 14px;border-bottom:1px solid ' + c.divider + ';font-size:var(--tsa-fs-micro);color:' + c.muted + ';' + s + ';line-height:1.5">' +
             'Goal ' + fastest.goal.sym + ' ' + fastest.goal.tier + ' · ' + fmRoi(fastest.goal.monthlyInc) + '/mo · ' + fmRoi(fastest.goal.cost) + ' · ROI ' + fastest.goal.roi.toFixed(2) + '%<br>' +
             'Wait only: ' + fmDays(fastest.baselineDays) +
             (fastest.best
               ? ' · via ' + fastest.best.sym + ' ' + fastest.best.tier + ': ' + fmDays(fastest.best.days) + ' (' + fmSaved(fastest.best.daysSaved) + ')'
               : ' · no affordable buy shortens it') +
             '</div>' : '') +
-          '<div style="display:grid;grid-template-columns:42px 26px 1fr 60px;gap:4px;padding:5px 14px;font-size:9px;letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;border-bottom:1px solid ' + c.divider + ';' + s + '"><span>Stock</span><span>Tier</span><span>Cost / cumulative</span><span style="text-align:right">Payback</span></div>' +
+          '<div style="display:grid;grid-template-columns:42px 26px 1fr 60px;gap:4px;padding:5px 14px;font-size:var(--tsa-fs-micro);letter-spacing:0.1em;color:' + c.muted + ';text-transform:uppercase;border-bottom:1px solid ' + c.divider + ';' + s + '"><span>Stock</span><span>Tier</span><span>Cost / cumulative</span><span style="text-align:right">Payback</span></div>' +
           ((fastest && fastest.steps.length > 0)
-            ? '<div style="padding:2px 14px 5px;font-size:9px;color:' + c.muted + ';' + s + '">Order: goal-shortening steps first, then payback</div>'
+            ? '<div style="padding:2px 14px 5px;font-size:var(--tsa-fs-micro);color:' + c.muted + ';' + s + '">Order: goal-shortening steps first, then payback</div>'
             : '') +
           rmRows +
         '</div>' +
@@ -3069,10 +3317,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function showROIPlanner(ownedMap, raw) {
     var content = document.getElementById("tsa-content");
     if (!content) return;
-    var isDarkNow = document.getElementById("tsa-overlay").classList.contains("tsa-dark");
-    content.style.background = isDarkNow ? "#0f0f1a" : "#ffffff";
-    content.style.color = isDarkNow ? "#c8c8d8" : "#222";
-    content.innerHTML = '<div style="padding:20px;text-align:center;color:' + (isDarkNow ? '#7a7a9a' : '#888') + ';font-size:12px"><span class="tsa-spinner"></span>Loading...</div>';
+    content.style.background = "var(--tsa-bg)";
+    content.style.color = "var(--tsa-fg)";
+    content.innerHTML = '<div style="padding:20px;text-align:center;color:' + 'var(--tsa-fg-faint)' + ';font-size:var(--tsa-fs-micro)"><span class="tsa-spinner"></span>Loading...</div>';
 
     // Shared listener setup — used by both success and catch paths
     function attachListeners() {
@@ -3199,13 +3446,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       fetchAllItemPrices(function() {
         content.innerHTML = renderROIPlanner(ownedMap, raw, cashBalance, armoryFunds);
         attachListeners();
-        var isDarkFooter = document.getElementById("tsa-overlay").classList.contains("tsa-dark");
-        var footerDivider = isDarkFooter ? "#1a1a2e" : "#eee";
-        var footerBg      = isDarkFooter ? "#0f0f1a" : "#ffffff";
+        var footerDivider = "var(--tsa-border)";
+        var footerBg      = "var(--tsa-bg)";
         content.insertAdjacentHTML("beforeend",
           '<div style="padding:7px 14px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid ' + footerDivider + ';background:' + footerBg + '">' +
-            '<span style="font-size:9px;color:#555">✕ skip + unlock &nbsp;·&nbsp; ↩ restore</span>' +
-            '<span style="font-size:9px;color:#555;font-family:monospace">' + benefitTableStatus + ' &nbsp;·&nbsp; ' + new Date().toLocaleTimeString("en-GB") + '</span>' +
+            '<span style="font-size:var(--tsa-fs-micro);color:var(--tsa-fg-faint)">✕ skip + unlock &nbsp;·&nbsp; ↩ restore</span>' +
+            '<span style="font-size:var(--tsa-fs-micro);color:var(--tsa-fg-faint);font-family:var(--tsa-mono)">' + benefitTableStatus + ' &nbsp;·&nbsp; ' + new Date().toLocaleTimeString("en-GB") + '</span>' +
           '</div>'
         );
       });
@@ -3889,20 +4135,23 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (msg === lastToastMsg && (now - lastToastTs) < 3000) return;
     lastToastMsg = msg;
     lastToastTs = now;
+    // One scrim, four semantic borders. Four different solid backgrounds carried no
+    // information that the 3px border and the glyph did not already carry.
     var colors = {
-      success: { bg:"rgba(20,160,70,0.93)",  border:"#4cff91", icon:"✓" },
-      error:   { bg:"rgba(170,20,50,0.93)",  border:"#ff4c6a", icon:"✕" },
-      warn:    { bg:"rgba(150,110,0,0.93)",  border:"#ffc107", icon:"!" },
-      info:    { bg:"rgba(40,70,140,0.93)",  border:"#7a9fd4", icon:"i" }
+      success: { bg:"var(--tsa-scrim)", border:"var(--tsa-pos)",    icon:"✓" },
+      error:   { bg:"var(--tsa-scrim)", border:"var(--tsa-neg)",    icon:"✕" },
+      warn:    { bg:"var(--tsa-scrim)", border:"var(--tsa-warn)",   icon:"!" },
+      info:    { bg:"var(--tsa-scrim)", border:"var(--tsa-accent)", icon:"i" }
     };
     var c = colors[type] || colors.info;
     var toast = document.createElement("div");
+    toast.className = "tsa-scope tsa-dark";
     toast.style.cssText = "position:fixed;bottom:16px;left:16px;z-index:2147483648;" +
-      "max-width:280px;padding:10px 14px;border-radius:10px;border-left:3px solid " + c.border + ";" +
-      "background:" + c.bg + ";color:#fff;font-family:JetBrains Mono,monospace;font-size:12px;" +
-      "font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,0.4);display:flex;align-items:center;" +
+      "max-width:280px;padding:10px 14px;border-radius:var(--tsa-r-3);border-left:3px solid " + c.border + ";" +
+      "background:" + c.bg + ";color:var(--tsa-toast-fg);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);" +
+      "font-weight:600;box-shadow:0 4px 16px var(--tsa-shadow);display:flex;align-items:center;" +
       "gap:8px;animation:tsaToastIn 0.2s ease";
-    toast.innerHTML = "<span style='font-size:14px;flex-shrink:0'>" + c.icon + "</span><span>" + escHtml(msg) + "</span>";
+    toast.innerHTML = "<span style='font-size:var(--tsa-fs-body);flex-shrink:0'>" + c.icon + "</span><span>" + escHtml(msg) + "</span>";
     document.body.appendChild(toast);
     setTimeout(function() {
       toast.style.opacity = "0";
@@ -3926,15 +4175,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // reset handler. Separate from showToast so the button can carry a handler.
   function showRealizedUndoToast() {
     var t = document.createElement("div");
+    t.className = "tsa-scope tsa-dark";
     t.style.cssText = "position:fixed;bottom:16px;left:16px;z-index:2147483648;display:flex;align-items:center;gap:10px;" +
-      "padding:10px 14px;border-radius:10px;border-left:3px solid #ffc107;background:rgba(150,110,0,0.93);" +
-      "color:#fff;font-family:JetBrains Mono,monospace;font-size:12px;";
+      "padding:10px 14px;border-radius:var(--tsa-r-3);border-left:3px solid var(--tsa-warn);background:var(--tsa-scrim);" +
+      "color:var(--tsa-toast-fg);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);";
     var span = document.createElement("span");
     span.textContent = "Realized profit reset";
     t.appendChild(span);
     var btn = document.createElement("button");
     btn.textContent = "Undo";
-    btn.style.cssText = "padding:4px 10px;border-radius:6px;border:1px solid #fff;background:transparent;color:#fff;font-weight:700;cursor:pointer;font-size:12px;";
+    btn.style.cssText = "padding:4px 10px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-toast-fg);background:transparent;color:var(--tsa-toast-fg);font-weight:700;cursor:pointer;font-size:var(--tsa-fs-micro);";
     btn.onclick = function() {
       lsSet("tsa_realized_events", localStorage.getItem("tsa_realized_events_backup") || "[]");
       if (t.parentNode) t.parentNode.removeChild(t);
@@ -4248,40 +4498,30 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         }
       }
 
-      // Colour palette based on dark mode
-      var isDark2 = document.getElementById("tsa-overlay").classList.contains("tsa-dark");
-      var d = isDark2 ? {
-        bg:"#0f0f1a", bg2:"#0d0d18", bg3:"#1a1a2e", border:"#2a2a4a",
-        text:"#c8c8d8", muted:"#7a7a9a", blue:"#7a9fd4",
-        green:"#4cff91", red:"#ff4c6a", yellow:"#ffc107",
-        rowBuy:"rgba(76,255,145,0.08)", rowBuyBorder:"rgba(76,255,145,0.2)",
-        rowSell:"rgba(255,76,106,0.08)", rowSellBorder:"rgba(255,76,106,0.2)",
-        rowBenefit:"rgba(160,160,255,0.05)", rowBenefitBorder:"rgba(160,160,255,0.1)",
-        divider:"#1a1a2e", txBg:"#0d0d18", txBorder:"#2a2a4a",
-        moveBg:"rgba(255,193,7,0.1)", moveBorder:"rgba(255,193,7,0.3)", moveColor:"#ffc107",
-        moveBg2:"rgba(122,159,212,0.1)", moveBorder2:"rgba(122,159,212,0.3)", moveColor2:"#7a9fd4",
-        mono:"JetBrains Mono,monospace"
-      } : {
-        bg:"#ffffff", bg2:"#f7f9fc", bg3:"#f0f4ff", border:"#eee",
-        text:"#222", muted:"#888", blue:"#4a6fa5",
-        green:"#1a8a45", red:"#cc2222", yellow:"#856404",
-        rowBuy:"#edfaf3", rowBuyBorder:"#a8e6c0",
-        rowSell:"#fff0f0", rowSellBorder:"#ffb3b3",
-        rowBenefit:"#f0f4ff", rowBenefitBorder:"#c0d0ff",
-        divider:"#eee", txBg:"#f9f9f9", txBorder:"#e0e0e0",
-        moveBg:"#fff3cd", moveBorder:"#ffc107", moveColor:"#856404",
-        moveBg2:"#f0f4ff", moveBorder2:"#c0d0ff", moveColor2:"#4a6fa5",
-        mono:"Arial,sans-serif"
+      // All --tsa-* tokens, so the theme branch is gone; the tokens switch on
+      // #tsa-overlay.tsa-dark. Mono in both themes: this table is number columns,
+      // and the light branch used to switch to a proportional face mid-table.
+      var d = {
+        bg:"var(--tsa-bg)", bg2:"var(--tsa-bg-raised)", bg3:"var(--tsa-bg-bar)", border:"var(--tsa-border)",
+        text:"var(--tsa-fg)", muted:"var(--tsa-fg-faint)", blue:"var(--tsa-accent)",
+        green:"var(--tsa-pos)", red:"var(--tsa-neg)", yellow:"var(--tsa-warn)",
+        rowBuy:"var(--tsa-pos-bg)", rowBuyBorder:"var(--tsa-pos-border)",
+        rowSell:"var(--tsa-neg-bg)", rowSellBorder:"var(--tsa-neg-border)",
+        rowBenefit:"var(--tsa-neutral-bg)", rowBenefitBorder:"var(--tsa-neutral-border)",
+        divider:"var(--tsa-border)", txBg:"var(--tsa-bg-raised)", txBorder:"var(--tsa-border)",
+        moveBg:"var(--tsa-warn-bg)", moveBorder:"var(--tsa-warn-border)", moveColor:"var(--tsa-warn)",
+        moveBg2:"var(--tsa-accent-bg)", moveBorder2:"var(--tsa-accent-border)", moveColor2:"var(--tsa-accent)",
+        mono:"var(--tsa-mono)"
       };
       var ms = "font-family:" + d.mono + ";";
 
       var html = "<div style=\"display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:12px 14px;border-bottom:1px solid " + d.border + ";background:" + d.bg + "\">" +
-        "<div style=\"background:" + d.bg2 + ";border-radius:8px;padding:8px;text-align:center;border:1px solid " + d.border + "\">" +
-          "<div style=\"font-size:10px;color:" + d.muted + ";margin-bottom:4px\">Analyzed</div>" +
-          "<div style=\"font-size:16px;font-weight:bold;color:" + d.text + ";" + ms + "\">" + stockResults.filter(function(sr) { return sr.score >= 0; }).length + "</div></div>" +
-        "<div style=\"background:" + d.bg2 + ";border-radius:8px;padding:8px;text-align:center;border:1px solid " + d.border + "\">" +
-          "<div style=\"font-size:10px;color:" + d.muted + ";margin-bottom:4px\">You own</div>" +
-          "<div style=\"font-size:16px;font-weight:bold;color:" + d.text + ";" + ms + "\">" + ownedSymbols.length + "</div></div>" +
+        "<div style=\"background:" + d.bg2 + ";border-radius:var(--tsa-r-3);padding:8px;text-align:center;border:1px solid " + d.border + "\">" +
+          "<div style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + ";margin-bottom:4px\">Analyzed</div>" +
+          "<div style=\"font-size:var(--tsa-fs-lead);font-weight:bold;color:" + d.text + ";" + ms + "\">" + stockResults.filter(function(sr) { return sr.score >= 0; }).length + "</div></div>" +
+        "<div style=\"background:" + d.bg2 + ";border-radius:var(--tsa-r-3);padding:8px;text-align:center;border:1px solid " + d.border + "\">" +
+          "<div style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + ";margin-bottom:4px\">You own</div>" +
+          "<div style=\"font-size:var(--tsa-fs-lead);font-weight:bold;color:" + d.text + ";" + ms + "\">" + ownedSymbols.length + "</div></div>" +
         (function() {
           var showRealized = getShowRealized();
           var realizedTotal = showRealized ? getRealizedTotal() : 0;
@@ -4293,25 +4533,25 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             var detailHtml = stockKeys.map(function(sym) {
               var p = byStock[sym];
               return "<div style=\"display:flex;justify-content:space-between;padding:1px 0;\">" +
-                "<span style=\"font-size:9px;color:" + d.muted + "\">" + sym + "</span>" +
-                "<span style=\"font-size:9px;font-weight:bold;color:" + (p >= 0 ? d.green : d.red) + ";" + ms + "\">" + fm(p) + "</span>" +
+                "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">" + sym + "</span>" +
+                "<span style=\"font-size:var(--tsa-fs-micro);font-weight:bold;color:" + (p >= 0 ? d.green : d.red) + ";" + ms + "\">" + fm(p) + "</span>" +
               "</div>";
             }).join("");
-            return "<div style=\"background:" + d.bg2 + ";border-radius:8px;padding:8px;border:1px solid " + d.border + "\">" +
+            return "<div style=\"background:" + d.bg2 + ";border-radius:var(--tsa-r-3);padding:8px;border:1px solid " + d.border + "\">" +
               "<div style=\"display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px\">" +
-                "<div style=\"font-size:9px;color:" + d.muted + "\">Open P/L</div>" +
-                "<div style=\"font-size:13px;font-weight:bold;color:" + (totalProfit >= 0 ? d.green : d.red) + ";" + ms + "\">" + fm(totalProfit) + "</div>" +
+                "<div style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">Open P/L</div>" +
+                "<div style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + (totalProfit >= 0 ? d.green : d.red) + ";" + ms + "\">" + fm(totalProfit) + "</div>" +
               "</div>" +
               "<div id=\"tsa-realized-row\" style=\"display:flex;justify-content:space-between;align-items:baseline;cursor:pointer;\">" +
-                "<div style=\"font-size:9px;color:" + d.muted + "\">Real. " + realDays + "d " + (realExpanded ? "&#9660;" : "&#9658;") + "</div>" +
-                "<div style=\"font-size:13px;font-weight:bold;color:" + (realizedTotal >= 0 ? d.green : d.red) + ";" + ms + "\">" + fm(realizedTotal) + "</div>" +
+                "<div style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">Real. " + realDays + "d " + (realExpanded ? "&#9660;" : "&#9658;") + "</div>" +
+                "<div style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + (realizedTotal >= 0 ? d.green : d.red) + ";" + ms + "\">" + fm(realizedTotal) + "</div>" +
               "</div>" +
               (realExpanded && stockKeys.length > 0 ? "<div style=\"margin-top:4px;border-top:1px solid " + d.border + ";padding-top:4px\">" + detailHtml + "</div>" : "") +
             "</div>";
           } else {
-            return "<div style=\"background:" + d.bg2 + ";border-radius:8px;padding:8px;text-align:center;border:1px solid " + d.border + "\">" +
-              "<div style=\"font-size:10px;color:" + d.muted + ";margin-bottom:4px\">Trading profit</div>" +
-              "<div style=\"font-size:16px;font-weight:bold;color:" + (totalProfit >= 0 ? d.green : d.red) + ";" + ms + "\">" + fm(totalProfit) + "</div></div>";
+            return "<div style=\"background:" + d.bg2 + ";border-radius:var(--tsa-r-3);padding:8px;text-align:center;border:1px solid " + d.border + "\">" +
+              "<div style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + ";margin-bottom:4px\">Trading profit</div>" +
+              "<div style=\"font-size:var(--tsa-fs-lead);font-weight:bold;color:" + (totalProfit >= 0 ? d.green : d.red) + ";" + ms + "\">" + fm(totalProfit) + "</div></div>";
           }
         })() +
         "</div>";
@@ -4327,14 +4567,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         return rows.map(function(row) {
           var barW = row.max > 0 ? Math.round((row.pts / row.max) * 100) : 0;
           var barColor = row.pts >= row.max * 0.75 ? d.green : row.pts >= row.max * 0.4 ? d.yellow : d.muted;
-          var maxBadge = row.pts === row.max ? " <span style=\"color:" + d.green + ";font-size:9px\">★ MAX</span>" : "";
+          var maxBadge = row.pts === row.max ? " <span style=\"color:" + d.green + ";font-size:var(--tsa-fs-micro)\">★ MAX</span>" : "";
           return "<div style=\"margin-bottom:6px\">" +
-            "<div style=\"display:flex;justify-content:space-between;font-size:10px;margin-bottom:2px\">" +
+            "<div style=\"display:flex;justify-content:space-between;font-size:var(--tsa-fs-micro);margin-bottom:2px\">" +
             "<span style=\"color:" + d.muted + "\">" + row.label + "</span>" +
             "<span style=\"color:" + d.text + ";font-weight:bold;" + ms + "\">" + row.pts + " / " + row.max + "p" + maxBadge + "</span>" +
             "</div>" +
-            "<div style=\"height:4px;background:" + d.border + ";border-radius:2px\">" +
-            "<div style=\"height:4px;width:" + barW + "%;background:" + barColor + ";border-radius:2px\"></div>" +
+            "<div style=\"height:4px;background:" + d.border + ";border-radius:var(--tsa-r-1)\">" +
+            "<div style=\"height:4px;width:" + barW + "%;background:" + barColor + ";border-radius:var(--tsa-r-1)\"></div>" +
             "</div></div>";
         }).join("") + buildWeekRangeHtml(st);
       }
@@ -4354,7 +4594,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           }
         }
         if (!wr.fromCandle) txt += " · sampled";
-        return "<div style=\"font-size:10px;color:" + d.muted + ";margin:-2px 0 6px\">" + txt + "</div>";
+        return "<div style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + ";margin:-2px 0 6px\">" + txt + "</div>";
       }
 
       function buildBbHtml(bbCtx) {
@@ -4364,12 +4604,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
                       bbCtx.percentile <= 65 ? d.muted :
                       bbCtx.percentile <= 85 ? d.green : d.red;
         return "<div style=\"margin-bottom:6px;border-top:1px solid " + d.divider + ";padding-top:6px\">" +
-          "<div style=\"display:flex;justify-content:space-between;font-size:10px;margin-bottom:2px\">" +
+          "<div style=\"display:flex;justify-content:space-between;font-size:var(--tsa-fs-micro);margin-bottom:2px\">" +
           "<span style=\"color:" + d.muted + "\">Volatility</span>" +
           "<span style=\"color:" + bbColor + ";font-weight:bold;" + ms + "\">" + bbCtx.label + " · " + bbBarW + "%</span>" +
           "</div>" +
-          "<div style=\"height:4px;background:" + d.border + ";border-radius:2px\">" +
-          "<div style=\"height:4px;width:" + bbBarW + "%;background:" + bbColor + ";border-radius:2px\"></div>" +
+          "<div style=\"height:4px;background:" + d.border + ";border-radius:var(--tsa-r-1)\">" +
+          "<div style=\"height:4px;width:" + bbBarW + "%;background:" + bbColor + ";border-radius:var(--tsa-r-1)\"></div>" +
           "</div></div>";
       }
 
@@ -4408,19 +4648,19 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
         var gapColor = gap <= 15 ? d.green : gap <= 30 ? d.yellow : d.muted;
         var gapText = gap === 0 ? "score ok" : gap + "p";
-        return "<div style=\"margin-bottom:4px;padding:5px 8px;border-radius:6px;" +
-          "background:" + (isDark2 ? "rgba(122,159,212,0.07)" : "#f0f4ff") + ";" +
-          "border:1px solid " + (isDark2 ? "rgba(122,159,212,0.15)" : "#c0d0ff") + "\">" +
-          "<span style=\"font-size:10px;color:" + d.muted + "\">To " + nextLabel + ": </span>" +
-          "<span style=\"font-size:10px;font-weight:bold;color:" + gapColor + ";" + ms + "\">" + gapText + "</span>" +
-          (reversalNote ? "<span style=\"font-size:10px;color:" + d.yellow + "\">" + reversalNote + "</span>" : "") +
-          "<span style=\"font-size:10px;color:" + d.muted + "\">" + needsStr + "</span>" +
+        return "<div style=\"margin-bottom:4px;padding:5px 8px;border-radius:var(--tsa-r-2);" +
+          "background:var(--tsa-accent-bg);" +
+          "border:1px solid var(--tsa-accent-border)\">" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">To " + nextLabel + ": </span>" +
+          "<span style=\"font-size:var(--tsa-fs-micro);font-weight:bold;color:" + gapColor + ";" + ms + "\">" + gapText + "</span>" +
+          (reversalNote ? "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.yellow + "\">" + reversalNote + "</span>" : "") +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">" + needsStr + "</span>" +
           "</div>";
       }
 
       if (top5Buy.length > 0) {
         html += "<div style=\"padding:10px 14px 6px;background:" + d.bg + "\">" +
-          "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">" +
+          "<div style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">" +
           "Top " + top5Buy.length + " buy" + top5HiddenHtml(d, top5Hidden) + "</div>";
         top5Buy.forEach(function(s) {
           var breakdownId = "tsa-breakdown-" + s.symbol;
@@ -4430,14 +4670,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           if (invDelta !== null) {
             var invColor = invDelta > 0 ? d.green : invDelta < 0 ? d.red : d.muted;
             var invSign = invDelta > 0 ? "+" : "";
-            invHtml = " <span style=\"font-size:9px;color:" + invColor + ";font-weight:bold\">" + invSign + invDelta.toLocaleString("en-US") + " inv 24h</span>";
+            invHtml = " <span style=\"font-size:var(--tsa-fs-micro);color:" + invColor + ";font-weight:bold\">" + invSign + invDelta.toLocaleString("en-US") + " inv 24h</span>";
           }
           var bdHtml = buildBreakdownHtml(bd, s);
-          var signalColor = s.signal === "STRONG BUY" ? "#FFD700" : s.signal === "BUY" ? d.green : s.signal === "CONSIDER" ? "#FFA500" : d.muted;
+          var signalColor = s.signal === "STRONG BUY" ? "var(--tsa-pos-strong)" : s.signal === "BUY" ? d.green : s.signal === "CONSIDER" ? "var(--tsa-warn)" : d.muted;
           // Color based on ownership: unowned=green, owned swing=amber, owned benefit=blue
           var symColor = !s.owned ? d.green : s.has_benefit ? d.blue : d.yellow;
-          var rowBg = !s.owned ? d.rowBuy : s.has_benefit ? d.rowBenefit : (isDark2 ? "rgba(255,193,7,0.07)" : "#fffbeb");
-          var rowBorder = !s.owned ? d.rowBuyBorder : s.has_benefit ? d.rowBenefitBorder : (isDark2 ? "rgba(255,193,7,0.25)" : "#fde68a");
+          var rowBg = !s.owned ? d.rowBuy : s.has_benefit ? d.rowBenefit : "var(--tsa-warn-bg)";
+          var rowBorder = !s.owned ? d.rowBuyBorder : s.has_benefit ? d.rowBenefitBorder : "var(--tsa-warn-border)";
 
           // Trend arrow vs previous load
           var prevP = prevPrices[s.symbol];
@@ -4447,7 +4687,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             if (Math.abs(diff) >= 0.01) {
               var trendCol = diff > 0 ? d.green : d.red;
               var trendArr = diff > 0 ? "↑" : "↓";
-              trendHtml = "<span style=\"font-size:9px;color:" + trendCol + ";font-weight:bold;margin-left:4px\">" + trendArr + Math.abs(diff).toFixed(2) + "%</span>";
+              trendHtml = "<span style=\"font-size:var(--tsa-fs-micro);color:" + trendCol + ";font-weight:bold;margin-left:4px\">" + trendArr + Math.abs(diff).toFixed(2) + "%</span>";
             }
           }
           var isPinned = tsaPinned.indexOf(s.symbol) >= 0;
@@ -4456,31 +4696,31 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var bbHtml = buildBbHtml(bbWidthCache[s.symbol]);
 
           html += "<div style=\"margin-bottom:5px\">" +
-            "<div class=\"tsa-buy-row\" data-symbol=\"" + s.symbol + "\" data-breakdown=\"" + breakdownId + "\" style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;cursor:pointer;background:" + rowBg + ";border:1px solid " + rowBorder + "\">" +
+            "<div class=\"tsa-buy-row\" data-symbol=\"" + s.symbol + "\" data-breakdown=\"" + breakdownId + "\" style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:var(--tsa-r-3);cursor:pointer;background:" + rowBg + ";border:1px solid " + rowBorder + "\">" +
             "<div style=\"display:flex;flex-direction:column;gap:2px\">" +
-            "<span style=\"font-size:13px;font-weight:bold;color:" + symColor + ";" + ms + "\">" + s.symbol + trendHtml + " " + pinBtnHtml + "</span>" +
-            "<span style=\"font-size:10px;color:" + d.muted + "\">" + s.reasons.split(" | ").slice(0,2).join(" · ") + top5PosHtml(d, top5Pos[s.symbol]) + invHtml + "</span>" +
+            "<span style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + symColor + ";" + ms + "\">" + s.symbol + trendHtml + " " + pinBtnHtml + "</span>" +
+            "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">" + s.reasons.split(" | ").slice(0,2).join(" · ") + top5PosHtml(d, top5Pos[s.symbol]) + invHtml + "</span>" +
             "</div><div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:2px\">" +
-            "<span style=\"font-size:14px;font-weight:bold;color:" + symColor + ";" + ms + "\">" + s.score + "</span>" +
-            "<span style=\"font-size:9px;color:" + signalColor + ";font-weight:bold\">" + s.signal + "</span>" +
-            "<span id=\"" + breakdownId + "-caret\" style=\"font-size:9px;color:" + d.muted + "\">▶</span>" +
+            "<span style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + symColor + ";" + ms + "\">" + s.score + "</span>" +
+            "<span style=\"font-size:var(--tsa-fs-micro);color:" + signalColor + ";font-weight:bold\">" + s.signal + "</span>" +
+            "<span id=\"" + breakdownId + "-caret\" style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">▶</span>" +
             "</div></div>" +
-            "<div id=\"" + breakdownId + "\" style=\"display:none;background:" + d.txBg + ";border:1px solid " + d.txBorder + ";border-top:none;border-radius:0 0 8px 8px;padding:10px 12px 8px;margin-top:-4px\">" +
+            "<div id=\"" + breakdownId + "\" style=\"display:none;background:" + d.txBg + ";border:1px solid " + d.txBorder + ";border-top:none;border-radius:0 0 var(--tsa-r-3) var(--tsa-r-3);padding:10px 12px 8px;margin-top:-4px\">" +
             bdHtml +
             bbHtml +
             buildGapHtml(bd, s.score, s.signal, s.sustainedDowntrend) +
             "<div style=\"border-top:1px solid " + d.divider + ";margin-top:4px;padding-top:6px;display:flex;justify-content:space-between;align-items:center\">" +
-            "<span style=\"font-size:10px;color:" + d.muted + "\">Total</span>" +
-            "<span style=\"font-size:12px;font-weight:bold;color:" + symColor + ";" + ms + "\">" + s.score + "p · " + s.signal + "</span>" +
-            "<button class=\"tsa-goto-chart\" data-symbol=\"" + s.symbol + "\" style=\"padding:5px 10px;border-radius:6px;border:1px solid " + d.border + ";background:" + d.bg2 + ";color:" + d.muted + ";font-size:10px;cursor:pointer;font-weight:bold;\">📈 Chart</button>" +
+            "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">Total</span>" +
+            "<span style=\"font-size:var(--tsa-fs-micro);font-weight:bold;color:" + symColor + ";" + ms + "\">" + s.score + "p · " + s.signal + "</span>" +
+            "<button class=\"tsa-goto-chart\" data-symbol=\"" + s.symbol + "\" style=\"padding:5px 10px;border-radius:var(--tsa-r-2);border:1px solid " + d.border + ";background:" + d.bg2 + ";color:" + d.muted + ";font-size:var(--tsa-fs-micro);cursor:pointer;font-weight:bold;\">📈 Chart</button>" +
             "</div></div>" +
             "</div>";
         });
         html += "</div>";
       } else {
         html += "<div style=\"padding:10px 14px 6px;background:" + d.bg + "\">" +
-          "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Buy signals" + top5HiddenHtml(d, top5Hidden) + "</div>" +
-          "<div style=\"color:" + d.muted + ";font-size:11px;padding:8px 0\">No signals right now</div></div>";
+          "<div style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Buy signals" + top5HiddenHtml(d, top5Hidden) + "</div>" +
+          "<div style=\"color:" + d.muted + ";font-size:var(--tsa-fs-micro);padding:8px 0\">No signals right now</div></div>";
       }
 
       // BUY ZONE — its own section, BESIDE the score and never folded into it.
@@ -4511,34 +4751,34 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         }
 
         html += "<div style=\"padding:10px 14px 6px;background:" + d.bg + "\">" +
-          "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted +
+          "<div style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + d.muted +
           ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Buy zone" +
           (dip.rows.length ? " (" + dip.rows.length + ")" : "") + "</div>";
 
         if (dip.rows.length) {
           dip.rows.forEach(function (r) {
-            html += "<div style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;margin-bottom:5px;background:" + d.rowBuy + ";border:1px solid " + d.rowBuyBorder + "\">" +
+            html += "<div style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:var(--tsa-r-3);margin-bottom:5px;background:" + d.rowBuy + ";border:1px solid " + d.rowBuyBorder + "\">" +
               "<div style=\"display:flex;flex-direction:column;gap:2px\">" +
               // The ACTION leads. A measurement is not an instruction: the dossier
               // shipped "3 days · ready" and a user reported not knowing what it
               // meant, so the verb comes first and the evidence sits under it.
-              "<span style=\"font-size:13px;font-weight:bold;color:" +
+              "<span style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" +
               (r.verdict === "BUY" ? d.green : d.muted) + ";" + ms + "\">" +
-              r.verdict + " <span style=\"font-size:11px;color:" + d.muted +
+              r.verdict + " <span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted +
               "\">" + r.sym + "</span></span>" +
-              "<span style=\"font-size:10px;color:" + d.muted + "\">" +
+              "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">" +
               (r.verdict === "BUY"
                 ? r.bandDays + "d settled in the band · "
                 : "only " + r.bandDays + "d in the band, " + DIP_RIPE_DAYS + " wanted · ") +
               "30d range $" +
               r.low.toFixed(2) + " – $" + r.high.toFixed(2) + " · now $" + r.price.toFixed(2) + "</span>" +
               "</div><div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:2px\">" +
-              "<span style=\"font-size:14px;font-weight:bold;color:" + d.green + ";" + ms + "\">" + r.pos.toFixed(1) + "%</span>" +
-              "<span style=\"font-size:9px;color:" + d.muted + "\">into its range</span>" +
+              "<span style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + d.green + ";" + ms + "\">" + r.pos.toFixed(1) + "%</span>" +
+              "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">into its range</span>" +
               "</div></div>";
           });
         } else {
-          html += "<div style=\"color:" + d.muted + ";font-size:11px;padding:8px 0\">" +
+          html += "<div style=\"color:" + d.muted + ";font-size:var(--tsa-fs-micro);padding:8px 0\">" +
             "Nothing in the bottom " + DIP_MAX_POS + "% of its own 30-day range</div>";
         }
 
@@ -4546,34 +4786,34 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         // is a swing to talk about, so a user who holds nothing tradeable never
         // sees an empty frame.
         if (dip.sells.length) {
-          html += "<div style=\"font-size:9px;letter-spacing:0.12em;color:" + d.muted +
+          html += "<div style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + d.muted +
             ";text-transform:uppercase;margin:8px 0 6px;font-weight:bold\">" +
             "Your swings · +" + DIP_SELL_TARGET.toFixed(1) + "% target</div>";
           dip.sells.forEach(function (r) {
             var isSell = r.verdict === "SELL";
-            html += "<div style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;margin-bottom:5px;background:" +
-              (isDark2 ? "rgba(255,193,7,0.07)" : "#fffbeb") + ";border:1px solid " +
-              (isDark2 ? "rgba(255,193,7,0.25)" : "#fde68a") + "\">" +
+            html += "<div style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:var(--tsa-r-3);margin-bottom:5px;background:" +
+              "var(--tsa-warn-bg)" + ";border:1px solid " +
+              "var(--tsa-warn-border)" + "\">" +
               "<div style=\"display:flex;flex-direction:column;gap:2px\">" +
-              "<span style=\"font-size:13px;font-weight:bold;color:" +
+              "<span style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" +
               (isSell ? d.yellow : d.muted) + ";" + ms + "\">" + r.verdict +
-              " <span style=\"font-size:11px;color:" + d.muted + "\">" + r.sym +
+              " <span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">" + r.sym +
               "</span></span>" +
-              "<span style=\"font-size:10px;color:" + d.muted + "\">" +
+              "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">" +
               r.shares.toLocaleString("en-US") + " swing shares · this rule's +" +
               DIP_SELL_TARGET.toFixed(1) + "% target, not your Sell setting</span>" +
               "</div><div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:2px\">" +
-              "<span style=\"font-size:14px;font-weight:bold;color:" +
+              "<span style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" +
               (r.net >= 0 ? d.green : d.red) + ";" + ms + "\">" +
               (r.net >= 0 ? "+" : "") + r.net.toFixed(2) + "%</span>" +
-              "<span style=\"font-size:9px;color:" + d.muted + "\">net, after the 0.1% fee</span>" +
+              "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">net, after the 0.1% fee</span>" +
               "</div></div>";
           });
         }
 
         // The disclosure, and it is not decoration: the track record, what is not
         // counted yet, and which symbols have no basis at all.
-        html += "<div style=\"border-top:1px solid " + d.divider + ";margin-top:6px;padding-top:6px;font-size:9px;color:" + d.muted + ";line-height:1.6\">" +
+        html += "<div style=\"border-top:1px solid " + d.divider + ";margin-top:6px;padding-top:6px;font-size:var(--tsa-fs-micro);color:" + d.muted + ";line-height:1.6\">" +
           "<div>Measured on your own calls: " + rateHtml + "</div>" +
           "<div>" + dst.pending + " still inside the " + DIP_HOLD_DAYS + "d horizon · " +
           dst.nodata + " expired unpriced" +
@@ -4591,34 +4831,34 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       // WATCH section — owned stocks with CONSIDER score
       if (getShowWatch() && watchList.length > 0) {
         html += "<div style=\"padding:10px 14px 6px;background:" + d.bg + "\">" +
-          "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Watch (" + watchList.length + ")</div>";
+          "<div style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Watch (" + watchList.length + ")</div>";
         watchList.forEach(function(s) {
           var watchBreakdownId = "tsa-watch-breakdown-" + s.symbol;
           var bd = s.scoreBreakdown || {};
           var bdHtml = buildBreakdownHtml(bd, s);
           var watchSymColor = s.has_benefit ? d.blue : d.yellow;
-          var watchRowBg = s.has_benefit ? d.rowBenefit : (isDark2 ? "rgba(255,193,7,0.07)" : "#fffbeb");
-          var watchRowBorder = s.has_benefit ? d.rowBenefitBorder : (isDark2 ? "rgba(255,193,7,0.25)" : "#fde68a");
+          var watchRowBg = s.has_benefit ? d.rowBenefit : "var(--tsa-warn-bg)";
+          var watchRowBorder = s.has_benefit ? d.rowBenefitBorder : "var(--tsa-warn-border)";
           var watchBbHtml = buildBbHtml(bbWidthCache[s.symbol]);
 
           html += "<div style=\"margin-bottom:5px\">" +
-            "<div class=\"tsa-watch-row\" data-symbol=\"" + s.symbol + "\" data-breakdown=\"" + watchBreakdownId + "\" style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;cursor:pointer;background:" + watchRowBg + ";border:1px solid " + watchRowBorder + "\">" +
+            "<div class=\"tsa-watch-row\" data-symbol=\"" + s.symbol + "\" data-breakdown=\"" + watchBreakdownId + "\" style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:var(--tsa-r-3);cursor:pointer;background:" + watchRowBg + ";border:1px solid " + watchRowBorder + "\">" +
             "<div style=\"display:flex;flex-direction:column;gap:2px\">" +
-            "<span style=\"font-size:13px;font-weight:bold;color:" + watchSymColor + ";" + ms + "\">" + s.symbol + "</span>" +
-            "<span style=\"font-size:10px;color:" + d.muted + "\">" + s.reasons.split(" | ").slice(0,2).join(" · ") + "</span>" +
+            "<span style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + watchSymColor + ";" + ms + "\">" + s.symbol + "</span>" +
+            "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">" + s.reasons.split(" | ").slice(0,2).join(" · ") + "</span>" +
             "</div><div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:2px\">" +
-            "<span style=\"font-size:14px;font-weight:bold;color:" + watchSymColor + ";" + ms + "\">" + s.score + "</span>" +
-            "<span style=\"font-size:9px;color:" + watchSymColor + ";font-weight:bold\">CONSIDER</span>" +
-            "<span id=\"" + watchBreakdownId + "-caret\" style=\"font-size:9px;color:" + d.muted + "\">▶</span>" +
+            "<span style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + watchSymColor + ";" + ms + "\">" + s.score + "</span>" +
+            "<span style=\"font-size:var(--tsa-fs-micro);color:" + watchSymColor + ";font-weight:bold\">CONSIDER</span>" +
+            "<span id=\"" + watchBreakdownId + "-caret\" style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">▶</span>" +
             "</div></div>" +
-            "<div id=\"" + watchBreakdownId + "\" style=\"display:none;background:" + d.txBg + ";border:1px solid " + d.txBorder + ";border-top:none;border-radius:0 0 8px 8px;padding:10px 12px 8px;margin-top:-4px\">" +
+            "<div id=\"" + watchBreakdownId + "\" style=\"display:none;background:" + d.txBg + ";border:1px solid " + d.txBorder + ";border-top:none;border-radius:0 0 var(--tsa-r-3) var(--tsa-r-3);padding:10px 12px 8px;margin-top:-4px\">" +
             bdHtml +
             watchBbHtml +
             buildGapHtml(bd, s.score, s.signal, s.sustainedDowntrend) +
             "<div style=\"border-top:1px solid " + d.divider + ";margin-top:4px;padding-top:6px;display:flex;justify-content:space-between;align-items:center\">" +
-            "<span style=\"font-size:10px;color:" + d.muted + "\">Total</span>" +
-            "<span style=\"font-size:12px;font-weight:bold;color:" + watchSymColor + ";" + ms + "\">" + s.score + "p · CONSIDER</span>" +
-            "<button class=\"tsa-goto-chart\" data-symbol=\"" + s.symbol + "\" style=\"padding:5px 10px;border-radius:6px;border:1px solid " + d.border + ";background:" + d.bg2 + ";color:" + d.muted + ";font-size:10px;cursor:pointer;font-weight:bold;\">📈 Chart</button>" +
+            "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">Total</span>" +
+            "<span style=\"font-size:var(--tsa-fs-micro);font-weight:bold;color:" + watchSymColor + ";" + ms + "\">" + s.score + "p · CONSIDER</span>" +
+            "<button class=\"tsa-goto-chart\" data-symbol=\"" + s.symbol + "\" style=\"padding:5px 10px;border-radius:var(--tsa-r-2);border:1px solid " + d.border + ";background:" + d.bg2 + ";color:" + d.muted + ";font-size:var(--tsa-fs-micro);cursor:pointer;font-weight:bold;\">📈 Chart</button>" +
             "</div></div>" +
             "</div>";
         });
@@ -4705,7 +4945,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var targetPrice = avgForTarget * (1 + profitPct / 100) / 0.999;
           var currentPctStr = displayNetProfitPct !== null ? (displayNetProfitPct >= 0 ? "+" : "") + displayNetProfitPct.toFixed(2) + "%" : "";
           var currentPctColor = (displayNetProfitPct || 0) >= 0 ? d.green : d.red;
-          targetLine = "<span style=\"font-size:10px;color:" + d.muted + "\">Avg $" + avgForTarget.toFixed(2) + " → Target <strong style=\"color:" + d.green + "\">$" + targetPrice.toFixed(2) + "</strong> (+" + profitPct.toFixed(1) + "%)" +
+          targetLine = "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">Avg $" + avgForTarget.toFixed(2) + " → Target <strong style=\"color:" + d.green + "\">$" + targetPrice.toFixed(2) + "</strong> (+" + profitPct.toFixed(1) + "%)" +
             (currentPctStr ? " · <strong style=\"color:" + currentPctColor + "\">" + currentPctStr + "</strong>" : "") +
             "</span><br>";
         }
@@ -4742,12 +4982,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             txSwingLeft -= (t.shares || 0);
             var txLabel = isBenefitTx ? "Benefit block" : "Block " + (idx + 1);
             var txLabelColor = isBenefitTx ? d.blue : d.muted;
-            txHtml += "<div " + (!isBenefitTx ? "id=\"tsa-swing-tx-" + s.symbol + "-" + idx + "\" class=\"tsa-swing-tx-row\" data-sym=\"" + s.symbol + "\" data-shares=\"" + (t.shares || 0) + "\" data-label=\"Block " + (idx + 1) + "\" data-state=\"0\" " : "") + "style=\"display:flex;justify-content:space-between;align-items:center;padding:6px 4px;border-bottom:1px solid " + d.divider + ";font-size:11px;" + (!isBenefitTx ? "cursor:pointer;border-radius:4px;" : "") + "\">" +
+            txHtml += "<div " + (!isBenefitTx ? "id=\"tsa-swing-tx-" + s.symbol + "-" + idx + "\" class=\"tsa-swing-tx-row\" data-sym=\"" + s.symbol + "\" data-shares=\"" + (t.shares || 0) + "\" data-label=\"Block " + (idx + 1) + "\" data-state=\"0\" " : "") + "style=\"display:flex;justify-content:space-between;align-items:center;padding:6px 4px;border-bottom:1px solid " + d.divider + ";font-size:var(--tsa-fs-micro);" + (!isBenefitTx ? "cursor:pointer;border-radius:var(--tsa-r-1);" : "") + "\">" +
               "<div><span style=\"color:" + txLabelColor + ";" + ms + "\">" + txLabel + "</span><span style=\"color:" + d.muted + ";margin-left:6px\">" + txDate + "</span><br>" +
               "<span style=\"color:" + d.text + ";" + ms + "\">" + txShares + " @ " + txPrice + "</span></div>" +
               "<div style=\"text-align:right\">" +
-              "<span style=\"font-weight:bold;color:" + txColD + ";font-size:12px;\">" + txSign + "$" + Math.abs(Math.round(txProfit)).toLocaleString("en-US") + "</span><br>" +
-              "<span style=\"font-weight:bold;color:" + txColD + ";font-size:11px;\">" + txSign + txPct + "%</span></div></div>";
+              "<span style=\"font-weight:bold;color:" + txColD + ";font-size:var(--tsa-fs-micro);\">" + txSign + "$" + Math.abs(Math.round(txProfit)).toLocaleString("en-US") + "</span><br>" +
+              "<span style=\"font-weight:bold;color:" + txColD + ";font-size:var(--tsa-fs-micro);\">" + txSign + txPct + "%</span></div></div>";
           });
         }
 
@@ -4768,28 +5008,28 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
         return "<div style=\"margin-bottom:5px;\">" +
           "<div style=\"display:flex;align-items:center;gap:6px;\">" +
-          "<div style=\"" + rowBgStr + ";flex:1;margin-bottom:0;cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;\" data-detail=\"" + detailId + "\" data-symbol=\"" + s.symbol + "\">" +
+          "<div style=\"" + rowBgStr + ";flex:1;margin-bottom:0;cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:var(--tsa-r-3);\" data-detail=\"" + detailId + "\" data-symbol=\"" + s.symbol + "\">" +
           "<div style=\"display:flex;flex-direction:column;gap:2px\">" +
-          "<span style=\"font-size:13px;font-weight:bold;color:" + col + ";" + ms + "\">" + s.symbol + "</span>" +
-          "<span style=\"font-size:10px;color:" + d.muted + "\">" + sharesStr + "</span><br>" +
+          "<span style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + col + ";" + ms + "\">" + s.symbol + "</span>" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">" + sharesStr + "</span><br>" +
           targetLine +
-          "<span style=\"font-size:10px;color:" + d.muted + "\">Score " + s.score + (s.hasDividend ? " · DIV" : "") + (s.reasons ? " · " + s.reasons.split(" | ").slice(0,2).join(" · ") : "") + "</span>" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">Score " + s.score + (s.hasDividend ? " · DIV" : "") + (s.reasons ? " · " + s.reasons.split(" | ").slice(0,2).join(" · ") : "") + "</span>" +
           "</div><div style=\"display:flex;flex-direction:column;align-items:flex-end;gap:2px\">" +
-          "<span style=\"font-size:13px;font-weight:bold;color:" + col + ";" + ms + "\">" + pct + "</span>" +
+          "<span style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + col + ";" + ms + "\">" + pct + "</span>" +
           // A passive perk has no payout cycle, so it gets a plain PERK badge:
           // showing progress/frequency there would be a countdown to nothing.
-          (s.hasDividend ? "<span style=\"font-size:9px;padding:2px 6px;border-radius:10px;font-weight:bold;background:rgba(255,193,7,0.12);color:" + d.yellow + ";border:1px solid rgba(255,193,7,0.3)\">" + (s.isPassivePerk ? "PERK" : "DIV " + s.dividendProgress + "/" + s.dividendFrequency + "d") + "</span>" : "") +
-          (s.sellSignal ? "<span style=\"font-size:9px;font-weight:bold;color:" + d.red + "\">" + s.sellSignal + "</span>" : "") +
+          (s.hasDividend ? "<span style=\"font-size:var(--tsa-fs-micro);padding:2px 6px;border-radius:var(--tsa-r-3);font-weight:bold;background:var(--tsa-warn-bg);color:" + d.yellow + ";border:1px solid var(--tsa-warn-border)\">" + (s.isPassivePerk ? "PERK" : "DIV " + s.dividendProgress + "/" + s.dividendFrequency + "d") + "</span>" : "") +
+          (s.sellSignal ? "<span style=\"font-size:var(--tsa-fs-micro);font-weight:bold;color:" + d.red + "\">" + s.sellSignal + "</span>" : "") +
           "</div></div>" +
           "</div>" +
-          "<div id=\"" + detailId + "\" style=\"display:none;background:" + d.txBg + ";border:1px solid " + d.txBorder + ";border-radius:0 0 8px 8px;padding:8px 10px;margin-top:-4px;\">" +
+          "<div id=\"" + detailId + "\" style=\"display:none;background:" + d.txBg + ";border:1px solid " + d.txBorder + ";border-radius:0 0 var(--tsa-r-3) var(--tsa-r-3);padding:8px 10px;margin-top:-4px;\">" +
           // Total P/L summary
-          "<div style=\"display:flex;justify-content:space-between;align-items:center;background:" + d.bg + ";border-radius:6px;padding:8px 10px;margin-bottom:8px;border:1px solid " + d.border + "\">" +
-          "<div><div style=\"font-size:9px;color:" + d.muted + ";text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px\">Total P/L</div>" +
-          "<div style=\"font-size:15px;font-weight:bold;color:" + totalCol + "\">" + (totalPct !== null ? totalSign + "$" + Math.abs(Math.round(totalProfit)).toLocaleString("en-US") : "N/A") + "</div></div>" +
-          "<div style=\"text-align:right\"><div style=\"font-size:9px;color:" + d.muted + ";text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px\">Return</div>" +
-          "<div style=\"font-size:15px;font-weight:bold;color:" + totalCol + "\">" + (totalPct !== null ? totalSign + totalPct + "%" : "N/A") + "</div></div>" +
-          "<button class=\"tsa-goto-chart\" data-symbol=\"" + s.symbol + "\" style=\"padding:6px 10px;border-radius:6px;border:1px solid " + d.border + ";background:" + d.bg2 + ";color:" + d.muted + ";font-size:10px;cursor:pointer;font-weight:bold;\">📈 Chart</button>" +
+          "<div style=\"display:flex;justify-content:space-between;align-items:center;background:" + d.bg + ";border-radius:var(--tsa-r-2);padding:8px 10px;margin-bottom:8px;border:1px solid " + d.border + "\">" +
+          "<div><div style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + ";text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px\">Total P/L</div>" +
+          "<div style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + totalCol + "\">" + (totalPct !== null ? totalSign + "$" + Math.abs(Math.round(totalProfit)).toLocaleString("en-US") : "N/A") + "</div></div>" +
+          "<div style=\"text-align:right\"><div style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + ";text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px\">Return</div>" +
+          "<div style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + totalCol + "\">" + (totalPct !== null ? totalSign + totalPct + "%" : "N/A") + "</div></div>" +
+          "<button class=\"tsa-goto-chart\" data-symbol=\"" + s.symbol + "\" style=\"padding:6px 10px;border-radius:var(--tsa-r-2);border:1px solid " + d.border + ";background:" + d.bg2 + ";color:" + d.muted + ";font-size:var(--tsa-fs-micro);cursor:pointer;font-weight:bold;\">📈 Chart</button>" +
           "</div>" +
           (function() {
             // Entry slippage: compare QT buy intent price vs actual avg_price
@@ -4803,9 +5043,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
                   if (Math.abs(slipPct) >= 0.5) {
                     var slipColor = slipPct > 0 ? d.red : d.green;
                     var slipSign  = slipPct > 0 ? "+" : "";
-                    return "<div style=\"display:flex;align-items:center;gap:6px;padding:5px 8px;margin-bottom:6px;border-radius:6px;background:" + (slipPct > 0 ? "rgba(255,76,106,0.08)" : "rgba(76,255,145,0.08)") + ";border:1px solid " + (slipPct > 0 ? "rgba(255,76,106,0.25)" : "rgba(76,255,145,0.25)") + "\">" +
-                      "<span style=\"font-size:11px\">" + (slipPct > 0 ? "⚠" : "✓") + "</span>" +
-                      "<span style=\"font-size:10px;color:" + d.muted + "\">Entry slippage: intended <strong style=\"color:" + d.text + "\">$" + intent.price.toFixed(2) + "</strong> · paid <strong style=\"color:" + slipColor + "\">$" + s.avg_price.toFixed(2) + "</strong> <strong style=\"color:" + slipColor + "\">(" + slipSign + slipPct.toFixed(1) + "%)</strong></span>" +
+                    return "<div style=\"display:flex;align-items:center;gap:6px;padding:5px 8px;margin-bottom:6px;border-radius:var(--tsa-r-2);background:" + (slipPct > 0 ? "var(--tsa-neg-bg)" : "var(--tsa-pos-bg)") + ";border:1px solid " + (slipPct > 0 ? "var(--tsa-neg-border)" : "var(--tsa-pos-border)") + "\">" +
+                      "<span style=\"font-size:var(--tsa-fs-micro)\">" + (slipPct > 0 ? "⚠" : "✓") + "</span>" +
+                      "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">Entry slippage: intended <strong style=\"color:" + d.text + "\">$" + intent.price.toFixed(2) + "</strong> · paid <strong style=\"color:" + slipColor + "\">$" + s.avg_price.toFixed(2) + "</strong> <strong style=\"color:" + slipColor + "\">(" + slipSign + slipPct.toFixed(1) + "%)</strong></span>" +
                       "</div>";
                   }
                 }
@@ -4813,8 +5053,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             } catch(e) {}
             return "";
           })() +
-          "<div style=\"font-size:10px;color:" + d.muted + ";margin-bottom:4px;font-weight:bold;text-transform:uppercase;letter-spacing:0.08em;" + ms + "\">Transactions</div>" +
-          "<div style=\"font-size:11px;color:" + d.muted + ";margin-bottom:6px;" + ms + "\">Avg: <strong style=\"color:" + d.text + "\">" + (s.avg_price > 0 ? "$" + s.avg_price.toFixed(2) : "N/A") + "</strong> · Live: <strong style=\"color:" + d.text + "\">$" + s.p_live.toFixed(2) + "</strong>" + (s.hoursHeld ? " · <span style=\"color:" + d.muted + "\">held " + s.hoursHeld + "h</span>" : "") + "</div>" +
+          "<div style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + ";margin-bottom:4px;font-weight:bold;text-transform:uppercase;letter-spacing:0.08em;" + ms + "\">Transactions</div>" +
+          "<div style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + ";margin-bottom:6px;" + ms + "\">Avg: <strong style=\"color:" + d.text + "\">" + (s.avg_price > 0 ? "$" + s.avg_price.toFixed(2) : "N/A") + "</strong> · Live: <strong style=\"color:" + d.text + "\">$" + s.p_live.toFixed(2) + "</strong>" + (s.hoursHeld ? " · <span style=\"color:" + d.muted + "\">held " + s.hoursHeld + "h</span>" : "") + "</div>" +
           txHtml + "</div></div>";
       };
 
@@ -4825,8 +5065,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var swingCollapsed = lsGet("tsa_swing_collapsed", "false") === "true";
           html += "<div style=\"padding:10px 14px 6px;background:" + d.bg + "\">" +
             "<div style=\"display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;cursor:pointer;\" id=\"tsa-swing-header\">" +
-            "<span style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;font-weight:bold;" + ms + "\">Swing trades (" + swingTrades.length + ")</span>" +
-            "<span style=\"font-size:14px;color:" + d.muted + ";\">" + (swingCollapsed ? "&#9658;" : "&#9660;") + "</span></div>" +
+            "<span style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;font-weight:bold;" + ms + "\">Swing trades (" + swingTrades.length + ")</span>" +
+            "<span style=\"font-size:var(--tsa-fs-body);color:" + d.muted + ";\">" + (swingCollapsed ? "&#9658;" : "&#9660;") + "</span></div>" +
             "<div id=\"tsa-swing-body\" style=\"display:" + (swingCollapsed ? "none" : "block") + "\">";
           swingTrades.forEach(function(s) { html += renderStockRow(s, "swing"); });
           html += "</div></div>";
@@ -4837,8 +5077,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           var benefitCollapsed = lsGet("tsa_benefit_collapsed", "false") === "true";
           html += "<div style=\"padding:10px 14px 6px;background:" + d.bg + "\">" +
             "<div style=\"display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;cursor:pointer;\" id=\"tsa-benefit-header\">" +
-            "<span style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;font-weight:bold;" + ms + "\">Benefit blocks (" + benefitBlocks.length + ")</span>" +
-            "<span style=\"font-size:14px;color:" + d.muted + ";\">" + (benefitCollapsed ? "&#9658;" : "&#9660;") + "</span></div>" +
+            "<span style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;font-weight:bold;" + ms + "\">Benefit blocks (" + benefitBlocks.length + ")</span>" +
+            "<span style=\"font-size:var(--tsa-fs-body);color:" + d.muted + ";\">" + (benefitCollapsed ? "&#9658;" : "&#9660;") + "</span></div>" +
             "<div id=\"tsa-benefit-body\" style=\"display:" + (benefitCollapsed ? "none" : "block") + "\">";
           benefitBlocks.forEach(function(s) { html += renderStockRow(s, "benefit"); });
           html += "</div></div>";
@@ -4857,8 +5097,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       });
       var histLabel = histSyms.length > 0 ? " · " + histSyms.length + " stocks · " + maxHistHours + "h hist" : "";
       html += "<div style=\"padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid " + d.divider + ";background:" + d.bg + "\">" +
-        "<span style=\"font-size:10px;color:" + d.muted + "\">Updated: " + new Date(lastLoadTs || Date.now()).toLocaleTimeString("en-GB") + autoRefreshLabel + "<span id='tsa-countdown'></span></span>" +
-        "<span style=\"font-size:10px;color:" + d.muted + "\">Storage: " + getTsaStorageSize() + histLabel + " \u00b7 " + historyStatus + "</span>" +
+        "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">Updated: " + new Date(lastLoadTs || Date.now()).toLocaleTimeString("en-GB") + autoRefreshLabel + "<span id='tsa-countdown'></span></span>" +
+        "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">Storage: " + getTsaStorageSize() + histLabel + " \u00b7 " + historyStatus + "</span>" +
         "</div>" +
         "<button id='tsa-scroll-top' title='Scroll to top'>↑</button>";
       // (scheduleAutoRefresh deliberately NOT called here: a cached re-render
@@ -4871,11 +5111,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (missingBatches === 4) {
         // Fully down: prices are the page's own, so there is no history to score with.
         // Be explicit that trading is unaffected — the whole point of not blanking out.
-        html = "<div style=\"padding:8px 14px;font-size:11px;font-weight:700;color:" + (isDark2 ? "#ff8a80" : "#a12020") + ";background:rgba(255,82,82," + (isDark2 ? "0.14" : "0.12") + ");border-bottom:1px solid rgba(255,82,82,0.5)\">" +
+        html = "<div style=\"padding:8px 14px;font-size:var(--tsa-fs-micro);font-weight:700;color:" + "var(--tsa-neg)" + ";background:var(--tsa-neg-bg);border-bottom:1px solid var(--tsa-neg-border)\">" +
           "\u26d4 tornsy is down \u2014 no signals or charts. Prices are read from this page, " +
           "so holdings, the ROI planner and buying/selling all still work.</div>" + html;
       } else if (missingBatches > 0) {
-        html = "<div style=\"padding:8px 14px;font-size:11px;font-weight:700;color:" + (isDark2 ? "#ffc107" : "#7a5c00") + ";background:rgba(255,193,7," + (isDark2 ? "0.12" : "0.18") + ");border-bottom:1px solid rgba(255,193,7,0.45)\">" +
+        html = "<div style=\"padding:8px 14px;font-size:var(--tsa-fs-micro);font-weight:700;color:" + "var(--tsa-warn)" + ";background:var(--tsa-warn-bg);border-bottom:1px solid var(--tsa-warn-border)\">" +
           "\u26a0 tornsy partial \u2014 " + missingBatches + "/4 interval batches missing, signals degraded</div>" + html;
       }
 
@@ -5032,12 +5272,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       }
       function markSwingRowSelling(row) {
         clearSwingRowHighlight();
-        row.style.background = "rgba(255,76,106,0.20)";
-        row.style.boxShadow = "inset 0 0 0 2px #ff4c6a";
+        row.style.background = "var(--tsa-neg-bg-hi)";
+        row.style.boxShadow = "inset 0 0 0 2px var(--tsa-neg)";
         var sellingBadge = document.createElement("span");
         sellingBadge.className = "tsa-swing-selling-badge";
         sellingBadge.textContent = "↻ SELLING…";
-        sellingBadge.style.cssText = "margin-left:8px;font-size:10px;font-weight:800;color:#ff4c6a;text-transform:uppercase;letter-spacing:0.06em";
+        sellingBadge.style.cssText = "margin-left:8px;font-size:var(--tsa-fs-micro);font-weight:800;color:var(--tsa-neg);text-transform:uppercase;letter-spacing:0.06em";
         row.appendChild(sellingBadge);
         activeSwingRow = row;
       }
@@ -5100,8 +5340,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (!content) return;
     var isDark = document.getElementById("tsa-overlay").classList.contains("tsa-dark");
     var d = isDark
-      ? { bg:"#0f0f1a", bg2:"#1a1a2e", border:"#2a2a4a", text:"#c8c8d8", muted:"#7a7a9a", blue:"#7a9fd4" }
-      : { bg:"#ffffff", bg2:"#f7f9fc", border:"#eee", text:"#222", muted:"#888", blue:"#4a6fa5" };
+      // theme-invariant: every value is a token that switches itself
+      ? { bg:"var(--tsa-bg)", bg2:"var(--tsa-bg-raised)", border:"var(--tsa-border)", text:"var(--tsa-fg)", muted:"var(--tsa-fg-faint)", blue:"var(--tsa-accent)" }
+      : { bg:"var(--tsa-bg)", bg2:"var(--tsa-bg-raised)", border:"var(--tsa-border)", text:"var(--tsa-fg)", muted:"var(--tsa-fg-faint)", blue:"var(--tsa-accent)" };
     var syms = Object.keys(ownedMap).sort(function(a, b) {
       var ia = (ownedMap[a].shares || 0) * (ownedMap[a].avg_price || 0);
       var ib = (ownedMap[b].shares || 0) * (ownedMap[b].avg_price || 0);
@@ -5115,23 +5356,23 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var sub = shares.toLocaleString("en-US") + " sh" +
         (avg > 0 ? " @ $" + Math.round(avg).toLocaleString("en-US") : "");
       var investedStr = invested > 0 ? "$" + Math.round(invested).toLocaleString("en-US") : "—";
-      return "<div style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:8px;margin-bottom:5px;background:" + d.bg2 + ";border:1px solid " + d.border + "\">" +
+      return "<div style=\"display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:var(--tsa-r-3);margin-bottom:5px;background:" + d.bg2 + ";border:1px solid " + d.border + "\">" +
         "<div style=\"display:flex;flex-direction:column;gap:2px\">" +
-          "<span style=\"font-size:13px;font-weight:bold;color:" + d.blue + "\">" + escHtml(sym) + "</span>" +
-          "<span style=\"font-size:10px;color:" + d.muted + "\">" + sub + "</span>" +
+          "<span style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + d.blue + "\">" + escHtml(sym) + "</span>" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">" + sub + "</span>" +
         "</div>" +
-        "<span style=\"font-size:12px;font-weight:bold;color:" + d.text + "\">" + investedStr + "</span>" +
+        "<span style=\"font-size:var(--tsa-fs-micro);font-weight:bold;color:" + d.text + "\">" + investedStr + "</span>" +
       "</div>";
     }).join("");
-    if (!rows) rows = "<div style=\"padding:20px;text-align:center;color:" + d.muted + ";font-size:11px\">No holdings yet</div>";
+    if (!rows) rows = "<div style=\"padding:20px;text-align:center;color:" + d.muted + ";font-size:var(--tsa-fs-micro)\">No holdings yet</div>";
     content.style.background = d.bg;
     content.innerHTML =
       "<div style=\"padding:10px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid " + d.border + ";background:" + d.bg + "\">" +
         "<span class=\"tsa-spinner\" style=\"color:" + d.blue + "\"></span>" +
-        "<span style=\"font-size:11px;color:" + d.muted + "\">Loading live prices…</span>" +
+        "<span style=\"font-size:var(--tsa-fs-micro);color:" + d.muted + "\">Loading live prices…</span>" +
       "</div>" +
       "<div style=\"padding:10px 14px\">" +
-        "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Your holdings</div>" +
+        "<div style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">Your holdings</div>" +
         rows +
       "</div>";
   }
@@ -5139,8 +5380,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function loadData() {
     cleanOldIntents();
     var content = document.getElementById("tsa-content");
-    var isDarkMode = document.getElementById("tsa-overlay").classList.contains("tsa-dark");
-    content.style.background = isDarkMode ? "#0f0f1a" : "#ffffff";
+    content.style.background = "var(--tsa-bg)";
 
     // Check for API key
     var key = getTornKey();
@@ -5328,7 +5568,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     }).catch(function(e) {
       content.innerHTML = "<div class=\"tsa-error\">Error: " + escHtml(e.message) + "</div>" +
-        "<div class=\"tsa-footer\"><span id=\"tsa-error-next\" style=\"font-size:10px\"><span id='tsa-countdown'></span></span><button class=\"tsa-refresh\" id=\"tsa-refresh-btn\">Retry</button></div>";
+        "<div class=\"tsa-footer\"><span id=\"tsa-error-next\" style=\"font-size:var(--tsa-fs-micro)\"><span id='tsa-countdown'></span></span><button class=\"tsa-refresh\" id=\"tsa-refresh-btn\">Retry</button></div>";
       var retryBtn = document.getElementById("tsa-refresh-btn");
       if (retryBtn) retryBtn.addEventListener("click", loadData);
       // A failed load must NOT kill the auto-refresh loop — re-arm it so a
@@ -5553,9 +5793,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var rec = lastBestRec;
     var cash = typeof qtGetMoneyFast === "function" ? qtGetMoneyFast() : 0;
     var canAfford = cash >= rec.cost;
-    var color = canAfford ? "#4cff91" : "#ff4c6a";
-    var border = canAfford ? "rgba(76,255,145,0.3)" : "rgba(255,76,106,0.3)";
-    var bg = canAfford ? "rgba(76,255,145,0.07)" : "rgba(255,76,106,0.06)";
+    var color = canAfford ? "var(--tsa-pos)" : "var(--tsa-neg)";
+    var border = canAfford ? "var(--tsa-pos-border)" : "var(--tsa-neg-border)";
+    var bg = canAfford ? "var(--tsa-pos-bg)" : "var(--tsa-neg-bg)";
     var recSym = rec.sym;
     var recTier = "T" + rec.tierInfo.nextIncrement;
     var recShares = rec.tierInfo.sharesNeeded;
@@ -5564,7 +5804,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var label = "💡 " + recSym + " " + recTier + " · " + recShares.toLocaleString("en-US") + " shares · " + fmRoi(recCost);
 
     recDiv.style.display = "block";
-    recDiv.innerHTML = "<button id='qt-rec-btn' style='width:100%;padding:6px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg + ";color:" + color + ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;text-align:left;'>" + label + "</button>";
+    recDiv.innerHTML = "<button id='qt-rec-btn' style='width:100%;padding:6px 10px;border-radius:var(--tsa-r-2);border:1px solid " + border + ";background:" + bg + ";color:" + color + ";font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);font-weight:700;cursor:pointer;text-align:left;'>" + label + "</button>";
 
     document.getElementById("qt-rec-btn").addEventListener("click", function() {
       var liveCash = qtGetMoneyFast();
@@ -6034,25 +6274,24 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // whichever way the bar points. Colour alone never decides what a click does —
     // the direction toggle above states it in words, and the line below spells out
     // the consequence — but the buttons still have to LOOK like what they will do.
-    var isDark = lsGet("tsa_dark", "false") === "true";
-    var buyBorder  = isDark ? "rgba(76,255,145,0.3)"  : "#1a8a45";
-    var buyBg      = isDark ? "rgba(76,255,145,0.08)" : "rgba(26,138,69,0.08)";
-    var buyColor   = isDark ? "#4cff91"               : "#1a8a45";
-    var sellBorder = isDark ? "rgba(255,76,106,0.3)"  : "#cc2222";
-    var sellBg     = isDark ? "rgba(255,76,106,0.08)" : "rgba(204,34,34,0.08)";
-    var sellColor  = isDark ? "#ff4c6a"               : "#cc2222";
-    btn.style.cssText = "position:relative;padding:6px 9px;border-radius:7px;border:1px solid " +
+    var buyBorder  = "var(--tsa-pos-border)";
+    var buyBg      = "var(--tsa-pos-bg)";
+    var buyColor   = "var(--tsa-pos)";
+    var sellBorder = "var(--tsa-neg-border)";
+    var sellBg     = "var(--tsa-neg-bg)";
+    var sellColor  = "var(--tsa-neg)";
+    btn.style.cssText = "position:relative;padding:6px 9px;border-radius:var(--tsa-r-2);border:1px solid " +
       (isBuy ? buyBorder : sellBorder) +
       ";background:" + (isBuy ? buyBg : sellBg) +
       ";color:" + (isBuy ? buyColor : sellColor) +
-      ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
+      ";font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
     btn.textContent = label;
 
     if (qtEditMode) {
       // Del button
       var del = document.createElement("span");
       del.textContent = "✕";
-      del.style.cssText = "position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;background:#ff4c6a;color:#fff;font-size:9px;line-height:16px;text-align:center;cursor:pointer;";
+      del.style.cssText = "position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:var(--tsa-r-circle);background:var(--tsa-neg);color:var(--tsa-on-badge);font-size:var(--tsa-fs-micro);line-height:16px;text-align:center;cursor:pointer;";
       del.onclick = function(e) {
         e.stopPropagation();
         qtAmounts.splice(idx, 1);
@@ -6110,11 +6349,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function qtRenderConsequence(btnInfo) {
     var el = document.getElementById("qt-consequence");
     if (!el) return;
-    var isDark = lsGet("tsa_dark", "false") === "true";
-    var dim = isDark ? "#8b93a8" : "#667088";
-    var live = isDark ? "#e0e0ff" : "#222222";
-    var accent = qtDir === "buy" ? (isDark ? "#4cff91" : "#1a8a45")
-                                 : (isDark ? "#ff4c6a" : "#cc2222");
+    var dim = "var(--tsa-fg-muted)";
+    var live = "var(--tsa-fg-strong)";
+    var accent = qtDir === "buy" ? "var(--tsa-pos)" : "var(--tsa-neg)";
     var quiet = function(msg) {
       el.textContent = msg;
       el.style.color = dim;
@@ -6217,16 +6454,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     allBtn.title = isBuy
       ? "Vault — buy max shares with all available cash"
       : "Withdraw all — sell every share of this stock (respects Benefit Lock)";
-    var isDarkNow = lsGet("tsa_dark", "false") === "true";
-    var bd = isBuy ? (isDarkNow ? "rgba(76,255,145,0.5)" : "#1a8a45")
-                   : (isDarkNow ? "rgba(255,76,106,0.5)" : "#cc2222");
-    var bg = isBuy ? (isDarkNow ? "rgba(76,255,145,0.15)" : "rgba(26,138,69,0.1)")
-                   : (isDarkNow ? "rgba(255,76,106,0.12)" : "rgba(204,34,34,0.08)");
-    var fg = isBuy ? (isDarkNow ? "#4cff91" : "#1a8a45")
-                   : (isDarkNow ? "#ff4c6a" : "#cc2222");
-    allBtn.style.cssText = "padding:6px 9px;border-radius:7px;border:1px solid " + bd +
+    var bd = isBuy ? "var(--tsa-pos-border)" : "var(--tsa-neg-border)";
+    var bg = isBuy ? "var(--tsa-pos-bg-hi)"  : "var(--tsa-neg-bg-hi)";
+    var fg = isBuy ? "var(--tsa-pos)"        : "var(--tsa-neg)";
+    allBtn.style.cssText = "padding:6px 9px;border-radius:var(--tsa-r-2);border:1px solid " + bd +
       ";background:" + bg + ";color:" + fg +
-      ";font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
+      ";font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
     allBtn.textContent = "ALL";
     allBtn.onclick = function() {
       var s = $("#qt-stock").val();
@@ -6244,7 +6477,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     if (qtEditMode) {
       var addBtn = document.createElement("button");
-      addBtn.style.cssText = "padding:6px 10px;border-radius:7px;border:1px dashed #2a2a4a;background:transparent;color:#4a6fa5;font-family:JetBrains Mono,monospace;font-size:14px;cursor:pointer;flex-shrink:0;";
+      addBtn.style.cssText = "padding:6px 10px;border-radius:var(--tsa-r-2);border:1px dashed var(--tsa-border);background:transparent;color:var(--tsa-accent);font-family:var(--tsa-mono);font-size:var(--tsa-fs-body);cursor:pointer;flex-shrink:0;";
       addBtn.textContent = "+";
       addBtn.onclick = function() {
         var val = parseQtMoney(prompt("Enter amount in $ (e.g. 25m or 25000000):"));
@@ -6278,22 +6511,22 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     qtPillCssInjected = true;
     var st = document.createElement("style");
     st.textContent =
-      ".qt-pill{display:inline-flex;align-items:center;gap:6px;border-radius:7px;border:1px solid;padding:5px 8px;" +
-        "font-family:Inter,'Segoe UI',sans-serif;font-size:12px;font-weight:600;line-height:1;cursor:pointer;" +
+      ".qt-pill{display:inline-flex;align-items:center;gap:6px;border-radius:var(--tsa-r-2);border:1px solid;padding:5px 8px;" +
+        "font-family:var(--tsa-sans);font-size:var(--tsa-fs-micro);font-weight:600;line-height:1;cursor:pointer;" +
         "user-select:none;transition:filter .12s,transform .05s;white-space:nowrap;}" +
       ".qt-pill:active{transform:scale(0.96);}" +
       ".qt-pills-light .qt-pill:hover{filter:brightness(0.95);}" +
       ".qt-pills-dark .qt-pill:hover{filter:brightness(1.12);}" +
       ".qt-pill img{width:18px;height:18px;display:block;margin:-2px 0;flex-shrink:0;}" +
-      ".qt-pill .qt-pill-badge{color:#fff;border-radius:4px;padding:2px 5px;font-size:10px;font-weight:800;" +
+      ".qt-pill .qt-pill-badge{color:var(--tsa-on-badge);border-radius:var(--tsa-r-1);padding:2px 5px;font-size:var(--tsa-fs-micro);font-weight:800;" +
         "text-transform:uppercase;letter-spacing:.03em;}" +
-      ".qt-pill-group-label{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;" +
-        "font-family:JetBrains Mono,monospace;margin:0 0 5px 2px;display:block;}" +
-      ".qt-pill .qt-pill-sub{font-size:11px;opacity:0.65;}" +
+      ".qt-pill-group-label{font-size:var(--tsa-fs-micro);font-weight:700;letter-spacing:.06em;text-transform:uppercase;" +
+        "font-family:var(--tsa-mono);margin:0 0 5px 2px;display:block;}" +
+      ".qt-pill .qt-pill-sub{font-size:var(--tsa-fs-micro);opacity:0.65;}" +
       // Sell pill + its mini "buy more" pill stay glued together as one unit when the row wraps.
       ".qt-pill-pair{display:inline-flex;gap:4px;align-items:stretch;}" +
       // Compact green buy-more pill: no logo/badge, just a bold ＋.
-      ".qt-pill-mini{padding:5px 9px;font-size:14px;font-weight:800;gap:0;}" +
+      ".qt-pill-mini{padding:5px 9px;font-size:var(--tsa-fs-body);font-weight:800;gap:0;}" +
       ".qt-pill-row{display:flex;flex-wrap:wrap;gap:6px;}";
     document.head.appendChild(st);
   }
@@ -6343,44 +6576,34 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     return (n < 0 ? "-" : "+") + qtFmtDollar(n);
   }
 
-  // Tailwind-derived green/red palette (matches torn-stock-pocket), theme-aware
+  // Money polarity, from the shared token set. isDark is kept in the signature so no
+  // call site changes; the tokens switch themselves on the root's tsa-dark class.
   function qtPillPalette(positive, isDark) {
     if (positive) {
-      return isDark
-        ? { border: "rgba(20,83,45,0.75)", bg: "rgba(5,46,22,0.75)", text: "#86efac", badge: "#16a34a" }
-        : { border: "#4ade80", bg: "#dcfce7", text: "#15803d", badge: "#22c55e" };
+      return { border: "var(--tsa-pos-border)", bg: "var(--tsa-pos-bg)", text: "var(--tsa-pos)", badge: "var(--tsa-pos)" };
     }
-    return isDark
-      ? { border: "rgba(127,29,29,0.75)", bg: "rgba(69,10,10,0.75)", text: "#fca5a5", badge: "#dc2626" }
-      : { border: "#f87171", bg: "#fee2e2", text: "#b91c1c", badge: "#ef4444" };
+    return { border: "var(--tsa-neg-border)", bg: "var(--tsa-neg-bg)", text: "var(--tsa-neg)", badge: "var(--tsa-neg)" };
   }
 
   // Blue palette for the ROI "bank" pill (distinct from green buy / red sell)
   function qtPillPaletteBank(isDark) {
-    return isDark
-      ? { border: "rgba(30,58,138,0.75)", bg: "rgba(23,37,84,0.75)", text: "#93c5fd", badge: "#2563eb" }
-      : { border: "#60a5fa", bg: "#dbeafe", text: "#1d4ed8", badge: "#3b82f6" };
+    return { border: "var(--tsa-bank-border)", bg: "var(--tsa-bank-bg)", text: "var(--tsa-bank)", badge: "var(--tsa-bank)" };
   }
 
   // Bridgebuilder pill palettes: teal when affordable now (distinct from
   // buy-green and bank-blue), amber while still saving up.
   function qtPillPaletteBridge(affordable, isDark) {
     if (affordable) {
-      return isDark
-        ? { border: "rgba(19,78,74,0.75)", bg: "rgba(4,47,46,0.75)", text: "#5eead4", badge: "#0d9488" }
-        : { border: "#2dd4bf", bg: "#ccfbf1", text: "#0f766e", badge: "#14b8a6" };
+      return { border: "var(--tsa-bridge-border)", bg: "var(--tsa-bridge-bg)", text: "var(--tsa-bridge)", badge: "var(--tsa-bridge)" };
     }
-    return isDark
-      ? { border: "rgba(120,53,15,0.75)", bg: "rgba(69,26,3,0.75)", text: "#fdba74", badge: "#ea580c" }
-      : { border: "#fb923c", bg: "#fff7ed", text: "#c2410c", badge: "#f97316" };
+    // still saving up: the one amber in the set, shared with the benefit-lock label
+    return { border: "var(--tsa-warn-border)", bg: "var(--tsa-warn-bg)", text: "var(--tsa-warn)", badge: "var(--tsa-warn)" };
   }
 
   // Purple palette for the Upgrade swap pill — visually distinct from buy-green,
   // sell-red, bank-blue and bridge-teal/amber so the swap action stands apart.
   function qtPillPaletteUpgrade(isDark) {
-    return isDark
-      ? { border: "rgba(88,28,135,0.75)", bg: "rgba(59,7,100,0.75)", text: "#d8b4fe", badge: "#9333ea" }
-      : { border: "#c084fc", bg: "#f3e8ff", text: "#7e22ce", badge: "#a855f7" };
+    return { border: "var(--tsa-swap-border)", bg: "var(--tsa-swap-bg)", text: "var(--tsa-swap)", badge: "var(--tsa-swap)" };
   }
 
   function makeQtPill(sym, positive, labelText, isDark, onClick, subText, palOverride) {
@@ -6483,12 +6706,14 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     if (!container) return;
     injectQtPillCss();
     var isDark = lsGet("tsa_dark", "false") === "true";
-    container.className = isDark ? "qt-pills-dark" : "qt-pills-light";
+    // tsa-dark is what switches the --tsa-* tokens on this root; the qt-pills-* class
+    // only drives the hover brightness rule.
+    container.className = isDark ? "qt-pills-dark tsa-dark" : "qt-pills-light";
     container.innerHTML = "";
 
     var hasBuy = lastBuySymbols && lastBuySymbols.length > 0;
     var hasSwing = lastSwingPills && lastSwingPills.length > 0;
-    var labelColor = isDark ? "#7a7a9a" : "#666666";
+    var labelColor = "var(--tsa-fg-faint)";
 
     // Shared plan (target + bridge chain), recomputed on EVERY pill render so
     // skip-list changes made in the planner take effect immediately — the
@@ -6582,7 +6807,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         // same explicit empty state instead of silently rendering nothing.
         var bpNone = document.createElement("span");
         bpNone.textContent = "🔗 no bridge options";
-        bpNone.style.cssText = "align-self:center;font-size:10px;color:" + labelColor + ";font-family:JetBrains Mono,monospace;white-space:nowrap;";
+        bpNone.style.cssText = "align-self:center;font-size:var(--tsa-fs-micro);color:" + labelColor + ";font-family:var(--tsa-mono);white-space:nowrap;";
         bankRow.appendChild(bpNone);
       }
 
@@ -6669,7 +6894,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         // paused. Cash already freed by completed sells stays in the wallet.
         var upPaused = document.createElement("span");
         upPaused.textContent = "⤴ paused — prices moved; ✕ to stop (cash kept)";
-        upPaused.style.cssText = "align-self:center;font-size:10px;color:" + labelColor + ";font-family:JetBrains Mono,monospace;white-space:nowrap;";
+        upPaused.style.cssText = "align-self:center;font-size:var(--tsa-fs-micro);color:" + labelColor + ";font-family:var(--tsa-mono);white-space:nowrap;";
         upRow.appendChild(upPaused);
       }
 
@@ -6742,7 +6967,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           // hint instead of a sell pill we'd refuse: never lure an unaffordable sale.
           var upNone = document.createElement("span");
           upNone.textContent = "⤴ not affordable at live price (" + nSells + " block→" + upSwap.buy.sym + ")";
-          upNone.style.cssText = "align-self:center;font-size:10px;color:" + labelColor + ";font-family:JetBrains Mono,monospace;white-space:nowrap;";
+          upNone.style.cssText = "align-self:center;font-size:var(--tsa-fs-micro);color:" + labelColor + ";font-family:var(--tsa-mono);white-space:nowrap;";
           upRow2.appendChild(upNone);
         }
         upWrap2.appendChild(upRow2);
@@ -6765,7 +6990,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var gearBtn = document.createElement("button");
       gearBtn.textContent = pillAmt > 0 ? "⚙ " + fmtQtAmt(pillAmt) : "⚙";
       gearBtn.title = "Set buy amount per Quick Buy pill (blank = all available cash)";
-      gearBtn.style.cssText = "padding:2px 8px;border-radius:7px;border:1px solid " + (isDark ? "rgba(122,159,212,0.4)" : "#c0d0ff") + ";background:" + (isDark ? "rgba(122,159,212,0.12)" : "#f0f4ff") + ";color:" + (isDark ? "#7a9fd4" : "#4a6fa5") + ";font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
+      gearBtn.style.cssText = "padding:2px 8px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-accent-border);background:var(--tsa-accent-bg);color:var(--tsa-accent);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
       gearBtn.onclick = function() {
         var cur = getQtBuyPillAmt();
         var input = prompt("Buy amount per Quick Buy pill (e.g. 25m — blank = all available cash):", cur > 0 ? fmtQtAmt(cur) : "");
@@ -6811,7 +7036,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var sellGear = document.createElement("button");
       sellGear.textContent = sellPillAmt > 0 ? "⚙ " + fmtQtAmt(sellPillAmt) : "⚙";
       sellGear.title = "Set sell amount per Swing pill (blank = sell the whole swing position)";
-      sellGear.style.cssText = "padding:2px 8px;border-radius:7px;border:1px solid " + (isDark ? "rgba(255,76,106,0.4)" : "#ffb3b3") + ";background:" + (isDark ? "rgba(255,76,106,0.12)" : "#fff0f0") + ";color:" + (isDark ? "#ff4c6a" : "#cc2222") + ";font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
+      sellGear.style.cssText = "padding:2px 8px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-neg-border);background:var(--tsa-neg-bg);color:var(--tsa-neg);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;";
       sellGear.onclick = function() {
         var cur = getQtSellPillAmt();
         var input = prompt("Sell amount per Swing pill (e.g. 25m — blank = sell the whole swing position):", cur > 0 ? fmtQtAmt(cur) : "");
@@ -6939,8 +7164,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       var btns = document.querySelectorAll(".qt-tf-btn");
       btns.forEach(function(b) {
         var active = b.getAttribute("data-tf") === tf;
-        b.style.background = active ? "#2a2a4a" : "none";
-        b.style.color = active ? "#e0e0ff" : "#7a7a9a";
+        b.style.background = active ? "var(--tsa-bg-raised)" : "none";
+        b.style.color = active ? "var(--tsa-fg-strong)" : "var(--tsa-fg-faint)";
       });
     })();
 
@@ -6982,7 +7207,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (!noDataEl) {
         noDataEl = document.createElement("div");
         noDataEl.id = "qt-chart-nodata";
-        noDataEl.style.cssText = "padding:18px;text-align:center;font-size:11px;color:#888";
+        noDataEl.style.cssText = "padding:18px;text-align:center;font-size:var(--tsa-fs-micro);color:var(--tsa-fg-faint)";
         container.appendChild(noDataEl);
       }
       noDataEl.style.display = "block";
@@ -7023,7 +7248,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     function yOf(price) { return padT + (1 - (price - minP) / range) * chartH; }
 
     // Grid — 4 horizontal lines
-    ctx.strokeStyle = "rgba(60,60,100,0.25)";
+    ctx.strokeStyle = tsaToken("grid", canvas);
     ctx.lineWidth = 0.5;
     for (var g = 0; g <= 3; g++) {
       var gy = padT + chartH * g / 3;
@@ -7046,8 +7271,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     // Trend color
     var isUp = prices[prices.length - 1] >= prices[0];
-    var lineColor = isUp ? "#4cff91" : "#ff4c6a";
-    var fillColor = isUp ? "rgba(76,255,145,0.07)" : "rgba(255,76,106,0.06)";
+    var lineColor = isUp ? tsaToken("pos", canvas) : tsaToken("neg", canvas);
+    var fillColor = isUp ? tsaToken("pos-bg", canvas) : tsaToken("neg-bg", canvas);
 
     // Gap threshold: segments more than 4 h apart are not connected
     var GAP = 4 * 3600000;
@@ -7113,7 +7338,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         ctx.lineTo(x - 4, y + 3);
         ctx.lineTo(x + 4, y + 3);
         ctx.closePath();
-        ctx.fillStyle = "#4cff91";
+        ctx.fillStyle = tsaToken("pos", canvas);
         ctx.globalAlpha = 0.9;
         ctx.fill();
         ctx.globalAlpha = 1;
@@ -7133,7 +7358,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       ctx.lineTo(x - 4, y - 3);
       ctx.lineTo(x + 4, y - 3);
       ctx.closePath();
-      ctx.fillStyle = "#ff4c6a";
+      ctx.fillStyle = tsaToken("neg", canvas);
       ctx.globalAlpha = 0.9;
       ctx.fill();
       ctx.globalAlpha = 1;
@@ -7142,8 +7367,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     // Min/Max price labels top-right (use actual data extremes, not padded)
     var dataMax = Math.max.apply(null, prices);
     var dataMin = Math.min.apply(null, prices);
-    ctx.fillStyle = "#7a7a9a";
-    ctx.font = "8px JetBrains Mono, monospace";
+    ctx.fillStyle = tsaToken("fg-faint", canvas);
+    ctx.font = tsaToken("fs-micro", canvas) + " " + tsaToken("mono", canvas);
     ctx.textAlign = "right";
     ctx.fillText("$" + dataMax.toFixed(2), w - padR - 1, padT - 3);
     ctx.fillText("$" + dataMin.toFixed(2), w - padR - 1, h - padB + 8);
@@ -7166,7 +7391,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var pt = points[idx];
         var xPct = ((pt.ts - tMin) / tRange * 100).toFixed(1);
         var isLast = idx === points.length - 1;
-        return '<span style="position:absolute;left:' + xPct + '%;transform:translateX(-50%);' + (isLast ? 'color:#4cff91' : '') + '">' +
+        return '<span style="position:absolute;left:' + xPct + '%;transform:translateX(-50%);' + (isLast ? 'color:var(--tsa-pos)' : '') + '">' +
           (isLast ? 'Now' : fmtTs(pt.ts)) + '</span>';
       }).join('');
     }
@@ -7177,7 +7402,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       if (!tip) {
         tip = document.createElement("div");
         tip.id = "qt-chart-tip";
-        tip.style.cssText = "position:absolute;pointer-events:none;display:none;background:rgba(10,10,20,0.92);border:1px solid #3a3a6a;border-radius:6px;padding:5px 8px;font-family:JetBrains Mono,monospace;font-size:10px;color:#e0e0ff;z-index:9999;white-space:nowrap;";
+        tip.style.cssText = "position:absolute;pointer-events:none;display:none;background:var(--tsa-scrim);border:1px solid var(--tsa-border-strong);border-radius:var(--tsa-r-2);padding:5px 8px;font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);color:var(--tsa-fg-strong);z-index:9999;white-space:nowrap;";
         container.style.position = "relative";
         container.appendChild(tip);
       }
@@ -7211,6 +7436,9 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function applyQtTheme(isDark) {
     var bar = document.getElementById("qt-bar");
     if (!bar) return;
+    // #qt-bar is one of the token roots, so this class is what switches the whole
+    // bar's --tsa-* values. Everything below then only has to name a token.
+    bar.classList.toggle("tsa-dark", !!isDark);
     // The direction toggle is static markup like the search box and the chart, so it
     // needs re-colouring here — renderQtRows only touches opacity and aria. Without
     // this, light mode shows neon-on-white. Both elements live inside #qt-bar, so
@@ -7220,24 +7448,24 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var dBuy = document.getElementById("qt-dir-buy");
     var dSell = document.getElementById("qt-dir-sell");
     if (dBuy) {
-      dBuy.style.borderColor = isDark ? "rgba(76,255,145,0.5)" : "#1a8a45";
-      dBuy.style.background  = isDark ? "rgba(76,255,145,0.15)" : "rgba(26,138,69,0.1)";
-      dBuy.style.color       = isDark ? "#4cff91" : "#1a8a45";
+      dBuy.style.borderColor = "var(--tsa-pos-border)";
+      dBuy.style.background  = "var(--tsa-pos-bg-hi)";
+      dBuy.style.color       = "var(--tsa-pos)";
     }
     if (dSell) {
-      dSell.style.borderColor = isDark ? "rgba(255,76,106,0.5)" : "#cc2222";
-      dSell.style.background  = isDark ? "rgba(255,76,106,0.12)" : "rgba(204,34,34,0.08)";
-      dSell.style.color       = isDark ? "#ff4c6a" : "#cc2222";
+      dSell.style.borderColor = "var(--tsa-neg-border)";
+      dSell.style.background  = "var(--tsa-neg-bg-hi)";
+      dSell.style.color       = "var(--tsa-neg)";
     }
-    var bg       = isDark ? "#0c0c14"        : "#f0f4ff";
-    var border   = isDark ? "#3a3a6a"        : "#c0d0ff";
-    var selBg    = isDark ? "#13131f"        : "#ffffff";
-    var selColor = isDark ? "#e0e0ff"        : "#222222";
-    var selBord  = isDark ? "#2a2a4a"        : "#c0d0ee";
-    var chartBg  = isDark ? "#0a0a12"        : "#f7f9fc";
-    var chartBrd = isDark ? "#2a2a4a"        : "#dde3f0";
-    var labelCol = isDark ? "#7a7a9a"        : "#666666";
-    var liveCol  = isDark ? "#e0e0ff"        : "#222222";
+    var bg       = "var(--tsa-bg-bar)";
+    var border   = "var(--tsa-border-strong)";
+    var selBg    = "var(--tsa-bg-input)";
+    var selColor = "var(--tsa-fg-strong)";
+    var selBord  = "var(--tsa-border)";
+    var chartBg  = "var(--tsa-bg-chart)";
+    var chartBrd = "var(--tsa-border)";
+    var labelCol = "var(--tsa-fg-faint)";
+    var liveCol  = "var(--tsa-fg-strong)";
 
     bar.style.cssText = bar.style.cssText
       .replace(/background:[^;]+/, "background:" + bg)
@@ -7269,16 +7497,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     var lockLabel = document.getElementById("qt-lock-label");
     var lockText  = document.getElementById("qt-lock-text");
     if (lockLabel) {
-      lockLabel.style.border      = isDark ? "1px solid rgba(255,193,7,0.35)" : "1px solid #c8930a";
-      lockLabel.style.background  = isDark ? "rgba(255,193,7,0.08)"           : "rgba(180,120,0,0.08)";
+      lockLabel.style.border      = "1px solid var(--tsa-warn-border)";
+      lockLabel.style.background  = "var(--tsa-warn-bg)";
     }
     if (lockText) {
-      lockText.style.color = isDark ? "#ffc107" : "#8a5c00";
+      lockText.style.color = "var(--tsa-warn)";
     }
     var minBtn = document.getElementById("qt-min-btn");
     if (minBtn) {
-      minBtn.style.color = isDark ? "#6a6a9a" : "#555577";
-      minBtn.style.borderColor = isDark ? "#2a2a4a" : "#c0d0ee";
+      minBtn.style.color = "var(--tsa-fg-faint)";
+      minBtn.style.borderColor = "var(--tsa-border)";
     }
     // Re-render buttons with new theme colors
     renderQtRows();
@@ -7288,31 +7516,31 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function createQuickTradeBar() {
     var bar = document.createElement("div");
     bar.id = "qt-bar";
-    bar.style.cssText = "background:#0c0c14;border-bottom:2px solid #3a3a6a;padding:8px 12px;box-shadow:0 4px 16px rgba(0,0,0,0.5);font-family:JetBrains Mono,monospace;position:sticky;top:0;z-index:9999;";
+    bar.style.cssText = "background:var(--tsa-bg-bar);border-bottom:2px solid var(--tsa-border-strong);padding:8px 12px;box-shadow:0 4px 16px var(--tsa-shadow);font-family:var(--tsa-mono);position:sticky;top:0;z-index:9999;";
     if (!getShowQtBar()) bar.style.display = "none";
     bar.innerHTML =
       // Row 1: Minimize button + Stock searchable combobox + edit + lock
       "<div id='qt-row1' style='display:flex;flex-wrap:wrap;gap:7px;margin-bottom:6px;align-items:center'>" +
-        "<button id='qt-min-btn' title='Minimize Quick Trade bar' style='padding:4px 7px;border-radius:7px;border:1px solid #2a2a4a;background:transparent;color:#6a6a9a;font-family:JetBrains Mono,monospace;font-size:10px;cursor:pointer;flex-shrink:0;'>&#9660;</button>" +
+        "<button id='qt-min-btn' title='Minimize Quick Trade bar' style='padding:4px 7px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-border);background:transparent;color:var(--tsa-fg-faint);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);cursor:pointer;flex-shrink:0;'>&#9660;</button>" +
         // min-width:0 so the search field can shrink below its intrinsic input width;
         // without it a flex item refuses to go under its content size and the row
         // overflows on a narrow phone instead of fitting on one line.
         "<div id='qt-stock-wrap' style='position:relative;flex:1;min-width:0'>" +
-          "<input id='qt-stock-search' type='text' placeholder='Search stock…' autocomplete='off' style='width:100%;box-sizing:border-box;background:#13131f;border:1px solid #2a2a4a;border-radius:7px;color:#e0e0ff;font-family:JetBrains Mono,monospace;font-size:12px;font-weight:700;padding:7px 26px 7px 10px;outline:none;'>" +
+          "<input id='qt-stock-search' type='text' placeholder='Search stock…' autocomplete='off' style='width:100%;box-sizing:border-box;background:var(--tsa-bg-input);border:1px solid var(--tsa-border);border-radius:var(--tsa-r-2);color:var(--tsa-fg-strong);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);font-weight:700;padding:7px 26px 7px 10px;outline:none;'>" +
           "<input type='hidden' id='qt-stock' value=''>" +
-          "<span style='position:absolute;right:9px;top:50%;transform:translateY(-50%);color:#6a6a9a;font-size:9px;pointer-events:none'>▼</span>" +
-          "<div id='qt-stock-list' style='display:none;position:absolute;top:calc(100% + 3px);left:0;right:0;background:#13131f;border:1px solid #2a2a4a;border-radius:7px;z-index:99999;max-height:200px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,0.5);'></div>" +
+          "<span style='position:absolute;right:9px;top:50%;transform:translateY(-50%);color:var(--tsa-fg-faint);font-size:var(--tsa-fs-micro);pointer-events:none'>▼</span>" +
+          "<div id='qt-stock-list' style='display:none;position:absolute;top:calc(100% + 3px);left:0;right:0;background:var(--tsa-bg-input);border:1px solid var(--tsa-border);border-radius:var(--tsa-r-2);z-index:99999;max-height:200px;overflow-y:auto;box-shadow:0 4px 16px var(--tsa-shadow);'></div>" +
         "</div>" +
-        "<button id='qt-edit' title='Edit trade amounts' style='padding:6px 8px;border-radius:7px;border:1px solid #2a2a4a;background:transparent;color:#6a6a9a;font-family:JetBrains Mono,monospace;font-size:10px;cursor:pointer;flex-shrink:0;'>✎</button>" +
-        "<label id='qt-lock-label' title='When ON, sells are capped to swing shares so benefit-tier blocks are protected' style='display:flex;align-items:center;gap:6px;cursor:pointer;flex-shrink:0;padding:8px 10px;border-radius:7px;border:1px solid rgba(255,193,7,0.35);background:rgba(255,193,7,0.08);min-height:32px;'>" +
-          "<input type='checkbox' id='qt-lock-benefit' checked style='accent-color:#ffc107;width:18px;height:18px;cursor:pointer;flex-shrink:0;'>" +
-          "<span id='qt-lock-text' style='font-size:10px;font-weight:700;color:#ffc107;font-family:JetBrains Mono,monospace;letter-spacing:0.04em;white-space:nowrap;'>🔒 Benefit Lock</span>" +
+        "<button id='qt-edit' title='Edit trade amounts' style='padding:6px 8px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-border);background:transparent;color:var(--tsa-fg-faint);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);cursor:pointer;flex-shrink:0;'>✎</button>" +
+        "<label id='qt-lock-label' title='When ON, sells are capped to swing shares so benefit-tier blocks are protected' style='display:flex;align-items:center;gap:6px;cursor:pointer;flex-shrink:0;padding:8px 10px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-warn-border);background:var(--tsa-warn-bg);min-height:32px;'>" +
+          "<input type='checkbox' id='qt-lock-benefit' checked style='accent-color:var(--tsa-warn);width:18px;height:18px;cursor:pointer;flex-shrink:0;'>" +
+          "<span id='qt-lock-text' style='font-size:var(--tsa-fs-micro);font-weight:700;color:var(--tsa-warn);font-family:var(--tsa-mono);letter-spacing:0.04em;white-space:nowrap;'>🔒 Benefit Lock</span>" +
         "</label>" +
       "</div>" +
       // Collapsible body: benefit info + direction toggle + amount row + rec + chart
       "<div id='qt-body'>" +
         "<div id='qt-benefit-info' style='display:none;margin-bottom:4px;padding:0 2px;'>" +
-          "<span id='qt-swing-available' style='font-size:10px;color:#ffc107;font-family:JetBrains Mono,monospace;font-weight:600;'></span>" +
+          "<span id='qt-swing-available' style='font-size:var(--tsa-fs-micro);color:var(--tsa-warn);font-family:var(--tsa-mono);font-weight:600;'></span>" +
         "</div>" +
         // Row 2: direction, then one row of amounts.
         //
@@ -7322,8 +7550,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         // Costs one extra click only when you actually switch sides.
         "<div style='display:flex;gap:5px;align-items:flex-start'>" +
           "<div role='group' aria-label='Trade direction' style='display:flex;gap:3px;flex-shrink:0;margin-right:4px;'>" +
-            "<button id='qt-dir-buy' aria-pressed='true' title='Buy' style='padding:6px 9px;border-radius:7px;border:1px solid rgba(76,255,145,0.5);background:rgba(76,255,145,0.15);color:#4cff91;font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;cursor:pointer;letter-spacing:0.04em;'>BUY</button>" +
-            "<button id='qt-dir-sell' aria-pressed='false' title='Sell' style='padding:6px 9px;border-radius:7px;border:1px solid rgba(255,76,106,0.5);background:rgba(255,76,106,0.12);color:#ff4c6a;font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;cursor:pointer;letter-spacing:0.04em;'>SELL</button>" +
+            "<button id='qt-dir-buy' aria-pressed='true' title='Buy' style='padding:6px 9px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-pos-border);background:var(--tsa-pos-bg-hi);color:var(--tsa-pos);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);font-weight:700;cursor:pointer;letter-spacing:0.04em;'>BUY</button>" +
+            "<button id='qt-dir-sell' aria-pressed='false' title='Sell' style='padding:6px 9px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-neg-border);background:var(--tsa-neg-bg-hi);color:var(--tsa-neg);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);font-weight:700;cursor:pointer;letter-spacing:0.04em;'>SELL</button>" +
           "</div>" +
           // Wraps rather than scrolls: on a phone the row is wider than the screen,
           // and a horizontal swipe inside a vertically-scrolling page hid ALL and the
@@ -7332,22 +7560,22 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
           "<div id='qt-amount-row' style='display:flex;flex-wrap:wrap;gap:5px;flex:1;'></div>" +
         "</div>" +
         // The consequence line: what the next click does, in shares.
-        "<div id='qt-consequence' role='status' aria-live='polite' style='margin-top:5px;padding-left:8px;border-left:2px solid transparent;font-size:10px;color:#8b93a8;font-family:JetBrains Mono,monospace;min-height:15px;line-height:15px;transition:color .12s,border-color .12s;'>Select a stock to see what a trade would do.</div>" +
+        "<div id='qt-consequence' role='status' aria-live='polite' style='margin-top:5px;padding-left:8px;border-left:2px solid transparent;font-size:var(--tsa-fs-micro);color:var(--tsa-fg-muted);font-family:var(--tsa-mono);min-height:15px;line-height:15px;transition:color .12s,border-color .12s;'>Select a stock to see what a trade would do.</div>" +
         // ROI recommendation
         "<div id='qt-rec' style='display:none;margin-top:6px;'></div>" +
         // Chart
-        "<div id='qt-chart-container' style='display:none;margin-top:8px;background:#0a0a12;border-radius:8px;border:1px solid #2a2a4a;padding:8px 10px 6px;'>" +
+        "<div id='qt-chart-container' style='display:none;margin-top:8px;background:var(--tsa-bg-chart);border-radius:var(--tsa-r-3);border:1px solid var(--tsa-border);padding:8px 10px 6px;'>" +
           "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;'>" +
-            "<span id='qt-chart-title' style='font-size:9px;font-weight:700;color:#7a7a9a;font-family:JetBrains Mono,monospace;letter-spacing:0.08em;text-transform:uppercase;'></span>" +
-            "<span id='qt-chart-live' style='font-size:10px;font-weight:700;font-family:JetBrains Mono,monospace;color:#e0e0ff;'></span>" +
+            "<span id='qt-chart-title' style='font-size:var(--tsa-fs-micro);font-weight:700;color:var(--tsa-fg-faint);font-family:var(--tsa-mono);letter-spacing:0.08em;text-transform:uppercase;'></span>" +
+            "<span id='qt-chart-live' style='font-size:var(--tsa-fs-micro);font-weight:700;font-family:var(--tsa-mono);color:var(--tsa-fg-strong);'></span>" +
           "</div>" +
           "<canvas id='qt-chart-canvas' height='110' style='width:100%;height:110px;display:block;'></canvas>" +
-          "<div id='qt-chart-labels' style='position:relative;height:14px;font-size:8px;color:#6a6a9a;font-family:JetBrains Mono,monospace;margin-top:2px;'></div>" +
+          "<div id='qt-chart-labels' style='position:relative;height:14px;font-size:var(--tsa-fs-micro);color:var(--tsa-fg-faint);font-family:var(--tsa-mono);margin-top:2px;'></div>" +
           "<div id='qt-tf-row' style='display:flex;gap:3px;margin-top:5px;'>" +
-            "<button class='qt-tf-btn' data-tf='1d' style='flex:1;min-height:32px;padding:7px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:10px;font-family:JetBrains Mono,monospace;cursor:pointer;'>1d</button>" +
-            "<button class='qt-tf-btn' data-tf='3d' style='flex:1;min-height:32px;padding:7px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:10px;font-family:JetBrains Mono,monospace;cursor:pointer;'>3d</button>" +
-            "<button class='qt-tf-btn' data-tf='7d' style='flex:1;min-height:32px;padding:7px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:10px;font-family:JetBrains Mono,monospace;cursor:pointer;'>7d</button>" +
-            "<button class='qt-tf-btn' data-tf='all' style='flex:1;min-height:32px;padding:7px 0;border-radius:4px;border:1px solid #2a2a4a;background:none;color:#7a7a9a;font-size:10px;font-family:JetBrains Mono,monospace;cursor:pointer;'>All</button>" +
+            "<button class='qt-tf-btn' data-tf='1d' style='flex:1;min-height:32px;padding:7px 0;border-radius:var(--tsa-r-1);border:1px solid var(--tsa-border);background:none;color:var(--tsa-fg-faint);font-size:var(--tsa-fs-micro);font-family:var(--tsa-mono);cursor:pointer;'>1d</button>" +
+            "<button class='qt-tf-btn' data-tf='3d' style='flex:1;min-height:32px;padding:7px 0;border-radius:var(--tsa-r-1);border:1px solid var(--tsa-border);background:none;color:var(--tsa-fg-faint);font-size:var(--tsa-fs-micro);font-family:var(--tsa-mono);cursor:pointer;'>3d</button>" +
+            "<button class='qt-tf-btn' data-tf='7d' style='flex:1;min-height:32px;padding:7px 0;border-radius:var(--tsa-r-1);border:1px solid var(--tsa-border);background:none;color:var(--tsa-fg-faint);font-size:var(--tsa-fs-micro);font-family:var(--tsa-mono);cursor:pointer;'>7d</button>" +
+            "<button class='qt-tf-btn' data-tf='all' style='flex:1;min-height:32px;padding:7px 0;border-radius:var(--tsa-r-1);border:1px solid var(--tsa-border);background:none;color:var(--tsa-fg-faint);font-size:var(--tsa-fs-micro);font-family:var(--tsa-mono);cursor:pointer;'>All</button>" +
           "</div>" +
         "</div>" +
       "</div>";
@@ -7396,13 +7624,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       function buildList(filter) {
         var f = (filter || "").toUpperCase().trim();
         var items = f ? QT_STOCKS.filter(function(s){ return s.indexOf(f) >= 0; }) : QT_STOCKS;
-        var isDarkList = lsGet("tsa_dark", "false") === "true";
         listEl.innerHTML = "";
         items.forEach(function(sym) {
           var item = document.createElement("div");
           item.className = "qt-stock-list-item";
           item.textContent = sym;
-          item.style.color = isDarkList ? "#e0e0ff" : "#222222";
+          item.style.color = "var(--tsa-fg-strong)";
           item.onmousedown = function(e) {
             e.preventDefault(); // prevent blur before click fires
             hiddenEl.value = sym;
@@ -7454,7 +7681,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     $("#qt-edit").on("click", function() {
       qtEditMode = !qtEditMode;
-      $(this).css({color: qtEditMode ? "#4a6fa5" : "#6a6a9a", borderColor: qtEditMode ? "#4a6fa5" : "#2a2a4a"});
+      $(this).css({color: qtEditMode ? "var(--tsa-accent)" : "var(--tsa-fg-faint)", borderColor: qtEditMode ? "var(--tsa-accent)" : "var(--tsa-border)"});
       $(this).text(qtEditMode ? "✓" : "✎");
       renderQtRows();
     });
@@ -7491,14 +7718,13 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       "@keyframes tsaToastIn{from{opacity:0;transform:translateX(-20px)}to{opacity:1;transform:translateX(0)}}",
       "@keyframes tsaSlideIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}",
       "#tsa-overlay.tsa-visible{animation:tsaSlideIn 0.18s ease forwards}",
-      ".tsa-pin-btn{background:none;border:none;cursor:pointer;font-size:12px;padding:0 2px;opacity:0.35;transition:opacity 0.15s;line-height:1;vertical-align:middle}",
+      ".tsa-pin-btn{background:none;border:none;cursor:pointer;font-size:var(--tsa-fs-micro);padding:0 2px;opacity:0.35;transition:opacity 0.15s;line-height:1;vertical-align:middle}",
       ".tsa-pin-btn.pinned{opacity:1}",
       ".tsa-pin-btn:hover{opacity:1}",
-      "#tsa-scroll-top{position:sticky;bottom:8px;float:right;margin-right:8px;z-index:10;background:#4a6fa5;color:#fff;border:none;border-radius:50%;width:26px;height:26px;font-size:13px;cursor:pointer;display:none;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,0.35);line-height:1}",
-      "#tsa-scroll-top:hover{background:#3a5f95}",
-      "#tsa-overlay.tsa-dark #tsa-scroll-top{background:#2a2a5a;color:#a0a0ff}",
-      ".qt-stock-list-item{padding:7px 10px;cursor:pointer;font-size:12px;font-weight:700;font-family:JetBrains Mono,monospace}",
-      ".qt-stock-list-item:hover{background:rgba(122,159,212,0.15)}"
+      "#tsa-scroll-top{position:sticky;bottom:8px;float:right;margin-right:8px;z-index:10;background:var(--tsa-accent);color:var(--tsa-on-accent);border:none;border-radius:var(--tsa-r-circle);width:26px;height:26px;font-size:var(--tsa-fs-body);cursor:pointer;display:none;align-items:center;justify-content:center;box-shadow:0 2px 8px var(--tsa-shadow);line-height:1}",
+      "#tsa-scroll-top:hover{background:var(--tsa-accent-hover)}",
+      ".qt-stock-list-item{padding:7px 10px;cursor:pointer;font-size:var(--tsa-fs-micro);font-weight:700;font-family:var(--tsa-mono)}",
+      ".qt-stock-list-item:hover{background:var(--tsa-accent-bg)}"
     ].join("\n");
     document.head.appendChild(extraStyle);
 
@@ -7544,21 +7770,21 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
     document.getElementById("tsa-settings-btn").addEventListener("click", function() {
       var content = document.getElementById("tsa-content");
       var isDarkNow = overlay.classList.contains("tsa-dark");
-      var bg2 = isDarkNow ? "#1a1a2e" : "#f7f9fc";
-      var border = isDarkNow ? "#2a2a4a" : "#eee";
-      var text = isDarkNow ? "#c8c8d8" : "#222";
-      var muted = isDarkNow ? "#7a7a9a" : "#666";
+      var bg2 = "var(--tsa-bg-raised)";
+      var border = "var(--tsa-border)";
+      var text = "var(--tsa-fg)";
+      var muted = "var(--tsa-fg-faint)";
 
-      var inputStyle = "width:100%;padding:7px 10px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:13px;";
-      var labelTitle = "font-size:11px;color:" + muted + ";margin-bottom:4px";
-      var hint       = "font-size:10px;color:" + muted + ";margin-top:4px;line-height:1.4";
+      var inputStyle = "width:100%;padding:7px 10px;border-radius:var(--tsa-r-2);border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:var(--tsa-fs-body);";
+      var labelTitle = "font-size:var(--tsa-fs-micro);color:" + muted + ";margin-bottom:4px";
+      var hint       = "font-size:var(--tsa-fs-micro);color:" + muted + ";margin-top:4px;line-height:1.4";
       var section    = "border-top:1px solid " + border + ";margin-bottom:12px;padding-top:12px";
-      var sectionH   = "font-size:10px;letter-spacing:0.1em;color:" + muted + ";text-transform:uppercase;font-weight:bold;margin-bottom:10px";
+      var sectionH   = "font-size:var(--tsa-fs-micro);letter-spacing:0.1em;color:" + muted + ";text-transform:uppercase;font-weight:bold;margin-bottom:10px";
       var checkLabel = "display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px";
 
       content.innerHTML =
         "<div style=\"padding:14px\">" +
-        "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + muted + ";text-transform:uppercase;font-weight:bold;margin-bottom:14px\">Settings</div>" +
+        "<div style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + muted + ";text-transform:uppercase;font-weight:bold;margin-bottom:14px\">Settings</div>" +
 
         // ── Trades & alerts ─────────────────────
         "<div style=\"" + sectionH + "\">Trades & alerts</div>" +
@@ -7600,27 +7826,27 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         "</div>" +
         "<label style=\"" + checkLabel + "\">" +
           "<input type=\"checkbox\" id=\"tsa-setting-show-watch\"" + (getShowWatch() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
-          "<span style=\"font-size:12px;color:" + text + "\">Show Watch section</span>" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Show Watch section</span>" +
         "</label>" +
         "<label style=\"" + checkLabel + "\">" +
           "<input type=\"checkbox\" id=\"tsa-setting-show-qt-chart\"" + (getShowQtChart() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
-          "<span style=\"font-size:12px;color:" + text + "\">Show Quick Trade chart</span>" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Show Quick Trade chart</span>" +
         "</label>" +
         "<label style=\"" + checkLabel + "\">" +
           "<input type=\"checkbox\" id=\"tsa-setting-show-qt-bar\"" + (getShowQtBar() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
-          "<span style=\"font-size:12px;color:" + text + "\">Show Quick Trade bar</span>" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Show Quick Trade bar</span>" +
         "</label>" +
         "<label style=\"" + checkLabel + "\">" +
           "<input type=\"checkbox\" id=\"tsa-setting-pills-always\"" + (getPillsAlways() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
-          "<span style=\"font-size:12px;color:" + text + "\">Always show Quick pills (even when bar is hidden)</span>" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Always show Quick pills (even when bar is hidden)</span>" +
         "</label>" +
         "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">Min score for Top 5 (0–160)</div>" +
           "<input id=\"tsa-setting-top5-min\" type=\"number\" step=\"1\" min=\"0\" max=\"160\" value=\"" + getTop5MinScore() + "\" style=\"" + inputStyle + "\">" +
         "</div>" +
         "<label style=\"" + checkLabel + "\">" +
-          "<input type=\"checkbox\" id=\"tsa-setting-req-investors\"" + (getRequirePositiveInvestors() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer;accent-color:#4a6fa5\">" +
-          "<span style=\"font-size:12px;color:" + text + "\">Require positive investor-delta in Top 5 Buy</span>" +
+          "<input type=\"checkbox\" id=\"tsa-setting-req-investors\"" + (getRequirePositiveInvestors() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer;accent-color:var(--tsa-accent)\">" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Require positive investor-delta in Top 5 Buy</span>" +
         "</label>" +
         "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">Overlay position</div>" +
@@ -7633,7 +7859,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
             "<option value=\"top-left\""     + (getOverlayPosition() === "top-left"     ? " selected" : "") + ">Top left</option>" +
             (getOverlayPosition() === "custom" ? "<option value=\"custom\" selected>Custom (dragged)</option>" : "") +
           "</select>" +
-          "<div style=\"font-size:10px;color:" + muted + ";margin-top:4px\">Tip: drag the Stocks button to place it anywhere.</div>" +
+          "<div style=\"font-size:var(--tsa-fs-micro);color:" + muted + ";margin-top:4px\">Tip: drag the Stocks button to place it anywhere.</div>" +
         "</div>" +
         "</div>" +
 
@@ -7642,16 +7868,16 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         "<div style=\"" + sectionH + "\">Realized profits</div>" +
         "<label style=\"" + checkLabel + "\">" +
           "<input type=\"checkbox\" id=\"tsa-setting-swing-only\"" + (getProfitSwingOnly() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
-          "<span style=\"font-size:12px;color:" + text + "\">Swing trade profit only</span>" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Swing trade profit only</span>" +
         "</label>" +
         "<label style=\"" + checkLabel + "\">" +
           "<input type=\"checkbox\" id=\"tsa-setting-show-realized\"" + (getShowRealized() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
-          "<span style=\"font-size:12px;color:" + text + "\">Show realized profit</span>" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Show realized profit</span>" +
         "</label>" +
         "<div id=\"tsa-realized-options\" style=\"display:" + (getShowRealized() ? "block" : "none") + ";padding-left:23px\">" +
           "<div style=\"" + labelTitle + "\">Period (days, 1–90)</div>" +
           "<input id=\"tsa-setting-realized-days\" type=\"number\" step=\"1\" min=\"1\" max=\"90\" value=\"" + getRealizedDays() + "\" style=\"" + inputStyle + ";margin-bottom:8px\">" +
-          "<button id=\"tsa-realized-reset\" style=\"width:100%;padding:7px;border-radius:7px;border:1px solid " + border + ";background:none;color:" + muted + ";font-size:12px;cursor:pointer\">Reset realized profit</button>" +
+          "<button id=\"tsa-realized-reset\" style=\"width:100%;padding:7px;border-radius:var(--tsa-r-2);border:1px solid " + border + ";background:none;color:" + muted + ";font-size:var(--tsa-fs-micro);cursor:pointer\">Reset realized profit</button>" +
         "</div>" +
         "</div>" +
 
@@ -7666,8 +7892,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         "</div>" +
 
         "<div style=\"display:flex;gap:8px\">" +
-        "<button id=\"tsa-settings-save\" style=\"flex:1;padding:8px;border-radius:7px;border:none;background:#4a6fa5;color:#fff;font-size:13px;font-weight:bold;cursor:pointer\">Save</button>" +
-        "<button id=\"tsa-settings-cancel\" style=\"flex:1;padding:8px;border-radius:7px;border:1px solid " + border + ";background:none;color:" + muted + ";font-size:13px;cursor:pointer\">Cancel</button>" +
+        "<button id=\"tsa-settings-save\" style=\"flex:1;padding:8px;border-radius:var(--tsa-r-2);border:none;background:var(--tsa-accent);color:var(--tsa-on-accent);font-size:var(--tsa-fs-body);font-weight:bold;cursor:pointer\">Save</button>" +
+        "<button id=\"tsa-settings-cancel\" style=\"flex:1;padding:8px;border-radius:var(--tsa-r-2);border:1px solid " + border + ";background:none;color:" + muted + ";font-size:var(--tsa-fs-body);cursor:pointer\">Cancel</button>" +
         "</div>" +
         "</div>";
 
@@ -7745,7 +7971,7 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         var saveBtn = document.getElementById("tsa-settings-save");
         if (saveBtn) {
           saveBtn.textContent = "Saved ✓";
-          saveBtn.style.background = "#1a8a45";
+          saveBtn.style.background = "var(--tsa-pos)";
           setTimeout(function() { loadData(); }, 700);
         } else {
           loadData();
@@ -7767,41 +7993,40 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
     document.getElementById("tsa-alerts-btn").addEventListener("click", function() {
       var content = document.getElementById("tsa-content");
-      var isDarkNow = overlay.classList.contains("tsa-dark");
-      var bg2 = isDarkNow ? "#1a1a2e" : "#f7f9fc";
-      var border = isDarkNow ? "#2a2a4a" : "#eee";
-      var text = isDarkNow ? "#c8c8d8" : "#222";
-      var muted = isDarkNow ? "#7a7a9a" : "#666";
+      var bg2 = "var(--tsa-bg-raised)";
+      var border = "var(--tsa-border)";
+      var text = "var(--tsa-fg)";
+      var muted = "var(--tsa-fg-faint)";
       var alerts = loadAlerts();
 
       var rows = alerts.length ? alerts.map(function(a) {
         var repeatBadge = a.repeat
-          ? "<span title=\"Repeating alert\" style=\"font-size:10px;margin-left:4px;opacity:0.7\">🔁</span>"
+          ? "<span title=\"Repeating alert\" style=\"font-size:var(--tsa-fs-micro);margin-left:4px;opacity:0.7\">🔁</span>"
           : "";
-        return "<div style=\"display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid " + border + ";font-size:12px;\">" +
+        return "<div style=\"display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid " + border + ";font-size:var(--tsa-fs-micro);\">" +
           "<span style=\"color:" + text + ";font-weight:bold\">" + a.sym + repeatBadge + "</span>" +
           "<span style=\"color:" + muted + "\">" + (a.dir === "above" ? "≥" : "≤") + " $" + parseFloat(a.price).toFixed(2) + "</span>" +
-          "<button data-sym=\"" + a.sym + "\" data-dir=\"" + a.dir + "\" class=\"tsa-alert-del\" style=\"border:none;background:none;color:#cc2222;cursor:pointer;font-size:14px;\">✕</button>" +
+          "<button data-sym=\"" + a.sym + "\" data-dir=\"" + a.dir + "\" class=\"tsa-alert-del\" style=\"border:none;background:none;color:var(--tsa-neg);cursor:pointer;font-size:var(--tsa-fs-body);\">✕</button>" +
           "</div>";
-      }).join("") : "<div style=\"color:" + muted + ";font-size:11px;padding:8px 0\">No active alerts</div>";
+      }).join("") : "<div style=\"color:" + muted + ";font-size:var(--tsa-fs-micro);padding:8px 0\">No active alerts</div>";
 
       var stockOpts = ["ASS","BAG","CBD","CNC","ELT","EVL","EWM","FHG","GRN","HRG","IIL","IOU","IST","LAG","LOS","LSC","MCS","MSG","MUN","PRN","PTS","SYM","SYS","TCC","TCI","TCM","TCP","TCT","TGP","THS","TMI","TSB","WLT","WSU","YAZ"]
         .map(function(s) { return "<option value=\"" + s + "\">" + s + "</option>"; }).join("");
 
       content.innerHTML =
         "<div style=\"padding:14px\">" +
-        "<div style=\"font-size:10px;letter-spacing:0.12em;color:" + muted + ";text-transform:uppercase;font-weight:bold;margin-bottom:14px\">Price Alerts</div>" +
+        "<div style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + muted + ";text-transform:uppercase;font-weight:bold;margin-bottom:14px\">Price Alerts</div>" +
         "<div style=\"margin-bottom:14px\">" + rows + "</div>" +
         "<div style=\"display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:6px;margin-bottom:6px;align-items:center\">" +
-        "<select id=\"tsa-alert-sym\" style=\"padding:6px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:12px\">" + stockOpts + "</select>" +
-        "<input id=\"tsa-alert-price\" type=\"number\" step=\"0.01\" min=\"0\" placeholder=\"Price\" style=\"padding:6px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:12px\">" +
-        "<select id=\"tsa-alert-dir\" style=\"padding:6px;border-radius:7px;border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:12px\"><option value=\"above\">≥ Over</option><option value=\"below\">≤ Under</option></select>" +
-        "<button id=\"tsa-alert-add\" style=\"padding:6px 10px;border-radius:7px;border:none;background:#4a6fa5;color:#fff;font-size:13px;font-weight:bold;cursor:pointer\">+</button>" +
+        "<select id=\"tsa-alert-sym\" style=\"padding:6px;border-radius:var(--tsa-r-2);border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:var(--tsa-fs-micro)\">" + stockOpts + "</select>" +
+        "<input id=\"tsa-alert-price\" type=\"number\" step=\"0.01\" min=\"0\" placeholder=\"Price\" style=\"padding:6px;border-radius:var(--tsa-r-2);border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:var(--tsa-fs-micro)\">" +
+        "<select id=\"tsa-alert-dir\" style=\"padding:6px;border-radius:var(--tsa-r-2);border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:var(--tsa-fs-micro)\"><option value=\"above\">≥ Over</option><option value=\"below\">≤ Under</option></select>" +
+        "<button id=\"tsa-alert-add\" style=\"padding:6px 10px;border-radius:var(--tsa-r-2);border:none;background:var(--tsa-accent);color:var(--tsa-on-accent);font-size:var(--tsa-fs-body);font-weight:bold;cursor:pointer\">+</button>" +
         "</div>" +
-        "<label style=\"display:flex;align-items:center;gap:6px;font-size:11px;color:" + muted + ";margin-bottom:10px;cursor:pointer\">" +
+        "<label style=\"display:flex;align-items:center;gap:6px;font-size:var(--tsa-fs-micro);color:" + muted + ";margin-bottom:10px;cursor:pointer\">" +
         "<input type=\"checkbox\" id=\"tsa-alert-repeat\" style=\"cursor:pointer\"> 🔁 Repeat — keep alert active after it fires" +
         "</label>" +
-        "<button id=\"tsa-alerts-back\" style=\"width:100%;padding:8px;border-radius:7px;border:1px solid " + border + ";background:none;color:" + muted + ";font-size:13px;cursor:pointer\">Back</button>" +
+        "<button id=\"tsa-alerts-back\" style=\"width:100%;padding:8px;border-radius:var(--tsa-r-2);border:1px solid " + border + ";background:none;color:" + muted + ";font-size:var(--tsa-fs-body);cursor:pointer\">Back</button>" +
         "</div>";
 
       document.getElementById("tsa-alert-add").addEventListener("click", function() {
