@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.42.6
+// @version      2.43.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -579,12 +579,20 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // list.
   // ============================================================
 
-  // The two benefit items with NO entry in torn/?selections=items, so no market
-  // value exists to derive a payout from. Both are containers, not tradeable
-  // items: HRG pays "1x Random Property", TCC pays "1x Clothing Cache".
-  // These figures are the ONLY hardcoded payouts left, and they are estimates —
-  // keep them until Torn publishes a value or the owner measures one.
-  var UNPRICEABLE_PAYOUT_FALLBACK = { "HRG": 45456058, "TCC": 29526634 };
+  // DELIBERATELY EMPTY, owner decision 2026-08-25. It used to carry two frozen
+  // figures — HRG 45,456,058 and TCC 29,526,634 — for the two benefits whose payout
+  // has no entry in the item catalogue: "1x Random Property" and "1x Clothing Cache".
+  // Neither is a tradeable item (a property is not an item at all, and the catalogue
+  // has Gentleman/Elegant/Denim Caches but no Clothing Cache), so no market price
+  // exists to check those numbers against, and nobody knows where they came from.
+  // Ranking a block on an unsourced number is worse than not ranking it: BAG's
+  // "1x Ammunition Pack" was already dropped for exactly this reason, so HRG and TCC
+  // were getting recommendations BAG was honestly refused.
+  //
+  // ONE RULE NOW: a payout that cannot be priced against the market is not ranked.
+  // The map stays as the hook for a payout the owner has actually MEASURED — a
+  // measured figure belongs here, a guess does not.
+  var UNPRICEABLE_PAYOUT_FALLBACK = {};
 
   // Tiers synthesised per money/item stock. T1-T6 UNIFORMLY for every priceable
   // stock (18 syms x 6 = 108 rows) — an explicit OWNER DECISION taken 2026-08-25,
@@ -671,9 +679,31 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         //   3. only when neither exists is the row dropped (BAG, whose "1x
         //      Ammunition Pack" has no catalogue entry and no hardcoded row, and
         //      any future stock Torn adds with an unpriceable item).
+        // TRANSIENT vs PERMANENT, and the item CATALOGUE is what tells them apart:
+        //   * the name resolves to an item id, we just have no price for it right now
+        //     -> transient (cold profile, failed price call). The baseline is the
+        //        right stand-in: it is the figure the planner showed before.
+        //   * the name resolves to NO id at all -> the payout is not a tradeable item,
+        //     so no market price will EVER exist for it. Falling back to a stored
+        //     number here means ranking a block on a figure nothing can check, which
+        //     is what BAG was already refused. Drop it instead.
+        // THE BASELINE'S ITEM ID IS THE DISCRIMINATOR, not whether the catalogue
+        // happens to be loaded: the hand-built table recorded a real id for every
+        // payout that IS an item (MUN 818, FHG 367, ...) and 0 for the three that are
+        // not (HRG "1x Random Property", TCC "1x Clothing Cache", BAG "1x Ammunition
+        // Pack" — a property is not an item, and the catalogue has Gentleman/Elegant/
+        // Denim Caches but no Clothing Cache). So a name that resolves to no id while
+        // the baseline knows one is a RENAME or a missing price — degrade. A name that
+        // resolves to no id and has no baseline id either can never be priced at all.
+        var notAnItem = !!named.name
+          && !((nameToItemId || {})[named.name])
+          && !(baseline && baseline.item);
         var est = UNPRICEABLE_PAYOUT_FALLBACK[sym];
         if (est) {
           payout = est;
+        } else if (notAnItem) {
+          unpriceable.push(sym);
+          return;
         } else if (baseline && baseline.payout > 0) {
           payout = baseline.payout;
           degraded.push(sym);
@@ -735,7 +765,11 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   function installDerivedBenefitTables(stocksDict) {
     var d = deriveBenefitTables(stocksDict, itemMarketValues, itemIdsByName);
     if (!d) { benefitTableStatus = "hardcoded (empty payload)"; return false; }
+    // A symbol the derivation deliberately refused to price is NOT a loss — it is the
+    // rule working. Counting it as one would make removing the two unsourced estimates
+    // refuse the entire install and drag every other symbol back to the hardcoded table.
     var lost = BASELINE_ROI.syms.filter(function(sym) {
+      if (d.unpriceable.indexOf(sym) >= 0) return false;
       return !d.roiRows.some(function(r) { return r.sym === sym; });
     });
     if (Object.keys(d.req).length < 30) {
