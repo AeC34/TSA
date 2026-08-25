@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.42.0
+// @version      2.42.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -361,6 +361,30 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   }
   rebuildRoiMap();
 
+  // BASELINE snapshot of the HARDCODED payouts, frozen at module init BEFORE
+  // anything can mutate ROI_TABLE. It is the per-SYMBOL safety net for the runtime
+  // derivation below: a stale payout for one symbol is a far smaller loss than
+  // that symbol vanishing from the planner.
+  //
+  // 🪤 It MUST come from the hardcoded literal, never from a derived table — a
+  // second install would otherwise snapshot its own output and the real baseline
+  // would be gone for good. The IIFE runs exactly once at load, which is what
+  // makes that impossible; there is no re-snapshot path to get wrong.
+  //
+  // VERIFIED 2026-08-25 (counted over the literal above): 88 rows, 18 symbols,
+  // and every row of a symbol carries the SAME payout and the SAME item id — 0
+  // exceptions. So the per-symbol view loses nothing, and it also covers the
+  // tiers the hand-built table stopped short of (LAG stops at T2, the derivation
+  // goes to T6).
+  var BASELINE_ROI = (function() {
+    var byKey = {}, bySym = {};
+    ROI_TABLE.forEach(function(e) {
+      byKey[e.sym + "|" + e.tier] = { payout: e.payout, item: e.item };
+      if (!bySym[e.sym]) bySym[e.sym] = { payout: e.payout, item: e.item };
+    });
+    return { byKey: byKey, bySym: bySym, syms: Object.keys(bySym).sort() };
+  })();
+
   // Item IDs with sellable market value
   var ITEM_IDS = [364, 365, 366, 367, 368, 369, 370, 817, 818];
   // PTS gives 100 points = $3M fixed
@@ -543,11 +567,12 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // passives set-equal, 35/35 requirements, 88/88 freq values), so nothing is
   // lost by deriving them — and a future change on Torn's side now lands by
   // itself instead of silently rotting. The hardcoded tables STAY as the
-  // COLD-START FALLBACK (first load, offline, API down, item prices not cached
-  // yet) and as the only source for the two payouts the API cannot price (see
-  // UNPRICEABLE_PAYOUT_FALLBACK). Nothing is installed unless the derivation
-  // comes back plausible, so the planner can never end up empty because one API
-  // call failed.
+  // COLD-START FALLBACK (first load, offline, API down) and as the PER-SYMBOL
+  // payout source whenever a derived row cannot be priced — including the two
+  // payouts the API can never price (see UNPRICEABLE_PAYOUT_FALLBACK). The
+  // degradation is per symbol, never all-or-nothing: requirements, frequencies
+  // and the passive set need no item price at all, so an item-price failure must
+  // not be able to take them down with it.
   //
   // 🪤 `stocks` is a DICT keyed on the stock id as a STRING ("1".."35"), not a
   // list.
@@ -571,9 +596,47 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // torn/?selections=stocks payload -> {passive, req, roiRows, unpriceable}.
   // Pure: no globals touched, no I/O — so it is testable and the caller decides
   // whether the result is good enough to install.
+  // The price map parsePayout is handed. Three sources, in this order, all folded
+  // into ONE map keyed on the name the DESCRIPTION uses — parsePayout looks up the
+  // raw description name, so an alias keyed any other way would never be hit, and
+  // folding them in here keeps "qty x price" computed in exactly one place:
+  //   1. the catalogue name verbatim — how all 9 priceable benefit items resolve
+  //      today (VERIFIED 2026-08-25 against the live 1483-item catalogue: every
+  //      one matches byte-for-byte, incl. "Six-Pack of Energy Drink" and
+  //      "Lawyer's Business Card"), so 2 and 3 are insurance, not a live fix;
+  //   2. the same name modulo surrounding whitespace and letter case;
+  //   3. the market value of the item ID the hardcoded table already recorded for
+  //      that symbol. Ids are stable across a rename, names are strings.
+  // Nothing beyond that is guessed: no fuzzy matching, no stemming.
+  function buildBenefitPriceMap(stocksDict, itemValueByName, nameToItemId) {
+    var out = {}, norm = {}, valueById = {};
+    Object.keys(itemValueByName || {}).forEach(function(n) {
+      var v = itemValueByName[n];
+      out[n] = v;
+      var k = String(n).trim().toLowerCase();
+      if (norm[k] === undefined) norm[k] = v;
+      var id = (nameToItemId || {})[n];
+      if (id && typeof v === "number" && valueById[id] === undefined) valueById[id] = v;
+    });
+    Object.keys(stocksDict || {}).forEach(function(id) {
+      var s = stocksDict[id];
+      if (!s || !s.acronym) return;
+      var named = payoutItem((s.benefit || {}).description);
+      if (!named.name || out[named.name] !== undefined) return;
+      var v = norm[String(named.name).trim().toLowerCase()];
+      if (v === undefined) {
+        var base = BASELINE_ROI.bySym[s.acronym];
+        if (base && base.item) v = valueById[base.item];
+      }
+      if (typeof v === "number" && v > 0) out[named.name] = v;
+    });
+    return out;
+  }
+
   function deriveBenefitTables(stocksDict, itemValueByName, nameToItemId) {
-    var passive = [], req = {}, roiRows = [], unpriceable = [];
+    var passive = [], req = {}, roiRows = [], unpriceable = [], degraded = [];
     if (!stocksDict) return null;
+    var priceByName = buildBenefitPriceMap(stocksDict, itemValueByName, nameToItemId);
     Object.keys(stocksDict).forEach(function(id) {
       var s = stocksDict[id];
       if (!s || !s.acronym) return;
@@ -583,20 +646,40 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
 
       // Active stocks only: a passive perk is a single non-monetary block, never
       // an ROI candidate (the hand-built table excluded all 13 of them too).
-      var parsed = parsePayout(b.description, itemValueByName);
+      var parsed = parsePayout(b.description, priceByName);
       var art = payoutKind(parsed.kind, b.description);
       if (art === "perk") return;                      // "50 nerve", "100 energy", "1000 happiness"
 
       var named = payoutItem(b.description);
+      var baseline = BASELINE_ROI.bySym[sym];
       var itemId = (named.name && nameToItemId) ? (nameToItemId[named.name] || 0) : 0;
+      // Keep the id the hardcoded table recorded when the name resolves to none:
+      // getPerCycle prices a row off the LIVE market listing for row.item, so the
+      // id is what keeps a degraded row tracking the market instead of sitting
+      // frozen at its baseline.
+      if (!itemId && baseline && baseline.item) itemId = baseline.item;
       var payout = parsed.amount;
       if (parsed.kind === "unpriceable") {
-        // A NAMED ITEM we cannot price. Use the owner's fallback if we have one,
-        // otherwise drop the row rather than rank it off a guess — the same
-        // refusal the reference implementation makes. BAG lands here and is
-        // dropped, exactly as the hand-built table already did.
-        payout = UNPRICEABLE_PAYOUT_FALLBACK[sym] || 0;
-        if (!payout) { unpriceable.push(sym); return; }
+        // A benefit no price could be derived for. Degrade PER SYMBOL — an install
+        // is never all-or-nothing, because requirements, frequencies and passives
+        // need no price at all and must not be thrown away with one lookup:
+        //   1. the owner's estimate, for the two container items (HRG, TCC);
+        //   2. else the hardcoded table's own payout for this symbol — stale, but
+        //      it is the exact figure the planner showed before this derivation
+        //      existed, so degrading to it can never be worse than the fallback;
+        //   3. only when neither exists is the row dropped (BAG, whose "1x
+        //      Ammunition Pack" has no catalogue entry and no hardcoded row, and
+        //      any future stock Torn adds with an unpriceable item).
+        var est = UNPRICEABLE_PAYOUT_FALLBACK[sym];
+        if (est) {
+          payout = est;
+        } else if (baseline && baseline.payout > 0) {
+          payout = baseline.payout;
+          degraded.push(sym);
+        } else {
+          unpriceable.push(sym);
+          return;
+        }
       }
       for (var t = 1; t <= MAX_BENEFIT_TIERS; t++) {
         roiRows.push({
@@ -608,7 +691,8 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
       }
     });
     passive.sort();
-    return { passive: passive, req: req, roiRows: roiRows, unpriceable: unpriceable };
+    return { passive: passive, req: req, roiRows: roiRows,
+             unpriceable: unpriceable, degraded: degraded };
   }
 
   var benefitTablesDerived = false;
@@ -620,13 +704,21 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
   // the script reading the old arrays. (The out-of-repo logic guards also grab
   // them as `var` literals, which is why the fallback path is what they test.)
   //
-  // 🪤 Nothing is installed unless the result is plausible — ≥30 requirement
-  // symbols, ≥1 passive, ≥60 ROI rows. A truncated or item-price-less derivation
-  // leaves the hardcoded tables untouched instead of shrinking the planner.
+  // 🪤 The gate measures the ONE invariant that matters: a derived table may never
+  // LOSE a symbol the hardcoded table had. Row COUNT was the wrong measure — the
+  // old `>= 60` refused the whole install (requirements and frequencies included)
+  // on any profile whose item prices were not cached yet, because 9 priceable
+  // symbols x 6 tiers = 54 legitimate rows. That is the defect the owner saw as
+  // "still 88 rows". With per-symbol degradation a derivation that keeps every old
+  // symbol and adds Torn's own requirements is strictly better than the fallback,
+  // even with not one item price available.
   function installDerivedBenefitTables(stocksDict) {
     var d = deriveBenefitTables(stocksDict, itemMarketValues, itemIdsByName);
     if (!d) return false;
-    if (Object.keys(d.req).length < 30 || d.passive.length < 1 || d.roiRows.length < 60) return false;
+    var lost = BASELINE_ROI.syms.filter(function(sym) {
+      return !d.roiRows.some(function(r) { return r.sym === sym; });
+    });
+    if (Object.keys(d.req).length < 30 || d.passive.length < 1 || lost.length) return false;
 
     PASSIVE_STOCKS.length = 0;
     d.passive.forEach(function(sym) { PASSIVE_STOCKS.push(sym); });
