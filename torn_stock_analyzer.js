@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.41.0
+// @version      2.41.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Backtested on 42 days of hourly data with 88% hit rate. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -888,8 +888,22 @@ var STYLES = "\n\n    #tsa-btn {\n\n      position: fixed; bottom: 80px; right: 
         // alone understated ROI and payback for every multi-step row and pushed the far
         // tiers down the ranking; the buy side (calcNextTier) never had the bug because
         // it only ever looks one increment ahead.
+        // PAID-FOR TIERS ARE NOT PART OF THIS PURCHASE. `cost` above credits every
+        // share already held against sharesNeeded, so a tier whose shares are ALREADY
+        // BOUGHT - but whose increment Torn has not bumped yet, because the payout day
+        // has not come - costs nothing here. Crediting its income to this buy invents
+        // income the buy does not switch on, and always in the OPTIMISTIC direction,
+        // which is the dangerous one: real money is spent against these numbers.
+        // So the base is the number of tiers the SHARES have paid for, which is what
+        // `cost` is measured against, not the increment Torn has got around to
+        // reporting. Derived here from `held` and `req` rather than read off ownedMap,
+        // so this holds even on a map enrichOwnedMap has not touched. The error was
+        // worth up to a FACTOR OF TWO on payback for an affected row.
+        var paidTiers = 0;
+        while (held >= (Math.pow(2, paidTiers + 1) - 1) * req) paidTiers++;
+        var incomeBase = Math.max(curInc, paidTiers);
         dailyInc = 0;
-        for (var t = curInc + 1; t <= tierNum; t++) {
+        for (var t = incomeBase + 1; t <= tierNum; t++) {
           var e2 = ROI_MAP[entry.sym + "|T" + t];
           if (!e2) continue;
           var pc2 = getPerCycle(e2);
