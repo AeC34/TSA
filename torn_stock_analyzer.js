@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.49.0
+// @version      2.50.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -219,10 +219,12 @@
   var lastCashBalance = 0; // money_onhand from the last loadData fetch — bridge-pill capital (same source as the ROI Planner)
   var lastArmoryFunds = 0; // faction armory balance from the last loadData fetch — bridge-pill capital
   var lastItemFetchTs = 0; // last fetchAllItemPrices run on the pill path (TTL-gated; the planner fetches on every open)
-  var lastBuySymbols = []; // Symbols currently in the Top-5 buy list (drives Quick Buy pills)
+  var lastBuySymbols = []; // Symbols driving the Quick Buy pills - the Top-5 buy list, or the Buy zone when the source setting says so
   var lastBuyInvDelta = {}; // {sym: 24h investor delta} for the Quick Buy pill sub-text
   var lastBuyPriceDelta = {}; // {sym: 24h price change %} for the Quick Buy pill sub-text
   var lastBuyScores = {}; // {sym: buy score} for the Quick Buy pill sub-text
+  var lastBuyZonePos = {}; // {sym: position % in its own 30-day range} for the Buy-zone pill sub-text
+  var lastBuySource = "top5"; // which list actually filled lastBuySymbols on the last render - drives the pill group label
   var lastSwingPills = []; // [{sym, shares, profit}] snapshot for the Swing sell pills
   // Pending two-step Upgrade swap: set after the user clicks the Upgrade pill and the
   // worse benefit tier is sold (step 1). Holds the buy half so step 2 (the next click)
@@ -4315,6 +4317,13 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   function getPillsAlways() {
     return lsGet("tsa_pills_always", "false") === "true";
   }
+  // Which list fills the Quick Buy pills. "top5" is the default and is exactly the
+  // behaviour every user had before this setting existed; "buyzone" swaps in the Buy
+  // zone. Any unrecognised stored value falls back to "top5" rather than leaving the
+  // pills empty on a typo.
+  function getQtBuySource() {
+    return lsGet("tsa_qt_buy_source", "top5") === "buyzone" ? "buyzone" : "top5";
+  }
   function getTop5MinScore() {
     var v = parseInt(lsGet("tsa_top5_min_score", "35"), 10);
     return isNaN(v) ? 35 : v;
@@ -4798,6 +4807,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           "<div style=\"color:" + d.muted + ";font-size:var(--tsa-fs-micro);padding:8px 0\">No signals right now</div></div>";
       }
 
+      var dipRowsThisRender = null; // filled by the Buy zone section below; read by the pill-source block after it
+
       // BUY ZONE — its own section, BESIDE the score and never folded into it.
       // See the constants block for why: the rule's numbers come from a backtest
       // that was never validated forward, so it gets its own frame and its own
@@ -4810,6 +4821,11 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       (function () {
         var dipNow = Date.now();
         var dip = dipScan(dipNow, !fromCache, ownedMap);
+        // Captured for the Quick Buy pill source below. dipScan runs EXACTLY once per
+        // render because it journals prices and logs calls; calling it a second time
+        // just to read the same rows would double-log and corrupt the very measurement
+        // this section exists for.
+        dipRowsThisRender = dip.rows;
         var dst = dip.stats;
         var rateHtml;
         if (dst.ready) {
@@ -4902,6 +4918,31 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           "recommends.</div>" +
           "</div></div>";
       })();
+
+      // QUICK BUY PILL SOURCE. The Top-5 assignment far above always runs, because
+      // the Top-5 section itself needs it; this only re-points the PILLS. It sits
+      // here rather than at that assignment because dipScan runs inside the Buy zone
+      // section above and must not be called twice.
+      //
+      // Only verdict BUY rows qualify. WAIT rows are inside the band but have not
+      // settled there, and the disclosure printed by that section states BUY is the
+      // only one of the four calls it recommends — so a WAIT pill would offer a
+      // trade the rule does not make.
+      //
+      // An empty zone means NO buy pills. There is deliberately no silent fallback to
+      // Top 5: seeing Top-5 symbols while the setting reads Buy zone would be read as
+      // the zone agreeing with the ranking, which is the one thing the Buy zone is
+      // built to keep separate.
+      if (getQtBuySource() === "buyzone") {
+        lastBuySource = "buyzone";
+        var zoneBuys = (dipRowsThisRender || []).filter(function (r) { return r.verdict === "BUY"; });
+        lastBuySymbols = zoneBuys.map(function (r) { return r.sym; });
+        lastBuyZonePos = {};
+        zoneBuys.forEach(function (r) { lastBuyZonePos[r.sym] = r.pos; });
+      } else {
+        lastBuySource = "top5";
+        lastBuyZonePos = {};
+      }
 
       // WATCH section — owned stocks with CONSIDER score
       if (getShowWatch() && watchList.length > 0) {
@@ -7059,7 +7100,11 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       var buyLbl = document.createElement("span");
       buyLbl.className = "qt-pill-group-label";
       buyLbl.style.color = labelColor;
-      buyLbl.textContent = "▲ Quick Buy — Top " + lastBuySymbols.length;
+      // The label names the SOURCE, not just a count: two different lists can produce
+      // the same number of pills, and a wrong assumption here costs money.
+      buyLbl.textContent = (lastBuySource === "buyzone")
+        ? "▲ Quick Buy — Buy zone " + lastBuySymbols.length
+        : "▲ Quick Buy — Top " + lastBuySymbols.length;
       buyHead.appendChild(buyLbl);
       var pillAmt = getQtBuyPillAmt();
       var gearBtn = document.createElement("button");
@@ -7083,9 +7128,13 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         var pct = lastBuyPriceDelta[sym];
         var sc = lastBuyScores[sym];
         var scStr = (sc != null) ? sc + "p" : null;
+        // Only populated in Buy-zone mode: how deep in its own 30-day range the stock
+        // sits, which is the entire reason the row is in the zone.
+        var zp = lastBuyZonePos[sym];
+        var zpStr = (zp != null) ? "▾ " + zp.toFixed(0) + "% of range" : null;
         var pctStr = (pct != null) ? (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%" : null;
         var invStr = (d != null) ? "👥 " + (d >= 0 ? "+" : "") + d.toLocaleString("en-US") : null;
-        var subText = [scStr, pctStr, invStr].filter(Boolean).join(" · ");
+        var subText = [zpStr, scStr, pctStr, invStr].filter(Boolean).join(" · ");
         buyRow.appendChild(makeQtPill(sym, true, buyPillLabel, isDark, function() {
           qtBuildMaps();
           var amt = getQtBuyPillAmt();
@@ -7916,6 +7965,13 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Always show Quick pills (even when bar is hidden)</span>" +
         "</label>" +
         "<div style=\"margin-bottom:12px\">" +
+          "<div style=\"" + labelTitle + "\">Quick Buy pill source</div>" +
+          "<select id=\"tsa-setting-qt-buy-source\" style=\"" + inputStyle + "\">" +
+            "<option value=\"top5\"" + (getQtBuySource() === "top5" ? " selected" : "") + ">Top 5 buy</option>" +
+            "<option value=\"buyzone\"" + (getQtBuySource() === "buyzone" ? " selected" : "") + ">Buy zone</option>" +
+          "</select>" +
+        "</div>" +
+        "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">Min score for Top 5 (0–160)</div>" +
           "<input id=\"tsa-setting-top5-min\" type=\"number\" step=\"1\" min=\"0\" max=\"160\" value=\"" + getTop5MinScore() + "\" style=\"" + inputStyle + "\">" +
         "</div>" +
@@ -7999,6 +8055,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         var showQtChart = document.getElementById("tsa-setting-show-qt-chart").checked;
         var showQtBar = document.getElementById("tsa-setting-show-qt-bar").checked;
         var pillsAlways = document.getElementById("tsa-setting-pills-always").checked;
+        var qtBuySource = (document.getElementById("tsa-setting-qt-buy-source") || {}).value;
         var top5Min = parseInt(document.getElementById("tsa-setting-top5-min").value, 10);
         var reqInv = document.getElementById("tsa-setting-req-investors").checked;
         var rd = parseInt((document.getElementById("tsa-setting-realized-days") || {}).value || "7", 10);
@@ -8022,6 +8079,9 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         lsSet("tsa_show_qt_chart", showQtChart ? "true" : "false");
         lsSet("tsa_show_qt_bar", showQtBar ? "true" : "false");
         lsSet("tsa_pills_always", pillsAlways ? "true" : "false");
+        // Anything but the buyzone literal stores as top5, so a missing element or a
+        // hand-edited value can never leave the pills pointed at nothing.
+        lsSet("tsa_qt_buy_source", qtBuySource === "buyzone" ? "buyzone" : "top5");
         applyQtBarVisibility();
         lsSet("tsa_top5_min_score", top5Min.toString());
         lsSet("tsa_show_realized", showRealized ? "true" : "false");
