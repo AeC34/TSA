@@ -1,17 +1,20 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.50.0
+// @version      2.51.0
 // @author       AeC3
-// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade.
+// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Requires a paid TSA licence key from dossier.aec3.org (Xanax); only that key is sent, to dossier-api.aec3.org, to check it — your Torn API key is sent only to api.torn.com.
 // @match        https://www.torn.com/page.php?sid=stocks*
 // @run-at       document-end
 // @license      MIT
+// @antifeature  payment     Needs a TSA licence, paid in Xanax via dossier.aec3.org
+// @antifeature  membership  The licence key is issued to a Dossier account (dossier.aec3.org)
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
 // @connect      tornsy.com
 // @connect      api.torn.com
 // @connect      www.torn.com
+// @connect      dossier-api.aec3.org
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js
 // @updateURL    https://greasyfork.org/scripts/570460/code/Torn%20Stock%20Analyzer.meta.js
 // @downloadURL  https://greasyfork.org/scripts/570460/code/Torn%20Stock%20Analyzer.user.js
@@ -31,7 +34,9 @@
   // manager builds expose only this), then a best-effort native fetch (works only
   // for hosts that send permissive CORS headers, e.g. api.torn.com). typeof guards
   // avoid the ReferenceError of touching an undefined bare symbol. Same options
-  // object {method,url,onload,onerror} passes straight through to either GM API.
+  // object {method,url,headers,onload,onerror} passes straight through to either GM API.
+  // The TSA-NET markers let tests/license.test.mjs load this adapter in node unchanged.
+  // ==TSA-NET-BEGIN==
   var gmXhrWarned = false;
   function gmXhr(opts) {
     if (typeof GM_xmlhttpRequest !== "undefined") { return GM_xmlhttpRequest(opts); }
@@ -43,8 +48,12 @@
     // refused. PDA_httpGet returns a Promise resolving to
     // {responseText, status, statusText, responseHeaders}.
     // GET only — every TSA call site is a GET. Add PDA_httpPost if a POST site is ever introduced.
+    // Signature is PDA_httpGet(url, headers = {}) — VERIFIED 2026-10-31 in
+    // Manuito83/torn-pda userscripts/TornPDA_API.js:10, and the native handler
+    // (lib/utils/webview/webview_handlers.dart:410) passes args[1] to http.get as
+    // headers. Callers without headers send {} — the same as PDA's own default.
     if (typeof PDA_httpGet === "function") {
-      PDA_httpGet(opts.url)
+      PDA_httpGet(opts.url, opts.headers || {})
         .then(function (r) { if (opts.onload) opts.onload({ responseText: r.responseText, status: r.status }); })
         .catch(function (err) { if (opts.onerror) opts.onerror({ error: String(err) }); });
       return;
@@ -53,7 +62,7 @@
     // CSP) but is CSP-blocked for tornsy.com, so this only fully works in a
     // regular browser, not inside PDA without PDA_httpGet.
     if (typeof fetch === "function") {
-      fetch(opts.url, { method: opts.method || "GET" })
+      fetch(opts.url, opts.headers ? { method: opts.method || "GET", headers: opts.headers } : { method: opts.method || "GET" })
         .then(function (res) { return res.text().then(function (t) { return { status: res.status, text: t }; }); })
         .then(function (o) { if (opts.onload) opts.onload({ responseText: o.text, status: o.status }); })
         .catch(function (err) { if (opts.onerror) opts.onerror({ error: String(err) }); });
@@ -66,6 +75,270 @@
     }
     if (opts.onerror) opts.onerror({ error: "No XHR API available" });
   }
+  // ==TSA-NET-END==
+
+  // ============================================================
+  // TSA LICENCE — pure decision logic + a small I/O part
+  // ============================================================
+  // TSA is paid for (Xanax, via Dossier). The user gets a tsa1_ key on
+  // dossier.aec3.org (user menu → TSA licence) and pastes it into TSA. Only that
+  // key is ever sent, only to dossier-api.aec3.org, and only in a header: the Torn
+  // API key never leaves api.torn.com. This is an honesty lock, not DRM — the
+  // source is public.
+  //
+  // decide(state, now, outcome) is pure (no clock, no storage, no network), so the
+  // rules can be tested in node: tests/license.test.mjs loads the text between the
+  // TSA-LICENSE markers with vm. The rules:
+  //   - only tsa1_ + 43 url-safe characters is ever sent; anything else locks locally
+  //   - an active answer is trusted for 12 h, or until its expires_ts passes, whichever
+  //     is first. At exactly 12 h it is stale and re-checked.
+  //   - network error / timeout / 5xx / unreadable answer: fail-open for 72 h counted
+  //     from the last successful ACTIVE check (exactly 72 h = locked). Never verified =
+  //     locked.
+  //   - 401: locked at once and the cached status is dropped. The key itself is kept
+  //     (marked rejected, re-asked after INACTIVE_MS or on "Check again"), so one
+  //     stray 401 from a proxy or a bad deploy cannot wipe every user's key.
+  //   - active:false: locked, showing the server's renew text
+  //   - 429: keep what the cached state gives, try again after RETRY_MS
+  // ==TSA-LICENSE-BEGIN==
+  var TSALicense = (function () {
+    var CHECK_URL   = "https://dossier-api.aec3.org/api/license/check";
+    var TOKEN_RE    = /^tsa1_[A-Za-z0-9_-]{43}$/;  // dossier mints tsa1_ + secrets.token_urlsafe(32)
+    var CACHE_MS    = 12 * 3600 * 1000;
+    var GRACE_MS    = 72 * 3600 * 1000;
+    var RETRY_MS    = 5 * 60 * 1000;   // pause after a 429 or a failed check
+    var INACTIVE_MS = 10 * 60 * 1000;  // an expired licence is re-asked this often, so a renewal shows up soon
+    var TIMEOUT_MS  = 10000;
+    var STORE_KEY   = "tsa_license";
+
+    function validToken(t) { return typeof t === "string" && TOKEN_RE.test(t); }
+
+    function blank(token) {
+      return { token: token || null, status: null, expires_ts: null, name: null, renew: null,
+               checked_ms: null, ok_ms: null, retry_ms: null, fail: null };
+    }
+
+    // Copies only known fields, so a hand-edited or old stored blob cannot add any.
+    function copy(src) {
+      var o = blank(null);
+      if (src && typeof src === "object") {
+        for (var k in o) { if (Object.prototype.hasOwnProperty.call(src, k)) o[k] = src[k]; }
+      }
+      return o;
+    }
+
+    // expires_ts bounds the cache only if it lay in the future when it was received;
+    // otherwise an active:true answer carrying a past expires_ts would re-check on every call.
+    function expiryMs(s) {
+      if (s.expires_ts == null || s.checked_ms == null) return null;
+      var ms = Number(s.expires_ts) * 1000;
+      if (!isFinite(ms) || ms <= s.checked_ms) return null;
+      return ms;
+    }
+
+    function inGrace(s, now) {
+      return s.status === "active" && s.ok_ms != null && now - s.ok_ms < GRACE_MS;
+    }
+
+    function res(s, now, locked, reason, nextCheck) {
+      return { locked: locked, reason: reason, nextCheck: nextCheck,
+               needsCheck: nextCheck != null && nextCheck <= now, state: s };
+    }
+
+    // No fresh answer to go on: the last known state decides, a check is due at
+    // nextCheck (now, unless a 429 / failure asked to wait).
+    function fallback(s, now) {
+      var next = (s.retry_ms != null && s.retry_ms > now) ? s.retry_ms : now;
+      if (s.status === "inactive" || s.status === "rejected") return res(s, now, true, s.status, next);
+      if (inGrace(s, now)) return res(s, now, false, "grace", next);
+      return res(s, now, true, s.ok_ms != null ? "grace_over" : "unverified", next);
+    }
+
+    function fromCache(s, now) {
+      if (s.status === "active" && s.checked_ms != null && now - s.checked_ms < CACHE_MS) {
+        var exp = expiryMs(s);
+        if (exp == null || now < exp) {
+          var next = s.checked_ms + CACHE_MS;
+          if (exp != null && exp < next) next = exp;
+          return res(s, now, false, "active", next);
+        }
+      }
+      if ((s.status === "inactive" || s.status === "rejected") && s.checked_ms != null && now - s.checked_ms < INACTIVE_MS) {
+        return res(s, now, true, s.status, s.checked_ms + INACTIVE_MS);
+      }
+      return fallback(s, now);
+    }
+
+    // outcome: null (judge the cache only), {kind:"response", status, body}, or
+    // {kind:"error", error}. Returns {locked, reason, nextCheck, needsCheck, state};
+    // state is what to persist.
+    function decide(state, now, outcome) {
+      var s = copy(state);
+      if (!s.token) return res(s, now, true, "no_key", null);
+      if (!validToken(s.token)) return res(s, now, true, "bad_format", null);
+      if (outcome == null) return fromCache(s, now);
+
+      if (outcome.kind === "response") {
+        var st = outcome.status, b = outcome.body;
+        var isObj = b !== null && typeof b === "object";
+        if (st === 401) {
+          var r = blank(s.token);
+          r.status = "rejected";
+          r.checked_ms = now;
+          return fromCache(r, now);
+        }
+        if (st === 429) {
+          s.retry_ms = now + RETRY_MS;
+          s.fail = "rate_limited";
+          return fallback(s, now);
+        }
+        if (st === 200 && isObj && (b.active === true || b.active === false)) {
+          s.status = b.active ? "active" : "inactive";
+          s.checked_ms = now;
+          s.ok_ms = b.active ? now : null;
+          s.expires_ts = typeof b.expires_ts === "number" ? b.expires_ts : null;
+          s.name = typeof b.name === "string" ? b.name : null;
+          s.renew = (!b.active && typeof b.renew === "string") ? b.renew : null;
+          s.retry_ms = null;
+          s.fail = null;
+          return fromCache(s, now);
+        }
+      }
+      // network error, timeout, 5xx, any other status, an unreadable 200
+      s.retry_ms = now + RETRY_MS;
+      s.fail = "unreachable";
+      return fallback(s, now);
+    }
+
+    // ---- I/O ----
+    // deps = {xhr, store:{get,set}, now(), setTimer(fn,ms), clearTimer(t)}
+    // Storage is re-read on every load, so a key changed or removed in another tab
+    // is seen here too. Once a read or write has failed, the in-memory copy is the
+    // source of truth instead, so "save failed" can never turn into "check again"
+    // in a loop.
+    var mem = blank(null);
+    var storeBroken = false;
+    var waiting = null;   // callbacks of the check in flight: one request however often ensure() runs
+
+    function load(deps) {
+      if (!storeBroken) {
+        try { mem = copy(JSON.parse(deps.store.get(STORE_KEY) || "null")); }
+        catch (e) { storeBroken = true; }
+      }
+      return copy(mem);
+    }
+
+    function save(deps, s) {
+      mem = copy(s);
+      if (storeBroken) return;
+      try { deps.store.set(STORE_KEY, JSON.stringify(mem)); } catch (e) { storeBroken = true; }
+    }
+
+    function request(deps, token, cb) {
+      var done = false, timer = null;
+      function finish(o) {
+        if (done) return;
+        done = true;
+        if (timer != null) { try { deps.clearTimer(timer); } catch (e) {} }
+        cb(o);
+      }
+      // Own timeout: PDA_httpGet and fetch have none, and GM's ontimeout is not universal.
+      timer = deps.setTimer(function () { finish({ kind: "error", error: "timeout" }); }, TIMEOUT_MS);
+      try {
+        deps.xhr({
+          method: "GET",
+          url: CHECK_URL,
+          headers: { "Authorization": "Bearer " + token },
+          anonymous: true,   // no cookies: the server reads only the header
+          timeout: TIMEOUT_MS,
+          onload: function (r) {
+            var body = null;
+            try { body = JSON.parse(r && r.responseText); } catch (e) { body = null; }
+            finish({ kind: "response", status: r ? Number(r.status) : 0, body: body });
+          },
+          onerror: function () { finish({ kind: "error", error: "network" }); },
+          ontimeout: function () { finish({ kind: "error", error: "timeout" }); }
+        });
+      } catch (e) {
+        finish({ kind: "error", error: "network" });
+      }
+    }
+
+    // Calls cb(decision). Synchronous (and returns the decision) when the cache
+    // answers; returns null while a check is out. force = check now even if the
+    // cache is fresh (a user pressing Check again) — but not inside a 429 backoff.
+    function ensure(deps, force, cb) {
+      var s = load(deps);
+      var now = deps.now();
+      var d = decide(s, now, null);
+      var backoff = s.fail === "rate_limited" && s.retry_ms != null && now < s.retry_ms;
+      var due = d.needsCheck || (force && validToken(s.token) && !backoff);
+      if (!due) { cb(d); return d; }
+      if (waiting) { waiting.push(cb); return null; }
+      waiting = [cb];
+      request(deps, s.token, function (outcome) {
+        var list = waiting;
+        waiting = null;
+        var cur = load(deps);
+        if (cur.token !== s.token) {
+          // the key was replaced while this answer was out: it says nothing about the new one
+          ensure(deps, true, function (d3) { for (var i = 0; i < list.length; i++) list[i](d3); });
+          return;
+        }
+        var d2 = decide(cur, deps.now(), outcome);
+        save(deps, d2.state);
+        for (var j = 0; j < list.length; j++) list[j](d2);
+      });
+      return null;
+    }
+
+    // Checks a NEW key before it replaces anything. It is stored when it opens TSA,
+    // or when the current key does not (then a key that could not be confirmed yet
+    // is still worth keeping, so it is retried without pasting it again). A working
+    // key is never replaced by one that failed. cb({applied, decision}).
+    function tryToken(deps, token, cb) {
+      var t = typeof token === "string" ? token.trim() : "";
+      if (!validToken(t)) { cb({ applied: false, decision: decide(blank(t), deps.now(), null) }); return; }
+      request(deps, t, function (outcome) {
+        var now = deps.now();
+        var d = decide(blank(t), now, outcome);
+        var current = decide(load(deps), now, null);
+        var apply = !d.locked || current.locked;
+        if (apply) save(deps, d.state);
+        cb({ applied: apply, decision: d });
+      });
+    }
+
+    // Stores a new key with a clean state, unchecked (tests; the UI uses tryToken).
+    function setToken(deps, token) {
+      var s = blank(typeof token === "string" ? token.trim() : null);
+      save(deps, s);
+      return decide(s, deps.now(), null);
+    }
+
+    function clear(deps) { save(deps, blank(null)); }
+
+    function peek(deps) { return decide(load(deps), deps.now(), null); }
+
+    return {
+      decide: decide, validToken: validToken, ensure: ensure, tryToken: tryToken, setToken: setToken,
+      clear: clear, peek: peek,
+      CHECK_URL: CHECK_URL, STORE_KEY: STORE_KEY, CACHE_MS: CACHE_MS, GRACE_MS: GRACE_MS,
+      RETRY_MS: RETRY_MS, INACTIVE_MS: INACTIVE_MS, TIMEOUT_MS: TIMEOUT_MS
+    };
+  })();
+  // ==TSA-LICENSE-END==
+
+  var licenseDeps = {
+    xhr: function (o) { return gmXhr(o); },
+    store: {
+      get: function (k) { return localStorage.getItem(k); },
+      set: function (k, v) { localStorage.setItem(k, v); }
+    },
+    now: function () { return Date.now(); },
+    setTimer: function (fn, ms) { return setTimeout(fn, ms); },
+    clearTimer: function (t) { clearTimeout(t); }
+  };
 
   // Skip alert/signal toasts when the tab isn't actively viewed — the toast
   // TTL would expire before the user returns. Alerts/signals remain
@@ -140,6 +413,7 @@
   }
 
   function scheduleAutoRefresh() {
+    if (licenseLocked) return;   // never re-armed while the licence is locked
     if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
     if (autoRefreshCountdownInterval) { clearInterval(autoRefreshCountdownInterval); autoRefreshCountdownInterval = null; }
     autoRefreshEndTime = null;
@@ -184,6 +458,7 @@
   }
 
   function checkAlerts(raw) {
+    if (licenseLocked) return;   // no alerts from a load that finished after a lock
     if (!raw || !raw.length) return;
     var alerts = loadAlerts();
     if (!alerts.length) return;
@@ -4439,6 +4714,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   // stays in loadData — this only computes scores and renders. recordSignals
   // (inside) dedupes per symbol+minute, so re-rendering is safe.
   function renderFromData(ownedMap, raw, missingBatches, fromCache) {
+    // A load still in flight when the licence locked must not paint over the lock screen.
+    if (licenseLocked) return;
     var content = document.getElementById("tsa-content");
     if (!content) return;
     var ownedSymbols = Object.keys(ownedMap);
@@ -5442,6 +5719,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   // loadData when no cache exists yet (e.g. the light owned-only prefetch
   // sets lastOwnedMap but not lastRaw).
   function renderCached() {
+    if (licenseLocked) { showLicenseLock(); return; }
     if (lastOwnedMap && lastRaw) renderFromData(lastOwnedMap, lastRaw, lastMissingBatches, true);
     else loadData();
   }
@@ -5493,7 +5771,37 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       "</div>";
   }
 
+  // Every load goes through the licence first. With a fresh cached answer this is
+  // synchronous and costs nothing; when a check is due, one request goes to
+  // dossier-api.aec3.org and the load continues (or the lock screen shows) after it.
   function loadData() {
+    var settled = false;
+    var startedBefore = licenseAppStarted;
+    licenseEnsure(false, function (d) {
+      settled = true;
+      if (d.locked) { licenseLockApp(); return; }
+      if (!licenseAppStarted) { licenseStartApp(true); return; }
+      // Another caller sharing this same check (the start-up gate, or an earlier
+      // loadData) started the app and already ran the first full load.
+      if (!startedBefore && _firstLoadKicked) return;
+      loadDataInner();
+    });
+    if (!settled) {
+      var c = document.getElementById("tsa-content");
+      if (c) {
+        c.textContent = "";
+        var l = document.createElement("div");
+        l.className = "tsa-loading";
+        l.textContent = "Checking TSA licence…";
+        c.appendChild(l);
+      }
+    }
+  }
+
+  function loadDataInner() {
+    // A lock bumps licenseGen; every continuation of this load checks it, so a load
+    // still in flight when the licence locks renders, alerts and schedules nothing.
+    var gen = licenseGen;
     cleanOldIntents();
     var content = document.getElementById("tsa-content");
     content.style.background = "var(--tsa-bg)";
@@ -5546,6 +5854,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     // below overwrites this once prices are in.
     var fullRendered = false;
     userPromise.then(function(tornData) {
+      if (gen !== licenseGen) return;
       if (fullRendered) return;              // prices already landed — skip the flash
       if (roiPlannerActive) return;          // don't clobber an open ROI planner
       if (!tornData || tornData.error) return; // real error surfaced by Promise.all below
@@ -5555,6 +5864,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     Promise.all([
       userPromise, t1p, t2p, t3p, t4p, factionPromise, cataloguePromise
     ]).then(function(results) {
+      if (gen !== licenseGen) return;
       fullRendered = true;
       var tornData = results[0];
       var t1 = results[1];
@@ -5683,6 +5993,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       scheduleAutoRefresh();
 
     }).catch(function(e) {
+      if (gen !== licenseGen) return;
       content.innerHTML = "<div class=\"tsa-error\">Error: " + escHtml(e.message) + "</div>" +
         "<div class=\"tsa-footer\"><span id=\"tsa-error-next\" style=\"font-size:var(--tsa-fs-micro)\"><span id='tsa-countdown'></span></span><button class=\"tsa-refresh\" id=\"tsa-refresh-btn\">Retry</button></div>";
       var retryBtn = document.getElementById("tsa-refresh-btn");
@@ -6658,6 +6969,12 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var row1 = document.getElementById("qt-row1");
     var body = document.getElementById("qt-body");
     var pills = document.getElementById("qt-pills");
+    // Locked: no Quick Trade bar and no pills, whatever the settings say.
+    if (licenseLocked) {
+      bar.style.display = "none";
+      if (pills) pills.style.display = "none";
+      return;
+    }
     var showBar = getShowQtBar();
     var hasPills = (lastBuySymbols && lastBuySymbols.length > 0) || (lastSwingPills && lastSwingPills.length > 0) || !!lastBestRec;
     var pillsVisible = hasPills && (showBar || getPillsAlways());
@@ -7834,6 +8151,253 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     });
   }
 
+  // ============================================================
+  // TSA LICENCE — the gate, the lock screen, the Settings line
+  // ============================================================
+  // Built with createElement + textContent throughout: name, renew and expiry come
+  // from the server and are never parsed as HTML.
+  var licenseLocked = true;       // nothing starts until a decision says otherwise
+  var licenseAppStarted = false;
+  var licenseLast = null;         // the last decision, for the lock screen; null = first check still out
+  var licenseGen = 0;             // bumped on every lock; loads started before it are dropped
+  var LICENSE_SITE_URL = "https://dossier.aec3.org";
+
+  function licenseEnsure(force, cb) {
+    return TSALicense.ensure(licenseDeps, force, function (d) {
+      licenseLast = d;
+      licenseLocked = d.locked;
+      cb(d);
+    });
+  }
+
+  // Starts what the licence gates: Quick Trade bar, first load, history warm-up.
+  // fromUser = the user asked for the panel, so load it now whatever the visibility.
+  function licenseStartApp(fromUser) {
+    if (licenseAppStarted) { if (fromUser) loadDataInner(); return; }
+    licenseAppStarted = true;
+    if (!document.getElementById("qt-bar")) createQuickTradeBar();
+    applyQtBarVisibility();
+    if (fromUser) { _firstLoadKicked = true; loadDataInner(); }
+    else initialLoad();
+    // Per-symbol history warm-up. Independent of loadData: it is its own paced
+    // round-robin, and every tick re-checks visibility and the stand-down before
+    // it spends a call.
+    histStart();
+  }
+
+  // Stops everything periodic and hides the Quick Trade bar, then shows the lock.
+  function licenseLockApp() {
+    licenseLocked = true;
+    licenseAppStarted = false;
+    licenseGen++;
+    if (histTimer) { clearInterval(histTimer); histTimer = null; }
+    if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
+    if (autoRefreshCountdownInterval) { clearInterval(autoRefreshCountdownInterval); autoRefreshCountdownInterval = null; }
+    autoRefreshEndTime = null;
+    applyQtBarVisibility();
+    showLicenseLock();
+  }
+
+  function licenseFmtDate(ms) {
+    try {
+      return new Date(ms).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    } catch (e) { return new Date(ms).toISOString(); }
+  }
+
+  function licenseEl(tag, css, text) {
+    var e = document.createElement(tag);
+    if (css) e.style.cssText = css;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  var LICENSE_BTN_PRIMARY = "width:100%;padding:9px;border-radius:var(--tsa-r-2);border:none;background:var(--tsa-accent);color:var(--tsa-on-accent);font-size:var(--tsa-fs-body);font-weight:bold;cursor:pointer";
+  var LICENSE_BTN_SECONDARY = "width:100%;padding:8px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-border);background:none;color:var(--tsa-fg-muted);font-size:var(--tsa-fs-micro);cursor:pointer";
+  var LICENSE_INPUT = "width:100%;box-sizing:border-box;padding:8px 10px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-border);background:var(--tsa-bg-raised);color:var(--tsa-fg);font-size:var(--tsa-fs-micro);font-family:var(--tsa-mono)";
+
+  function licenseReasonText(d) {
+    var s = d.state;
+    switch (d.reason) {
+      case "bad_format": return "That is not a TSA licence key. A key starts with tsa1_ and is 48 characters long.";
+      case "rejected":   return "The key was not accepted: it was revoked, or replaced by a newer key. Get a new key on Dossier.";
+      case "inactive":   return "Your TSA licence has expired" + (s.expires_ts ? " (" + licenseFmtDate(s.expires_ts * 1000) + ")" : "") + ".";
+      case "grace_over": return "Your licence could not be verified for more than 72 hours, because dossier-api.aec3.org could not be reached. TSA unlocks again as soon as a check succeeds.";
+      case "unverified":
+        return s.fail === "rate_limited"
+          ? "Too many licence checks right now. Try again in a few minutes."
+          : "Could not reach dossier-api.aec3.org to check the key. Try again in a few minutes.";
+      default: return "";
+    }
+  }
+
+  // A malformed key is refused locally and never sent. A well-formed one is checked
+  // BEFORE it replaces anything: with TSA open, a key that fails leaves the working
+  // key in place and only says why.
+  function licenseSubmit(value, msgEl, btn) {
+    var val = (value || "").trim();
+    if (!TSALicense.validToken(val)) {
+      msgEl.textContent = "That is not a TSA licence key. A key starts with tsa1_ and is 48 characters long.";
+      msgEl.style.color = "var(--tsa-neg)";
+      return;
+    }
+    msgEl.textContent = "Checking key…";
+    msgEl.style.color = "var(--tsa-fg-muted)";
+    if (btn) btn.disabled = true;
+    TSALicense.tryToken(licenseDeps, val, function (r) {
+      if (btn) btn.disabled = false;
+      if (!r.applied) {
+        msgEl.textContent = licenseReasonText(r.decision) + " Your current key is still in use.";
+        msgEl.style.color = "var(--tsa-neg)";
+        return;
+      }
+      licenseEnsure(false, function (d) {
+        if (d.locked) { licenseLockApp(); return; }
+        showToast("TSA licence active", "success");
+        licenseStartApp(true);
+      });
+    });
+  }
+
+  function showLicenseLock() {
+    var content = document.getElementById("tsa-content");
+    if (!content) return;
+    content.style.background = "var(--tsa-bg)";
+    content.textContent = "";
+    // The first check is still out: say so, rather than guess a reason from the cache.
+    if (!licenseLast) {
+      content.appendChild(licenseEl("div", null, "Checking TSA licence…")).className = "tsa-loading";
+      return;
+    }
+    var d = licenseLast;
+
+    var wrap = licenseEl("div", "padding:18px;background:var(--tsa-bg);font-family:var(--tsa-sans)");
+    wrap.appendChild(licenseEl("div", "font-size:var(--tsa-fs-body);font-weight:bold;color:var(--tsa-fg);margin-bottom:6px", "TSA licence required"));
+    wrap.appendChild(licenseEl("div", "font-size:var(--tsa-fs-micro);color:var(--tsa-fg-muted);margin-bottom:12px;line-height:1.5",
+      "Torn Stock Analyzer needs an active TSA licence. Log in on Dossier, open the user menu → TSA licence, copy the tsa1_… key and paste it below."));
+
+    var why = licenseReasonText(d);
+    if (why) {
+      var box = licenseEl("div", "font-size:var(--tsa-fs-micro);color:var(--tsa-fg);background:var(--tsa-warn-bg);border:1px solid var(--tsa-warn-border);border-radius:var(--tsa-r-2);padding:8px 10px;margin-bottom:12px;line-height:1.5", why);
+      if (d.reason === "inactive" && d.state.renew) {
+        box.appendChild(licenseEl("div", "margin-top:4px;font-weight:bold", "To renew: " + d.state.renew));
+      }
+      wrap.appendChild(box);
+    }
+
+    var link = licenseEl("a", "display:block;text-align:center;padding:8px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-border);color:var(--tsa-accent);font-size:var(--tsa-fs-micro);font-weight:bold;text-decoration:none;margin-bottom:12px", "Open Dossier");
+    link.href = LICENSE_SITE_URL;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    wrap.appendChild(link);
+
+    var input = licenseEl("input", LICENSE_INPUT + ";margin-bottom:8px");
+    input.id = "tsa-license-input";
+    input.type = "text";
+    input.placeholder = "tsa1_…";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    wrap.appendChild(input);
+
+    var msg = licenseEl("div", "font-size:var(--tsa-fs-micro);color:var(--tsa-fg-muted);margin-bottom:8px;min-height:1em;line-height:1.4");
+    msg.setAttribute("aria-live", "polite");
+
+    var save = licenseEl("button", LICENSE_BTN_PRIMARY + ";margin-bottom:8px", "Save");
+    save.id = "tsa-license-save";
+    save.addEventListener("click", function () { licenseSubmit(input.value, msg, save); });
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") licenseSubmit(input.value, msg, save); });
+    wrap.appendChild(save);
+
+    // A saved key that could not be confirmed (offline, expired, rate-limited) can be re-asked by hand.
+    if (TSALicense.validToken(d.state.token)) {
+      var again = licenseEl("button", LICENSE_BTN_SECONDARY + ";margin-bottom:8px", "Check again");
+      again.addEventListener("click", function () {
+        msg.textContent = "Checking key…";
+        msg.style.color = "var(--tsa-fg-muted)";
+        again.disabled = true;
+        licenseEnsure(true, function (d2) {
+          again.disabled = false;
+          if (d2.locked) { licenseLockApp(); return; }
+          licenseStartApp(true);
+        });
+      });
+      wrap.appendChild(again);
+    }
+    wrap.appendChild(msg);
+
+    wrap.appendChild(licenseEl("div", "font-size:var(--tsa-fs-micro);color:var(--tsa-fg-faint);line-height:1.5",
+      "Only this licence key is sent, and only to dossier-api.aec3.org — never your Torn API key. It is checked at most every 12 hours; if Dossier is down, a confirmed licence keeps working for 72 hours."));
+    content.appendChild(wrap);
+  }
+
+  // The Settings → Account line: status plus Change key / Remove.
+  function renderLicenseStatus(host) {
+    if (!host) return;
+    host.textContent = "";
+    var d = TSALicense.peek(licenseDeps);
+    var s = d.state;
+    var line;
+    var expMs = s.expires_ts ? s.expires_ts * 1000 : null;
+    if (!d.locked && expMs != null && expMs <= Date.now()) {
+      // past its end date but not yet re-confirmed (Dossier unreachable): say both
+      line = "Licence period ended " + licenseFmtDate(expMs) + " — waiting for Dossier to confirm a renewal";
+    } else if (!d.locked && d.reason === "grace" && s.fail) {
+      line = "Licence server unreachable — working offline until " + licenseFmtDate(s.ok_ms + TSALicense.GRACE_MS);
+    } else if (!d.locked) {
+      line = s.expires_ts ? "Licence active until " + licenseFmtDate(s.expires_ts * 1000) : "Licence active (no expiry)";
+    } else {
+      line = "Licence not active";
+    }
+    if (s.name) line += " · " + s.name;
+    host.appendChild(licenseEl("div", "font-size:var(--tsa-fs-micro);color:var(--tsa-fg);margin-bottom:6px", line));
+
+    var row = licenseEl("div", "display:flex;gap:8px");
+    var change = licenseEl("button", LICENSE_BTN_SECONDARY + ";flex:1;width:auto", "Change key");
+    var remove = licenseEl("button", LICENSE_BTN_SECONDARY + ";flex:1;width:auto", "Remove");
+    row.appendChild(change);
+    row.appendChild(remove);
+    host.appendChild(row);
+
+    change.addEventListener("click", function () {
+      host.textContent = "";
+      var input = licenseEl("input", LICENSE_INPUT + ";margin-bottom:6px");
+      input.type = "text";
+      input.placeholder = "tsa1_…";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      var msg = licenseEl("div", "font-size:var(--tsa-fs-micro);color:var(--tsa-fg-muted);margin-top:6px;line-height:1.4");
+      msg.setAttribute("aria-live", "polite");
+      var r2 = licenseEl("div", "display:flex;gap:8px");
+      var ok = licenseEl("button", LICENSE_BTN_SECONDARY + ";flex:1;width:auto;color:var(--tsa-accent);font-weight:bold", "Save key");
+      var cancel = licenseEl("button", LICENSE_BTN_SECONDARY + ";flex:1;width:auto", "Cancel");
+      ok.addEventListener("click", function () { licenseSubmit(input.value, msg, ok); });
+      cancel.addEventListener("click", function () { renderLicenseStatus(host); });
+      r2.appendChild(ok);
+      r2.appendChild(cancel);
+      host.appendChild(input);
+      host.appendChild(r2);
+      host.appendChild(msg);
+      input.focus();
+    });
+
+    // Two taps within 4 s, no dialog: removing the key locks TSA at once.
+    var armed = false;
+    remove.addEventListener("click", function () {
+      if (!armed) {
+        armed = true;
+        remove.textContent = "Tap again to remove";
+        remove.style.color = "var(--tsa-neg)";
+        setTimeout(function () {
+          armed = false;
+          remove.textContent = "Remove";
+          remove.style.color = "";
+        }, 4000);
+        return;
+      }
+      TSALicense.clear(licenseDeps);
+      licenseEnsure(false, function () { licenseLockApp(); });
+    });
+  }
+
   function createUI() {
     injectStyles();
     // Extra CSS for v1.8.0 UI features
@@ -7852,8 +8416,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     ].join("\n");
     document.head.appendChild(extraStyle);
 
-    // Create Quick Trade bar embedded in page
-    createQuickTradeBar();
+    // The Quick Trade bar is created by licenseStartApp, once the licence is open.
     var btn = document.createElement("button");
     btn.id = "tsa-btn";
     btn.textContent = "Stocks";
@@ -7892,6 +8455,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     }
 
     document.getElementById("tsa-settings-btn").addEventListener("click", function() {
+      if (licenseLocked) { showLicenseLock(); return; }
       var content = document.getElementById("tsa-content");
       var isDarkNow = overlay.classList.contains("tsa-dark");
       var bg2 = "var(--tsa-bg-raised)";
@@ -8020,6 +8584,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           "<input id=\"tsa-setting-apikey\" type=\"password\" autocomplete=\"off\" value=\"" + (TORN_API_KEY || "") + "\" style=\"" + inputStyle + "\">" +
           "<div style=\"" + hint + "\">Stored in your browser only — never sent anywhere except <code>api.torn.com</code>. Get a key at torn.com/preferences.php#tab=api.</div>" +
         "</div>" +
+        "<div style=\"margin-bottom:12px\">" +
+          "<div style=\"" + labelTitle + "\">TSA licence</div>" +
+          "<div id=\"tsa-license-status\"></div>" +
+        "</div>" +
         "</div>" +
 
         "<div style=\"display:flex;gap:8px\">" +
@@ -8027,6 +8595,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         "<button id=\"tsa-settings-cancel\" style=\"flex:1;padding:8px;border-radius:var(--tsa-r-2);border:1px solid " + border + ";background:none;color:" + muted + ";font-size:var(--tsa-fs-body);cursor:pointer\">Cancel</button>" +
         "</div>" +
         "</div>";
+
+      renderLicenseStatus(document.getElementById("tsa-license-status"));
 
       // Toggle realized options visibility
       document.getElementById("tsa-setting-show-realized").addEventListener("change", function() {
@@ -8127,6 +8697,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     });
 
     document.getElementById("tsa-alerts-btn").addEventListener("click", function() {
+      if (licenseLocked) { showLicenseLock(); return; }
       var content = document.getElementById("tsa-content");
       var bg2 = "var(--tsa-bg-raised)";
       var border = "var(--tsa-border)";
@@ -8185,6 +8756,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     });
 
     document.getElementById("tsa-roi-btn").addEventListener("click", function() {
+      if (licenseLocked) { showLicenseLock(); return; }
       roiPlannerActive = !roiPlannerActive;
       document.getElementById("tsa-roi-btn").style.opacity = roiPlannerActive ? "1" : "0.7";
       if (roiPlannerActive && lastOwnedMap) {
@@ -8286,31 +8858,36 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     if (_uiCreated) return;
     _uiCreated = true;
     createUI();
-    // Populate the panel + Quick pills on load so they appear without opening
-    // TSA. Full load whenever the page isn't a hidden/background tab — we gate
-    // on visibilityState only (NOT isActivelyViewed) because TornPDA's webview
-    // reports document.hasFocus()===false even when the page is on-screen, which
-    // would otherwise block the on-load fetch on PDA. A genuinely backgrounded
-    // tab (visibilityState "hidden") falls through to the light owned-only
-    // prefetch and defers the full load to the focus / visibility handler.
-    (function initialLoad() {
-      var key = getTornKey();
-      if (!key || key === "###PDA-APIKEY###") return;
-      if (document.visibilityState !== "hidden") { _firstLoadKicked = true; loadData(); return; }
-      fetchJSON("https://api.torn.com/user/?selections=stocks&key=" + key)
-        .then(function(tornData) {
-          if (!tornData || tornData.error) return;
-          var map = buildOwnedMap(tornData);
-          enrichOwnedMap(map, null);
-          lastOwnedMap = map;
-          qtUpdateExec(); // refresh swing shares label in QT bar
-        })
-        .catch(function() {});
-    })();
-    // Per-symbol history warm-up. Independent of loadData: it is its own paced
-    // round-robin, and every tick re-checks visibility and the stand-down before
-    // it spends a call.
-    histStart();
+    // The licence decides whether anything else starts. From a fresh cached answer
+    // this is synchronous; otherwise one check to dossier-api.aec3.org runs first.
+    // Locked: only the Stocks button exists, and it opens the lock screen.
+    licenseEnsure(false, function (d) {
+      if (d.locked) { licenseLockApp(); return; }
+      licenseStartApp(false);
+    });
+  }
+
+  // Populate the panel + Quick pills on load so they appear without opening
+  // TSA. Full load whenever the page isn't a hidden/background tab — we gate
+  // on visibilityState only (NOT isActivelyViewed) because TornPDA's webview
+  // reports document.hasFocus()===false even when the page is on-screen, which
+  // would otherwise block the on-load fetch on PDA. A genuinely backgrounded
+  // tab (visibilityState "hidden") falls through to the light owned-only
+  // prefetch and defers the full load to the focus / visibility handler.
+  // Runs only from licenseStartApp, i.e. only with an open licence.
+  function initialLoad() {
+    var key = getTornKey();
+    if (!key || key === "###PDA-APIKEY###") return;
+    if (document.visibilityState !== "hidden") { _firstLoadKicked = true; loadDataInner(); return; }
+    fetchJSON("https://api.torn.com/user/?selections=stocks&key=" + key)
+      .then(function(tornData) {
+        if (!tornData || tornData.error) return;
+        var map = buildOwnedMap(tornData);
+        enrichOwnedMap(map, null);
+        lastOwnedMap = map;
+        qtUpdateExec(); // refresh swing shares label in QT bar
+      })
+      .catch(function() {});
   }
 
   if (document.readyState === "loading") {
@@ -8324,6 +8901,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   // Resume auto-refresh when the page is on screen again. Same gate as the
   // scheduling side — a resume that waits for focus would never fire in PDA.
   function resumeAutoRefreshIfActive() {
+    if (!licenseAppStarted) return;   // locked, or the licence check is still out
     if (!isOnScreen()) return;
     if (!_firstLoadKicked) { _firstLoadKicked = true; loadData(); return; } // first full load (e.g. tab opened in background)
     if (getAutoRefreshInterval() <= 0) return;
