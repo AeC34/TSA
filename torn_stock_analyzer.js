@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.51.0
+// @version      2.51.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Requires a paid TSA licence key from dossier.aec3.org (Xanax); only that key is sent, to dossier-api.aec3.org, to check it — your Torn API key is sent only to api.torn.com.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -8221,7 +8221,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       case "bad_format": return "That is not a TSA licence key. A key starts with tsa1_ and is 48 characters long.";
       case "rejected":   return "The key was not accepted: it was revoked, or replaced by a newer key. Get a new key on Dossier.";
       case "inactive":   return "Your TSA licence has expired" + (s.expires_ts ? " (" + licenseFmtDate(s.expires_ts * 1000) + ")" : "") + ".";
-      case "grace_over": return "Your licence could not be verified for more than 72 hours, because dossier-api.aec3.org could not be reached. TSA unlocks again as soon as a check succeeds.";
+      case "grace_over":
+        return "Your licence could not be verified for more than 72 hours, because dossier-api.aec3.org " +
+          (s.fail === "rate_limited" ? "refused the checks as too many" : "could not be reached") +
+          ". TSA unlocks again as soon as a check succeeds.";
       case "unverified":
         return s.fail === "rate_limited"
           ? "Too many licence checks right now. Try again in a few minutes."
@@ -8341,7 +8344,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       // past its end date but not yet re-confirmed (Dossier unreachable): say both
       line = "Licence period ended " + licenseFmtDate(expMs) + " — waiting for Dossier to confirm a renewal";
     } else if (!d.locked && d.reason === "grace" && s.fail) {
-      line = "Licence server unreachable — working offline until " + licenseFmtDate(s.ok_ms + TSALicense.GRACE_MS);
+      // rate_limited: the server answered "too many checks", it is not down.
+      line = (s.fail === "rate_limited"
+        ? "Licence server busy (too many checks) — using the last confirmed licence until "
+        : "Licence server unreachable — working offline until ") + licenseFmtDate(s.ok_ms + TSALicense.GRACE_MS);
     } else if (!d.locked) {
       line = s.expires_ts ? "Licence active until " + licenseFmtDate(s.expires_ts * 1000) : "Licence active (no expiry)";
     } else {
