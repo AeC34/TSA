@@ -60,7 +60,8 @@ function get(s, name, maxAge = 0) {
 
 const OK = {
   market: { data: [{ stock: "FHG", price: "500.00", interval: { m30: { price: "499" } }, ohlc: {} }], missing_batches: 0, meta: {} },
-  me: { player_id: 7, holdings_status: "ok", stocks: {}, money_onhand: 5, armory: { money_balance: 0, ok: false, as_of: null }, meta: { source_ts: 1 } },
+  // source_ts: polled one minute before T0 (an older poll is "stale", see plan)
+  me: { player_id: 7, holdings_status: "ok", stocks: {}, money_onhand: 5, armory: { money_balance: 0, ok: false, as_of: null }, meta: { source_ts: T0 / 1000 - 60 } },
   history: { symbols: { FHG: { lt: { days: 40 }, lt_ts: 1, h1: { closes: [1], stamps: [1] }, h1_ts: 1 } }, meta: {} },
   reference: { stocks: { 1: { acronym: "TSB" } }, items: { 206: { name: "Xanax", market_value: 800000 } }, meta: {} },
 };
@@ -350,6 +351,118 @@ test("plan: a 200 market with no rows (Dossier cold) is no live market", () => {
   assert.equal(p.dossier, null);
 });
 
+test("plan: an 'ok' /me whose poll is older than 15 min is shown with its time but is not live", () => {
+  const plan = P(setup());
+  const old = (secs) => ({ kind: "ok", body: { ...OK.me, meta: { source_ts: T0 / 1000 - secs } }, ms: T0 });
+  let p = plan(old(15 * 60), okRes("market"), T0);           // exactly 15 min: still live
+  assert.equal(p.holdingsLive, true);
+  assert.equal(p.stale, false);
+  assert.equal(p.meSourceMs, T0 - 15 * 60 * 1000);
+  p = plan(old(15 * 60 + 1), okRes("market"), T0);
+  assert.equal(p.holdingsLive, false);                       // no realized-profit diff from it
+  assert.equal(p.stale, true);
+  assert.equal(p.me.player_id, 7);                           // still shown
+  assert.equal(p.meSourceMs, T0 - (15 * 60 + 1) * 1000);
+  assert.equal(p.dossier, null);
+  // no poll time at all: nothing to judge the age by, so it stays live
+  p = plan({ kind: "ok", body: { ...OK.me, meta: {} }, ms: T0 }, okRes("market"), T0);
+  assert.equal(p.holdingsLive, true);
+  assert.equal(p.meSourceMs, null);
+  // a stored copy carries its poll time too
+  p = plan(errRes("unreachable", { body: OK.me, ms: T0 - 3600000 }), okRes("market"), T0);
+  assert.equal(p.meSourceMs, (T0 / 1000 - 60) * 1000);
+  assert.equal(p.stale, false);                              // not live anyway; the outage banner says so
+});
+
+test("source: the banner states the holdings' poll time and the stale case", () => {
+  assert.match(SRC, /p\.meSourceMs != null \? p\.meSourceMs : p\.meMs/);
+  assert.match(SRC, /if \(p\.stale\) \{\s*parts\.push\("Holdings from " \+ meAt \+ " — Dossier has not polled them since/);
+  assert.match(SRC, /var polledMap = p\.holdingsLive \? buildOwnedMap\(p\.me\) : null;/);
+});
+
+// ---------------------------------------------------------------- what /me leaves in storage
+
+const FULL_ME = {
+  player_id: 7, holdings_status: "ok", money_onhand: 123, name: "Someone", email: "x@y", api_key: "K".repeat(16),
+  armory: { money_balance: 50, ok: true, as_of: 1, faction: "secret" },
+  meta: { source_ts: T0 / 1000 - 60, poller: "internal" },
+  log: [{ title: "Bought shares" }],
+  stocks: {
+    15: { stock_id: 15, total_shares: 100, extra: "x",
+          dividend: { ready: 1, increment: 1, progress: 3, frequency: 7, note: "n" },
+          transactions: { 900: { shares: 100, bought_price: 500, time_bought: 1000, note: "private" } } },
+    25: { stock_id: 25, total_shares: "<b>5</b>", benefit: { increment: 1, progress: 0, frequency: 31 },
+          transactions: { 901: { shares: "5<img src=x onerror=1>", bought_price: "1", time_bought: null } } },
+    "abc": { transactions: { 1: { shares: 1 } } },
+  },
+};
+// as Dossier would send it, with an own "__proto__" holding too (JSON.parse makes it a plain key)
+const FULL_ME_JSON = JSON.stringify(FULL_ME).replace('"abc":', '"__proto__":{"transactions":{"1":{"shares":1}}},"abc":');
+
+test("/me is trimmed on arrival: storage and memory hold only what TSA reads, numbers only", () => {
+  const s = setup();
+  const r = get(s, "me"); s.answer(200, FULL_ME_JSON);
+  const stored = JSON.parse(s.store.get("tsa_dossier_me")).body;
+  for (const b of [stored, JSON.parse(JSON.stringify(r().body))]) {   // out of the vm realm for deepEqual
+    assert.deepEqual(Object.keys(b).sort(), ["armory", "holdings_status", "meta", "money_onhand", "player_id", "stocks"]);
+    assert.deepEqual(b.armory, { ok: true, money_balance: 50 });
+    assert.deepEqual(b.meta, { source_ts: T0 / 1000 - 60 });
+    assert.deepEqual(Object.keys(b.stocks).sort(), ["15", "25"]);
+    assert.deepEqual(b.stocks[15], { stock_id: 15, total_shares: 100,
+      transactions: { 900: { shares: 100, bought_price: 500, time_bought: 1000 } },
+      dividend: { increment: 1, progress: 3, frequency: 7 } });
+    assert.deepEqual(b.stocks[25], { stock_id: 25, total_shares: 0,
+      transactions: { 901: { shares: 0, bought_price: 1, time_bought: 0 } },   // "1" is a number string, kept
+      benefit: { increment: 1, progress: 0, frequency: 31 } });   // no dividend key: still a passive perk
+  }
+  const raw = s.store.get("tsa_dossier_me");
+  for (const leak of ["Someone", "x@y", "KKKK", "secret", "internal", "Bought", "private", "<", "note"]) {
+    assert.equal(raw.includes(leak), false, leak + " stored");
+  }
+});
+
+test("/me stored by an older build is trimmed when read back", () => {
+  const st = memStore({ tsa_license: JSON.stringify({ token: TOKEN }), tsa_dossier_me: "{\"body\":" + FULL_ME_JSON + ",\"ms\":" + (T0 - 60000) + "}" });
+  const s = setup({ store: st });
+  const fb = s.ctx.TSAData.last(s.deps, "me");
+  assert.equal(fb.body.name, undefined);
+  assert.equal(fb.body.stocks[15].transactions[900].note, undefined);
+  assert.equal(fb.ms, T0 - 60000);
+});
+
+test("stored /me lives 6 h, market 24 h; an expired copy is deleted from storage", () => {
+  const s = setup();
+  get(s, "me"); s.answer(200, OK.me);
+  get(s, "market"); s.answer(200, OK.market);
+  assert.equal(s.ctx.TSAData.ME_CACHE_MAX_AGE_MS, 6 * 3600 * 1000);
+  let s2 = setup({ store: s.store, now: T0 + 6 * 3600 * 1000 - 1 });
+  assert.ok(s2.ctx.TSAData.last(s2.deps, "me"));
+  s2 = setup({ store: s.store, now: T0 + 6 * 3600 * 1000 });
+  const me = get(s2, "me"); s2.answer(503, {});
+  assert.equal(me().fallback, null);
+  assert.equal(s.store.get("tsa_dossier_me"), "null");
+  assert.ok(s2.ctx.TSAData.last(s2.deps, "market"));          // the market copy is still there
+  s2 = setup({ store: s.store, now: T0 + 24 * 3600 * 1000 });
+  assert.equal(s2.ctx.TSAData.last(s2.deps, "market"), null);
+  assert.equal(s.store.get("tsa_dossier_market"), "null");
+});
+
+test("purge on start deletes expired /me and trades older than 30 min, keeps the rest", () => {
+  const s = setup();
+  get(s, "me"); s.answer(200, OK.me);
+  get(s, "market"); s.answer(200, OK.market);
+  s.ctx.TSAData.logTrade(s.deps, "FHG", 10, 500);
+  s.ctx.TSAData.purge(s.deps);
+  assert.notEqual(s.store.get("tsa_dossier_me"), "null");
+  assert.equal(s.ctx.TSAData.readLog(s.deps).length, 1);
+  const s2 = setup({ store: s.store, now: T0 + 7 * 3600 * 1000 });
+  s2.ctx.TSAData.purge(s2.deps);
+  assert.equal(s.store.get("tsa_dossier_me"), "null");
+  assert.notEqual(s.store.get("tsa_dossier_market"), "null");
+  assert.equal(s2.ctx.TSAData.readLog(s2.deps).length, 0);
+  assert.match(SRC, /try \{ TSAData\.purge\(licenseDeps\); \} catch \(e\) \{\}/);
+});
+
 // ---------------------------------------------------------------- trade log overlay
 
 const ID = { FHG: 1, SYM: 2 };
@@ -430,7 +543,7 @@ test("source: no Torn API / tornsy call, no Torn key, @connect only dossier-api.
   assert.equal((SRC.match(/getTornKey|TORN_API_KEY|KEY_BUILDER_URL|PDA-APIKEY/g) || []).length, 0);
   const connects = SRC.match(/^\/\/ @connect\s+\S+/gm);
   assert.deepEqual(connects, ["// @connect      dossier-api.aec3.org"]);
-  assert.match(SRC, /^\/\/ @version\s+2\.52\.0$/m);
+  assert.match(SRC, /^\/\/ @version\s+2\.52\.1$/m);
   // the only GM request left is dossierGet's (the licence check builds its own URL)
   const xhrUrls = SRC.match(/url:\s*[^,\n]+/g).map((x) => x.replace(/\s+/g, " "));
   assert.deepEqual(xhrUrls.sort(), ["url: CHECK_URL", "url: DOSSIER_API_BASE + path", "url: url"].sort());

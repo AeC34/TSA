@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.52.0
+// @version      2.52.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Requires a paid TSA licence key from dossier.aec3.org (Xanax) and your Torn API key saved in Dossier: all stock, holdings and history data is read from Dossier. TSA sends only your licence key, only to dossier-api.aec3.org.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -467,15 +467,70 @@
     function hasRows(b) { return !!(b && Array.isArray(b.data) && b.data.length); }
     function isPolled(b) { return !!(b && b.holdings_status === "ok"); }
     function always() { return true; }
+    function same(b) { return b; }
+
+    // The /me body reduced to what TSA reads, every number forced to a finite
+    // number. Applied to every /me answer as it arrives, so the copy kept in
+    // memory and in torn.com's localStorage holds nothing more: per holding the
+    // share count, each lot's shares / buy price / buy time and the benefit
+    // progress; cash; the armoury balance; the poll time. A non-number never
+    // reaches the arithmetic or the page (a string in `shares` would otherwise
+    // concatenate into the rendered figure).
+    // A plain decimal string ("500.5") counts as its number, as /market's prices do;
+    // anything else that is not a finite number is 0 / null.
+    function numOrNull(v) {
+      if (typeof v === "string" && /^-?[0-9]+(\.[0-9]+)?$/.test(v)) v = Number(v);
+      return (typeof v === "number" && isFinite(v)) ? v : null;
+    }
+    function num(v) { var n = numOrNull(v); return n === null ? 0 : n; }
+    function bonusOf(b) {
+      return (b && typeof b === "object") ? { increment: num(b.increment), progress: num(b.progress), frequency: num(b.frequency) } : null;
+    }
+    function trimMe(b) {
+      if (!b || typeof b !== "object") return b;
+      var out = { holdings_status: typeof b.holdings_status === "string" ? b.holdings_status : null,
+                  stocks: {}, money_onhand: numOrNull(b.money_onhand), armory: { ok: false, money_balance: 0 },
+                  meta: { source_ts: numOrNull(b.meta && b.meta.source_ts) } };
+      if (typeof b.player_id === "number") out.player_id = b.player_id;
+      if (b.armory && typeof b.armory === "object") out.armory = { ok: b.armory.ok === true, money_balance: num(b.armory.money_balance) };
+      var src = (b.stocks && typeof b.stocks === "object") ? b.stocks : {};
+      Object.keys(src).forEach(function (id) {
+        var h = src[id];
+        if (!/^[1-9][0-9]{0,4}$/.test(id) || !h || typeof h !== "object") return;
+        var txs = {};
+        var srcTx = (h.transactions && typeof h.transactions === "object") ? h.transactions : {};
+        Object.keys(srcTx).forEach(function (t, i) {
+          var x = srcTx[t];
+          if (!x || typeof x !== "object") return;
+          // "__proto__" would replace txs's prototype instead of adding a lot
+          var ok = /^[A-Za-z0-9_]{1,40}$/.test(t) && t !== "__proto__" && t !== "constructor" && t !== "prototype";
+          txs[ok ? t : "tsa_bad_key_" + i] = { shares: num(x.shares), bought_price: num(x.bought_price), time_bought: num(x.time_bought) };
+        });
+        var c = { stock_id: Number(id), total_shares: num(h.total_shares), transactions: txs };
+        var dv = bonusOf(h.dividend), bn = bonusOf(h.benefit);
+        if (dv) c.dividend = dv;          // presence matters: no `dividend` = a passive perk
+        if (bn) c.benefit = bn;
+        out.stocks[id] = c;
+      });
+      return out;
+    }
+
     var ROUTES = {
-      market:    { path: "/api/tsa/market",    store: "tsa_dossier_market", keep: hasRows },
-      me:        { path: "/api/tsa/me",        store: "tsa_dossier_me",     keep: isPolled },
-      history:   { path: "/api/tsa/history",   store: null, keep: always },
-      reference: { path: "/api/tsa/reference", store: null, keep: always }
+      market:    { path: "/api/tsa/market",    store: "tsa_dossier_market", keep: hasRows,  shape: same,   maxMs: 24 * 3600 * 1000 },
+      me:        { path: "/api/tsa/me",        store: "tsa_dossier_me",     keep: isPolled, shape: trimMe, maxMs: 6 * 3600 * 1000 },
+      history:   { path: "/api/tsa/history",   store: null, keep: always, shape: same, maxMs: 24 * 3600 * 1000 },
+      reference: { path: "/api/tsa/reference", store: null, keep: always, shape: same, maxMs: 24 * 3600 * 1000 }
     };
     var FAIL_WAIT_MS = 5 * 60 * 1000;
     var MARKET_FALLBACK_MAX_MS = 30 * 60 * 1000;   // stored interval snapshots older than this are not scored
-    var CACHE_MAX_AGE_MS = 24 * 3600 * 1000;    // older stored data is not shown at all
+    // Stored data older than its route's maxMs is not shown at all, and is deleted
+    // from storage when found: 24 h for the market (public prices), 6 h for /me
+    // (holdings + cash: kept only long enough to show a Dossier outage through).
+    var CACHE_MAX_AGE_MS = ROUTES.market.maxMs;
+    var ME_CACHE_MAX_AGE_MS = ROUTES.me.maxMs;
+    // Dossier polls holdings every 5 min. A /me whose poll (meta.source_ts) is older
+    // than this is not today's book: shown with its time, never treated as live.
+    var ME_STALE_MS = 15 * 60 * 1000;
     var TRADE_LOG_KEY = "tsa_trade_log";
     var TRADE_LOG_MAX_MS = 30 * 60 * 1000;      // Dossier polls every 5 min; 30 min is a hard cap
     var mem = {};          // name -> {body, ms}
@@ -488,17 +543,24 @@
       if (!r || !r.store) return null;
       try {
         var o = JSON.parse(deps.store.get(r.store) || "null");
-        if (o && typeof o === "object" && typeof o.ms === "number" && o.body && typeof o.body === "object") return o;
+        if (o && typeof o === "object" && typeof o.ms === "number" && o.body && typeof o.body === "object") {
+          return { body: r.shape(o.body), ms: o.ms };
+        }
       } catch (e) {}
       return null;
     }
 
     // The newest answer known for a route, from memory or storage; null if none,
-    // or if it is older than CACHE_MAX_AGE_MS.
+    // or if it is older than the route's maxMs (then it is deleted from storage too).
     function last(deps, name) {
       var m = mem[name] || readStored(deps, name);
       if (!m) return null;
-      if (deps.now() - m.ms >= CACHE_MAX_AGE_MS) return null;
+      var r = ROUTES[name];
+      if (deps.now() - m.ms >= r.maxMs) {
+        if (mem[name] === m) delete mem[name];
+        if (r.store) { try { deps.store.set(r.store, "null"); } catch (e) {} }
+        return null;
+      }
       return m;
     }
 
@@ -536,12 +598,13 @@
           res = { kind: "unreachable", fallback: null, outcome: { kind: "unreachable", error: "stale" } };
         } else if (o.kind === "ok") {
           var t = deps.now();
+          var body = r.shape(o.body);
           delete failUntil[name];
-          if (r.keep(o.body)) {
-            remember(deps, name, o.body, t);
-            res = { kind: "ok", body: o.body, ms: t };
+          if (r.keep(body)) {
+            remember(deps, name, body, t);
+            res = { kind: "ok", body: body, ms: t };
           } else {
-            res = { kind: "ok", body: o.body, ms: t, fallback: last(deps, name) };
+            res = { kind: "ok", body: body, ms: t, fallback: last(deps, name) };
           }
         } else {
           // A 429 waits exactly its Retry-After (the server's number), anything else FAIL_WAIT_MS.
@@ -569,6 +632,15 @@
     }
 
     function resetWaits() { failUntil = {}; }
+
+    // Delete every stored answer past its route's maxMs. Run on start, so holdings
+    // are not left in storage for days by a TSA that is simply not opened.
+    function purge(deps) {
+      Object.keys(ROUTES).forEach(function (n) { if (ROUTES[n].store) last(deps, n); });
+      var nowMs = deps.now(), l = readLog(deps);
+      var keep = l.filter(function (e) { return e && typeof e.ts === "number" && nowMs - e.ts * 1000 < TRADE_LOG_MAX_MS; });
+      if (keep.length !== l.length) { try { deps.store.set(TRADE_LOG_KEY, JSON.stringify(keep)); } catch (e) {} }
+    }
 
     // ---- trade log ----
     function readLog(deps) {
@@ -651,10 +723,14 @@
 
     // ---- what a load does with its two answers ----
     // Pure. meRes / marketRes are get() results, nowMs the clock. Returns
-    //   {lock: "licence"|"key"|null, me, meMs, holdingsLive, warming,
+    //   {lock: "licence"|"key"|null, me, meMs, meSourceMs, holdingsLive, stale, warming,
     //    market, marketMs, marketLive, dossier: null|"throttled"|"unreachable", retryMs}
-    //   holdingsLive  /me answered 200 with holdings_status "ok" just now — the only
-    //                 case in which a holdings DIFF (realized profit) may be booked
+    //   holdingsLive  /me answered 200 with holdings_status "ok" just now AND its
+    //                 poll is younger than ME_STALE_MS — the only case in which a
+    //                 holdings DIFF (realized profit) may be booked
+    //   stale         /me answered "ok", but Dossier's poll of it is older than
+    //                 ME_STALE_MS (its poll has stalled): shown, not live
+    //   meSourceMs    when Dossier polled the holdings shown (meta.source_ts), or null
     //   me            the /me body to show: live, or the stored one, or null
     //   market        the /market body to use: live (with rows), or the stored one if
     //                 it is younger than MARKET_FALLBACK_MAX_MS, or null (page prices)
@@ -666,7 +742,7 @@
       for (var j = 0; j < res.length; j++) {
         if (res[j] && res[j].kind === "key_required") return { lock: "key" };
       }
-      var p = { lock: null, me: null, meMs: null, holdingsLive: false, warming: false,
+      var p = { lock: null, me: null, meMs: null, meSourceMs: null, holdingsLive: false, stale: false, warming: false,
                 market: null, marketMs: null, marketLive: false, dossier: null, retryMs: null };
       function note(r) {
         if (r.kind === "throttled") {
@@ -691,6 +767,12 @@
         note(meRes);
         if (meRes.fallback) { p.me = meRes.fallback.body; p.meMs = meRes.fallback.ms; }
       }
+      var srcTs = p.me && p.me.meta && p.me.meta.source_ts;
+      if (typeof srcTs === "number" && srcTs > 0) p.meSourceMs = srcTs * 1000;
+      if (p.holdingsLive && p.meSourceMs != null && nowMs - p.meSourceMs > ME_STALE_MS) {
+        p.holdingsLive = false;
+        p.stale = true;
+      }
       if (marketRes && marketRes.kind === "ok" && hasRows(marketRes.body)) {
         p.market = marketRes.body; p.marketMs = marketRes.ms; p.marketLive = true;
       } else if (marketRes) {
@@ -702,9 +784,10 @@
     }
 
     return {
-      get: get, last: last, clear: clear, resetWaits: resetWaits, plan: plan,
-      logTrade: logTrade, readLog: readLog, applyTradeLog: applyTradeLog,
-      FAIL_WAIT_MS: FAIL_WAIT_MS, CACHE_MAX_AGE_MS: CACHE_MAX_AGE_MS, TRADE_LOG_MAX_MS: TRADE_LOG_MAX_MS,
+      get: get, last: last, clear: clear, resetWaits: resetWaits, plan: plan, purge: purge,
+      logTrade: logTrade, readLog: readLog, applyTradeLog: applyTradeLog, trimMe: trimMe,
+      FAIL_WAIT_MS: FAIL_WAIT_MS, CACHE_MAX_AGE_MS: CACHE_MAX_AGE_MS, ME_CACHE_MAX_AGE_MS: ME_CACHE_MAX_AGE_MS,
+      ME_STALE_MS: ME_STALE_MS, TRADE_LOG_MAX_MS: TRADE_LOG_MAX_MS,
       MARKET_FALLBACK_MAX_MS: MARKET_FALLBACK_MAX_MS
     };
   })();
@@ -735,6 +818,7 @@
    "tsa_tornsy_throttle_step"].forEach(function (k) {
     try { localStorage.removeItem(k); } catch (e) {}
   });
+  try { TSAData.purge(licenseDeps); } catch (e) {}
   var roiPlannerActive = false;
   var isDesktop = window.innerWidth > 768 || !/Mobi|Android/i.test(navigator.userAgent);
   var autoRefreshTimer = null;
@@ -1699,7 +1783,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   // not stop being true) — expiring it into nothing would drop the whole install
   // back to the hardcoded fallback for one load every 24h.
   var stockCatalogue = (function() {
-    try { return JSON.parse(lsGet("tsa_stock_catalogue", "null")) || null; }
+    try { return safeStockCatalogue(JSON.parse(lsGet("tsa_stock_catalogue", "null"))); }
     catch(e) { return null; }
   })();
 
@@ -1733,9 +1817,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       Object.keys(items).forEach(function(id) {
         var it = items[id];
         var n = parseInt(id, 10);
-        if (!it || typeof it.name !== "string" || !it.name || !(n > 0)) return;
-        byName[it.name] = n;
-        if (typeof it.market_value === "number" && isFinite(it.market_value)) values[it.name] = it.market_value;
+        var name = it ? safeItemName(it.name) : null;
+        if (!name || !(n > 0)) return;
+        byName[name] = n;
+        if (typeof it.market_value === "number" && isFinite(it.market_value)) values[name] = it.market_value;
       });
       if (Object.keys(byName).length) {
         // In place, never reassigned: the maps are read by name all over the file.
@@ -1747,8 +1832,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         lsSet("tsa_item_market_values", JSON.stringify(itemMarketValues));
       }
     }
-    var stocks = body && body.stocks;
-    if (stocks && typeof stocks === "object" && Object.keys(stocks).length) {
+    var stocks = safeStockCatalogue(body && body.stocks);
+    if (stocks) {
       stockCatalogue = stocks;
       lsSet("tsa_stock_catalogue", JSON.stringify(stocks));
       lsSet("tsa_stock_catalogue_ts", String(Date.now()));
@@ -3411,7 +3496,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           if (entry.item) itemName = getItemName(entry.item) || itemName;
         });
         if (stockWeekly > 0) {
-          incomeBreakdown.push(sym + (itemName ? " (" + itemName + ")" : "") + " " + fmRoi(stockWeekly));
+          incomeBreakdown.push(incomeBreakdownHtml(sym, itemName, fmRoi(stockWeekly)));
         }
       });
       if (incomeBreakdown.length > 0) {
@@ -4402,9 +4487,55 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     return parseFloat(lsGet("tsa_stop_loss", "0"));
   }
 
+  // ==TSA-SAFE-BEGIN==
+  // Text from Dossier that can reach the page. TSA runs on www.torn.com, where a
+  // script tag in an item name would run with the user's Torn session (Quick Trade
+  // can POST trades), so nothing Dossier sends is trusted to be plain text: a
+  // string is escaped where it meets HTML, and the names and symbols the rest of
+  // the script builds HTML from are checked once, where they arrive.
+  // The TSA-SAFE markers let the node tests load these unchanged.
   function escHtml(s) {
-    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
   }
+
+  // An item name from /api/tsa/reference: kept only when it is plain text of a
+  // sane length. Torn's own item names use letters, digits, spaces and . , ' & - ( ) :
+  // — none of them is refused here. null = drop the item.
+  function safeItemName(n) {
+    if (typeof n !== "string" || !n || n.length > 80) return null;
+    return /[<>"`\\\u0000-\u001f\u007f]/.test(n) ? null : n;
+  }
+
+  // The stock catalogue (id -> Torn stock object), with every entry whose acronym is
+  // not 2-5 capital letters dropped: the acronym becomes a symbol that the planner,
+  // the tables and the Quick Trade bar all build HTML from. null when none is left.
+  function safeStockCatalogue(stocks) {
+    if (!stocks || typeof stocks !== "object") return null;
+    var out = {};
+    Object.keys(stocks).forEach(function(id) {
+      var s = stocks[id];
+      if (s && typeof s === "object" && typeof s.acronym === "string" && /^[A-Z]{2,5}$/.test(s.acronym)) out[id] = s;
+    });
+    return Object.keys(out).length ? out : null;
+  }
+
+  // A /api/tsa/market body with only the rows of a known symbol (known: SYM -> id).
+  // A row's `stock` is the symbol rendered everywhere; an unknown one is dropped.
+  function safeMarketBody(body, known) {
+    if (!body || !Array.isArray(body.data)) return body;
+    var out = {};
+    for (var k in body) { if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k]; }
+    out.data = body.data.filter(function(r) {
+      return !!r && typeof r === "object" && typeof r.stock === "string" && Object.prototype.hasOwnProperty.call(known, r.stock);
+    });
+    return out;
+  }
+
+  // One entry of the ROI planner's income "Breakdown" line, as HTML.
+  function incomeBreakdownHtml(sym, itemName, amountText) {
+    return escHtml(sym) + (itemName ? " (" + escHtml(itemName) + ")" : "") + " " + escHtml(amountText);
+  }
+  // ==TSA-SAFE-END==
 
   // Dedup identical toasts within 3 seconds. Stops Benefit-Lock-cap and similar
   // warnings from spamming the screen on rapid clicks.
@@ -5735,18 +5866,25 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
 
   // The one status line a load shows about Dossier, as plain text (rendered with
   // escHtml). "" when everything came fresh.
+  // Holdings times are Dossier's poll time (meta.source_ts) when it is known — the
+  // age of the book itself — else the time this browser received them.
   function dataBannerText(p) {
     var parts = [];
+    var meAt = p.me ? dataFmtTime(p.meSourceMs != null ? p.meSourceMs : p.meMs) : null;
     if (p.dossier === "throttled") {
       var secs = p.retryMs != null ? Math.max(1, Math.ceil(p.retryMs / 1000)) : null;
-      parts.push("Dossier throttled — showing the last data" + (secs ? ", next try in " + secs + "s" : ""));
+      parts.push("Dossier throttled — showing the last data" + (secs ? ", next try in " + secs + "s" : "") +
+        (meAt ? ", holdings from " + meAt : ""));
     } else if (p.dossier === "unreachable") {
       parts.push("Dossier unreachable — " + (p.market ? "market from " + dataFmtTime(p.marketMs) + ", prices from page" : "prices from page") +
-        ", " + (p.me ? "holdings from " + dataFmtTime(p.meMs) : "no holdings available"));
+        ", " + (meAt ? "holdings from " + meAt : "no holdings available"));
     }
     if (p.warming) {
       parts.push("Dossier is still loading your holdings (it polls every 5 min)" +
-        (p.me ? " — showing holdings from " + dataFmtTime(p.meMs) : " — try again in a few minutes"));
+        (meAt ? " — showing holdings from " + meAt : " — try again in a few minutes"));
+    }
+    if (p.stale) {
+      parts.push("Holdings from " + meAt + " — Dossier has not polled them since (it normally does every 5 min); not treated as live");
     }
     return parts.join(" · ");
   }
@@ -5868,6 +6006,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       // stored market when that is recent (plan() gives it only under 30 min), so
       // holdings, the ROI planner and the Quick Trade bar never blank out.
       var missingBatches, raw, fromPage = false;
+      if (p.market) p.market = safeMarketBody(p.market, STOCK_SYM_MAP);
       if (p.market && p.marketLive) {
         raw = mergeIntervals([p.market]);
         missingBatches = Math.max(0, Math.min(4, parseInt(p.market.missing_batches, 10) || 0));
@@ -8618,6 +8757,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         "<div style=\"" + section + "\">" +
         "<div style=\"" + sectionH + "\">Account</div>" +
         "<div style=\"" + hint + ";margin:0 0 12px\">TSA reads all its data from Dossier, which uses the Torn API key saved in your Dossier account. TSA sends only your licence key, only to dossier-api.aec3.org.</div>" +
+        "<div style=\"" + hint + ";margin:0 0 12px\">Stored in this browser (torn.com site storage, which other scripts on torn.com can read): your licence key; your holdings as last read from Dossier (shares, buy prices and times per lot), cash and armoury balance, for up to 6 hours (deleted the next time TSA runs after that), so TSA can show them while Dossier is unreachable; public market prices for up to 24 hours; your Quick Trade trades for 30 minutes; for realized profit, one share count and average price per stock and the realized-profit history (until you reset it). Removing the licence key deletes the holdings, cash, trades and share counts.</div>" +
         "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">TSA licence</div>" +
           "<div id=\"tsa-license-status\"></div>" +
