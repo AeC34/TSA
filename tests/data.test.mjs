@@ -543,7 +543,7 @@ test("source: no Torn API / tornsy call, no Torn key, @connect only dossier-api.
   assert.equal((SRC.match(/getTornKey|TORN_API_KEY|KEY_BUILDER_URL|PDA-APIKEY/g) || []).length, 0);
   const connects = SRC.match(/^\/\/ @connect\s+\S+/gm);
   assert.deepEqual(connects, ["// @connect      dossier-api.aec3.org"]);
-  assert.match(SRC, /^\/\/ @version\s+2\.53\.0$/m);
+  assert.match(SRC, /^\/\/ @version\s+2\.53\.1$/m);
   // the only GM request left is dossierGet's (the licence check builds its own URL)
   const xhrUrls = SRC.match(/url:\s*[^,\n]+/g).map((x) => x.replace(/\s+/g, " "));
   assert.deepEqual(xhrUrls.sort(), ["url: CHECK_URL", "url: DOSSIER_API_BASE + path", "url: url"].sort());

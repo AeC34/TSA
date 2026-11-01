@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.53.0
+// @version      2.53.1
 // @author       AeC3
-// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Requires a paid TSA licence key from dossier.aec3.org (Xanax) and your Torn API key saved in Dossier: all stock, holdings and history data is read from Dossier. TSA sends only your licence key, only to dossier-api.aec3.org.
+// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Requires a paid TSA licence key from dossier.aec3.org (Xanax) and your Torn API key saved in Dossier: all stock, holdings and history data is read from Dossier. TSA sends only your licence key, only to dossier-api.aec3.org.
 // @match        https://www.torn.com/page.php?sid=stocks*
 // @run-at       document-end
 // @license      MIT
@@ -819,6 +819,7 @@
     try { localStorage.removeItem(k); } catch (e) {}
   });
   try { TSAData.purge(licenseDeps); } catch (e) {}
+  migrateQtBuySource();
   var roiPlannerActive = false;
   var isDesktop = window.innerWidth > 768 || !/Mobi|Android/i.test(navigator.userAgent);
   var autoRefreshTimer = null;
@@ -4650,6 +4651,21 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   function getShowTop5() {
     return lsGet("tsa_show_top5", "false") === "true";
   }
+  // The Top 5 section is drawn when the toggle is on OR when the Quick Buy pills
+  // come from Top 5: pills must never trade from a list the user cannot see, and
+  // the pin buttons that reorder that list live only in this section.
+  function top5SectionVisible() {
+    return getShowTop5() || getQtBuySource() === "top5";
+  }
+  // One-time reset of the pill source to the Buy zone (2.53.1, owner decision
+  // 2026-11-01). Before 2.53.0 every Settings save wrote "top5" whether or not the
+  // user had picked it, so a stored "top5" says nothing about intent. The marker
+  // makes this run once; a source picked again after it is left alone.
+  function migrateQtBuySource() {
+    if (lsGet("tsa_qt_buy_source_migrated_253", "") === "1") return;
+    lsSet("tsa_qt_buy_source", "buyzone");
+    lsSet("tsa_qt_buy_source_migrated_253", "1");
+  }
   function getTop5MinScore() {
     var v = parseInt(lsGet("tsa_top5_min_score", "35"), 10);
     return isNaN(v) ? 35 : v;
@@ -5070,7 +5086,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           "</div>";
       }
 
-      if (!getShowTop5()) {
+      if (!top5SectionVisible()) {
         // Top 5 section hidden by setting: draw nothing. top5Buy above is still
         // computed and used elsewhere; only this panel is skipped.
       } else if (top5Buy.length > 0) {
@@ -8724,7 +8740,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         "</div>" +
         "<label style=\"" + checkLabel + "\">" +
           "<input type=\"checkbox\" id=\"tsa-setting-show-top5\"" + (getShowTop5() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
-          "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Show Top 5 buy section</span>" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Show Top 5 buy section (always shown while the pill source is Top 5)</span>" +
         "</label>" +
         "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">Min score for Top 5 (0–160)</div>" +
