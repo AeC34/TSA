@@ -1,0 +1,422 @@
+{
+ "ownedMap": {
+  "LAG": {
+   "shares": 800,
+   "swing_shares": 800,
+   "benefit_shares": 0,
+   "avg_price": 250,
+   "time_bought": 1793512800,
+   "has_dividend": false,
+   "has_swing": true,
+   "dividend_progress": 0,
+   "dividend_frequency": 0,
+   "is_passive_perk": true,
+   "dividend_increment": 0,
+   "dividend_next": 0,
+   "transactions": [
+    {
+     "shares": 800,
+     "bought_price": 250,
+     "time_bought": 1793512800
+    }
+   ]
+  },
+  "FHG": {
+   "shares": 2005000,
+   "swing_shares": 5000,
+   "benefit_shares": 2000000,
+   "avg_price": 101.2,
+   "time_bought": 1758974400,
+   "has_dividend": true,
+   "has_swing": true,
+   "dividend_progress": 3,
+   "dividend_frequency": 7,
+   "is_passive_perk": false,
+   "dividend_increment": 1,
+   "dividend_next": 0,
+   "transactions": [
+    {
+     "shares": 5000,
+     "bought_price": 101.2,
+     "time_bought": 1793275200
+    },
+    {
+     "shares": 2000000,
+     "bought_price": 0,
+     "time_bought": 1758974400
+    }
+   ]
+  },
+  "SYM": {
+   "shares": 15000,
+   "swing_shares": 15000,
+   "benefit_shares": 0,
+   "avg_price": 284,
+   "time_bought": 1793361600,
+   "has_dividend": false,
+   "has_swing": true,
+   "dividend_progress": 0,
+   "dividend_frequency": 0,
+   "is_passive_perk": true,
+   "dividend_increment": 0,
+   "dividend_next": 0,
+   "transactions": [
+    {
+     "shares": 3000,
+     "bought_price": 260,
+     "time_bought": 1793448000
+    },
+    {
+     "shares": 12000,
+     "bought_price": 290,
+     "time_bought": 1793361600
+    }
+   ]
+  },
+  "WSU": {
+   "shares": 1000000,
+   "swing_shares": 0,
+   "benefit_shares": 1000000,
+   "avg_price": 60.5,
+   "time_bought": 1785758400,
+   "has_dividend": true,
+   "has_swing": false,
+   "dividend_progress": 0,
+   "dividend_frequency": 7,
+   "is_passive_perk": true,
+   "dividend_increment": 1,
+   "dividend_next": 0,
+   "transactions": [
+    {
+     "shares": 1000000,
+     "bought_price": 60.5,
+     "time_bought": 1785758400
+    }
+   ]
+  }
+ },
+ "scores": [
+  {
+   "symbol": "FHG",
+   "score": 120,
+   "signal": "BUY",
+   "sellSignal": null,
+   "scoreBreakdown": {
+    "drop": 60,
+    "position": 15,
+    "reversal": 30,
+    "macd": 0,
+    "rsi": 15
+   },
+   "sustainedDowntrend": false,
+   "owned": true,
+   "alreadyRallied": false,
+   "rsiOverbought": false,
+   "priceAboveWeek": false,
+   "weekRange": {
+    "high": 110,
+    "low": 90,
+    "fromCandle": true
+   },
+   "has_swing": true,
+   "has_benefit": true,
+   "hasDividend": true,
+   "dividendProgress": 3,
+   "dividendFrequency": 7,
+   "isPassivePerk": false,
+   "p_live": 100,
+   "reasons": "Drop -9.1% | Pos 26% | Active rise | MACD bearish | RSI 35",
+   "netProfitPct": -1.2845849802371512,
+   "hoursHeld": "9600",
+   "shares": 2005000,
+   "avg_price": 101.2,
+   "transactions": [
+    {
+     "shares": 5000,
+     "bought_price": 101.2,
+     "time_bought": 1793275200
+    },
+    {
+     "shares": 2000000,
+     "bought_price": 0,
+     "time_bought": 1758974400
+    }
+   ]
+  },
+  {
+   "symbol": "TSB",
+   "score": 90,
+   "signal": "CONSIDER",
+   "sellSignal": null,
+   "scoreBreakdown": {
+    "drop": 60,
+    "position": 0,
+    "reversal": 15,
+    "macd": 0,
+    "rsi": 15
+   },
+   "sustainedDowntrend": false,
+   "owned": false,
+   "alreadyRallied": false,
+   "rsiOverbought": false,
+   "priceAboveWeek": true,
+   "weekRange": {
+    "high": 147.13,
+    "low": 127.87,
+    "fromCandle": true
+   },
+   "has_swing": false,
+   "has_benefit": false,
+   "hasDividend": false,
+   "dividendProgress": 0,
+   "dividendFrequency": 0,
+   "isPassivePerk": false,
+   "p_live": 137.5,
+   "reasons": "Drop -6.5% | High pos 127% | Rising +0.93% | MACD bearish | RSI 33",
+   "netProfitPct": null,
+   "hoursHeld": null,
+   "shares": 0,
+   "avg_price": 0,
+   "transactions": []
+  },
+  {
+   "symbol": "WSU",
+   "score": 80,
+   "signal": "CONSIDER",
+   "sellSignal": null,
+   "scoreBreakdown": {
+    "drop": 25,
+    "position": 35,
+    "reversal": 5,
+    "macd": 0,
+    "rsi": 15
+   },
+   "sustainedDowntrend": true,
+   "owned": true,
+   "alreadyRallied": false,
+   "rsiOverbought": false,
+   "priceAboveWeek": false,
+   "weekRange": {
+    "high": 182,
+    "low": 168,
+    "fromCandle": true
+   },
+   "has_swing": false,
+   "has_benefit": true,
+   "hasDividend": true,
+   "dividendProgress": 0,
+   "dividendFrequency": 7,
+   "isPassivePerk": true,
+   "p_live": 175,
+   "reasons": "Downtrend (2/3) | Drop -3.8% | Near bottom 0% | Stabilizing | MACD bearish | RSI 33",
+   "netProfitPct": 188.9669421487603,
+   "hoursHeld": "2160",
+   "shares": 1000000,
+   "avg_price": 60.5,
+   "transactions": [
+    {
+     "shares": 1000000,
+     "bought_price": 60.5,
+     "time_bought": 1785758400
+    }
+   ]
+  },
+  {
+   "symbol": "IOU",
+   "score": 90,
+   "signal": "CONSIDER",
+   "sellSignal": null,
+   "scoreBreakdown": {
+    "drop": 40,
+    "position": 5,
+    "reversal": 30,
+    "macd": 0,
+    "rsi": 15
+   },
+   "sustainedDowntrend": false,
+   "owned": false,
+   "alreadyRallied": false,
+   "rsiOverbought": false,
+   "priceAboveWeek": true,
+   "weekRange": {
+    "high": 216.75,
+    "low": 208.25,
+    "fromCandle": true
+   },
+   "has_swing": false,
+   "has_benefit": false,
+   "hasDividend": false,
+   "dividendProgress": 0,
+   "dividendFrequency": 0,
+   "isPassivePerk": false,
+   "p_live": 212.5,
+   "reasons": "Drop -2.0% | Pos 49% | Active rise | MACD bearish | RSI 33",
+   "netProfitPct": null,
+   "hoursHeld": null,
+   "shares": 0,
+   "avg_price": 0,
+   "transactions": []
+  },
+  {
+   "symbol": "SYM",
+   "score": 100,
+   "signal": "BUY",
+   "sellSignal": null,
+   "scoreBreakdown": {
+    "drop": 30,
+    "position": 25,
+    "reversal": 30,
+    "macd": 0,
+    "rsi": 15
+   },
+   "sustainedDowntrend": true,
+   "owned": true,
+   "alreadyRallied": false,
+   "rsiOverbought": false,
+   "priceAboveWeek": false,
+   "weekRange": {
+    "high": 285,
+    "low": 215,
+    "fromCandle": true
+   },
+   "has_swing": true,
+   "has_benefit": false,
+   "hasDividend": false,
+   "dividendProgress": 0,
+   "dividendFrequency": 0,
+   "isPassivePerk": true,
+   "p_live": 250,
+   "reasons": "Downtrend (2/3) | Drop -12.3% | Low pos 20% | Active rise | MACD bearish | RSI 34",
+   "netProfitPct": -12.059859154929578,
+   "hoursHeld": "48",
+   "shares": 15000,
+   "avg_price": 284,
+   "transactions": [
+    {
+     "shares": 3000,
+     "bought_price": 260,
+     "time_bought": 1793448000
+    },
+    {
+     "shares": 12000,
+     "bought_price": 290,
+     "time_bought": 1793361600
+    }
+   ]
+  },
+  {
+   "symbol": "LAG",
+   "score": 72,
+   "signal": "CONSIDER",
+   "sellSignal": "PROFIT",
+   "scoreBreakdown": {
+    "drop": 60,
+    "position": 0,
+    "reversal": 5,
+    "macd": 0,
+    "rsi": 7
+   },
+   "sustainedDowntrend": false,
+   "owned": true,
+   "alreadyRallied": false,
+   "rsiOverbought": false,
+   "priceAboveWeek": true,
+   "weekRange": {
+    "high": 301.88,
+    "low": 273.13,
+    "fromCandle": true
+   },
+   "has_swing": true,
+   "has_benefit": false,
+   "hasDividend": false,
+   "dividendProgress": 0,
+   "dividendFrequency": 0,
+   "isPassivePerk": true,
+   "p_live": 287.5,
+   "reasons": "Drop -4.8% | High pos 111% | Stabilizing | MACD bearish | RSI 36",
+   "netProfitPct": 14.88499999999999,
+   "hoursHeld": "6",
+   "shares": 800,
+   "avg_price": 250,
+   "transactions": [
+    {
+     "shares": 800,
+     "bought_price": 250,
+     "time_bought": 1793512800
+    }
+   ]
+  },
+  {
+   "symbol": "CNC",
+   "score": 72,
+   "signal": "CONSIDER",
+   "sellSignal": null,
+   "scoreBreakdown": {
+    "drop": 60,
+    "position": 0,
+    "reversal": 5,
+    "macd": 0,
+    "rsi": 7
+   },
+   "sustainedDowntrend": false,
+   "owned": false,
+   "alreadyRallied": false,
+   "rsiOverbought": false,
+   "priceAboveWeek": false,
+   "weekRange": {
+    "high": 347.75,
+    "low": 302.25,
+    "fromCandle": true
+   },
+   "has_swing": false,
+   "has_benefit": false,
+   "hasDividend": false,
+   "dividendProgress": 0,
+   "dividendFrequency": 0,
+   "isPassivePerk": false,
+   "p_live": 325,
+   "reasons": "Drop -6.5% | New low — still falling | Stabilizing | MACD bearish | RSI 39",
+   "netProfitPct": null,
+   "hoursHeld": null,
+   "shares": 0,
+   "avg_price": 0,
+   "transactions": []
+  },
+  {
+   "symbol": "PRN",
+   "score": 107,
+   "signal": "CONSIDER",
+   "sellSignal": null,
+   "scoreBreakdown": {
+    "drop": 60,
+    "position": 0,
+    "reversal": 40,
+    "macd": 0,
+    "rsi": 7
+   },
+   "sustainedDowntrend": false,
+   "owned": false,
+   "alreadyRallied": true,
+   "rsiOverbought": false,
+   "priceAboveWeek": true,
+   "weekRange": {
+    "high": 398.75,
+    "low": 326.25,
+    "fromCandle": true
+   },
+   "has_swing": false,
+   "has_benefit": false,
+   "hasDividend": false,
+   "dividendProgress": 0,
+   "dividendFrequency": 0,
+   "isPassivePerk": false,
+   "p_live": 362.5,
+   "reasons": "Drop -9.1% | High pos 123% | Active uptrend (4h) | MACD bearish | RSI 44",
+   "netProfitPct": null,
+   "hoursHeld": null,
+   "shares": 0,
+   "avg_price": 0,
+   "transactions": []
+  }
+ ]
+}

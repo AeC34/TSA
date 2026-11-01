@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.51.3
+// @version      2.52.0
 // @author       AeC3
-// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Requires a paid TSA licence key from dossier.aec3.org (Xanax); only that key is sent, to dossier-api.aec3.org, to check it — your Torn API key is sent only to api.torn.com.
+// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Requires a paid TSA licence key from dossier.aec3.org (Xanax) and your Torn API key saved in Dossier: all stock, holdings and history data is read from Dossier. TSA sends only your licence key, only to dossier-api.aec3.org.
 // @match        https://www.torn.com/page.php?sid=stocks*
 // @run-at       document-end
 // @license      MIT
@@ -11,9 +11,6 @@
 // @antifeature  membership  The licence key is issued to a Dossier account (dossier.aec3.org)
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
-// @connect      tornsy.com
-// @connect      api.torn.com
-// @connect      www.torn.com
 // @connect      dossier-api.aec3.org
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js
 // @updateURL    https://greasyfork.org/scripts/570460/code/Torn%20Stock%20Analyzer.meta.js
@@ -32,20 +29,19 @@
   // Cross-manager XHR adapter. Prefers the legacy GM_xmlhttpRequest (Tampermonkey/
   // Violentmonkey), falls back to the GM4-style GM.xmlHttpRequest (some TornPDA /
   // manager builds expose only this), then a best-effort native fetch (works only
-  // for hosts that send permissive CORS headers, e.g. api.torn.com). typeof guards
-  // avoid the ReferenceError of touching an undefined bare symbol. Same options
-  // object {method,url,headers,onload,onerror} passes straight through to either GM API.
-  // The TSA-NET markers let tests/license.test.mjs load this adapter in node unchanged.
+  // for hosts that send permissive CORS headers). typeof guards avoid the
+  // ReferenceError of touching an undefined bare symbol. Same options object
+  // {method,url,headers,onload,onerror} passes straight through to either GM API.
+  // The TSA-NET markers let the node tests load this adapter unchanged.
   // ==TSA-NET-BEGIN==
   var gmXhrWarned = false;
   function gmXhr(opts) {
     if (typeof GM_xmlhttpRequest !== "undefined") { return GM_xmlhttpRequest(opts); }
     if (typeof GM !== "undefined" && GM && typeof GM.xmlHttpRequest === "function") { return GM.xmlHttpRequest(opts); }
     // TornPDA exposes no GM API, but provides PDA_httpGet, which forwards the
-    // request to native code OUTSIDE the WebView's Content Security Policy. This
-    // is required for tornsy.com — the Torn page CSP's connect-src allows
-    // api.torn.com but blocks tornsy.com, so a page-context fetch to tornsy is
-    // refused. PDA_httpGet returns a Promise resolving to
+    // request to native code OUTSIDE the WebView's Content Security Policy, so a
+    // host the Torn page CSP does not list in connect-src is still reachable.
+    // PDA_httpGet returns a Promise resolving to
     // {responseText, status, statusText, responseHeaders}.
     // GET only — every TSA call site is a GET. Add PDA_httpPost if a POST site is ever introduced.
     // Signature is PDA_httpGet(url, headers = {}) — VERIFIED 2026-10-31 in
@@ -54,17 +50,20 @@
     // headers. Callers without headers send {} — the same as PDA's own default.
     if (typeof PDA_httpGet === "function") {
       PDA_httpGet(opts.url, opts.headers || {})
-        .then(function (r) { if (opts.onload) opts.onload({ responseText: r.responseText, status: r.status }); })
+        .then(function (r) { if (opts.onload) opts.onload({ responseText: r.responseText, status: r.status, responseHeaders: r.responseHeaders }); })
         .catch(function (err) { if (opts.onerror) opts.onerror({ error: String(err) }); });
       return;
     }
-    // Last resort: native fetch. Works for api.torn.com (allowed by the page
-    // CSP) but is CSP-blocked for tornsy.com, so this only fully works in a
-    // regular browser, not inside PDA without PDA_httpGet.
+    // Last resort: native fetch. Subject to the page CSP and to CORS, so it only
+    // reaches a host that allows both; GM_xmlhttpRequest / PDA_httpGet are not.
     if (typeof fetch === "function") {
       fetch(opts.url, opts.headers ? { method: opts.method || "GET", headers: opts.headers } : { method: opts.method || "GET" })
-        .then(function (res) { return res.text().then(function (t) { return { status: res.status, text: t }; }); })
-        .then(function (o) { if (opts.onload) opts.onload({ responseText: o.text, status: o.status }); })
+        .then(function (res) {
+          var hdrs = "";
+          try { if (res.headers && typeof res.headers.forEach === "function") res.headers.forEach(function (v, k) { hdrs += k + ": " + v + "\r\n"; }); } catch (e) {}
+          return res.text().then(function (t) { return { status: res.status, text: t, headers: hdrs }; });
+        })
+        .then(function (o) { if (opts.onload) opts.onload({ responseText: o.text, status: o.status, responseHeaders: o.headers }); })
         .catch(function (err) { if (opts.onerror) opts.onerror({ error: String(err) }); });
       return;
     }
@@ -75,6 +74,112 @@
     }
     if (opts.onerror) opts.onerror({ error: "No XHR API available" });
   }
+
+  // ---- Dossier data client ----
+  // Every byte of data TSA shows comes from these four read-only routes on Dossier,
+  // which already polls Torn and tornsy for its own users. TSA itself makes no call
+  // to Torn's API or to tornsy. The request carries ONLY the TSA licence key, as a
+  // Bearer header, to dossier-api.aec3.org — never a Torn key, never a cookie.
+  //
+  // No retry, by design: a 401/403/429 repeated three times is three wasted hits on
+  // a server that already answered. One request, a 10 s timeout of our own (PDA_httpGet
+  // and fetch have none), and the status mapped to one outcome:
+  //   ok               200 with a JSON object body
+  //   licence_invalid  401 (the licence module's own 401 rule decides what follows)
+  //   licence_inactive 403 {"error":"licence inactive"}
+  //   key_required     403 {"error":"torn key required"} — no usable Torn key in Dossier
+  //   throttled        429; Retry-After is honoured locally: nothing is sent until it passes
+  //   unreachable      anything else: 5xx, network, timeout, an unreadable body
+  var DOSSIER_API_BASE = "https://dossier-api.aec3.org";
+  var DOSSIER_PATHS = ["/api/tsa/market", "/api/tsa/me", "/api/tsa/history", "/api/tsa/reference"];
+  var DOSSIER_TIMEOUT_MS = 10000;
+  var DOSSIER_RETRY_DEFAULT_S = 60;     // a 429 without a readable Retry-After
+  var DOSSIER_RETRY_MAX_S = 3600;       // never trust a Retry-After for longer than this
+  var dossierRetryUntil = 0;            // ms; while now < this, a 429 is answered locally
+
+  // One response header, case-insensitively, from either a raw header block (GM,
+  // fetch) or an object (PDA). "" when absent.
+  function dossierHeader(headers, name) {
+    var want = String(name).toLowerCase();
+    if (!headers) return "";
+    if (typeof headers === "string") {
+      var lines = headers.split(/\r?\n/);
+      for (var i = 0; i < lines.length; i++) {
+        var c = lines[i].indexOf(":");
+        if (c > 0 && lines[i].slice(0, c).trim().toLowerCase() === want) return lines[i].slice(c + 1).trim();
+      }
+      return "";
+    }
+    if (typeof headers === "object") {
+      for (var k in headers) {
+        if (Object.prototype.hasOwnProperty.call(headers, k) && String(k).toLowerCase() === want) {
+          var v = headers[k];
+          return Array.isArray(v) ? String(v[0] == null ? "" : v[0]) : String(v == null ? "" : v);
+        }
+      }
+    }
+    return "";
+  }
+
+  // Pure: (status, parsed body or null, response headers) -> outcome.
+  function dossierClassify(status, body, headers) {
+    var isObj = body !== null && typeof body === "object" && !Array.isArray(body);
+    if (status === 200 && isObj) return { kind: "ok", status: 200, body: body };
+    if (status === 401) return { kind: "licence_invalid", status: 401 };
+    if (status === 403 && isObj && body.error === "licence inactive") return { kind: "licence_inactive", status: 403 };
+    if (status === 403 && isObj && body.error === "torn key required") return { kind: "key_required", status: 403 };
+    if (status === 429) {
+      var ra = parseInt(dossierHeader(headers, "Retry-After"), 10);
+      if (!(ra > 0)) ra = DOSSIER_RETRY_DEFAULT_S;
+      if (ra > DOSSIER_RETRY_MAX_S) ra = DOSSIER_RETRY_MAX_S;
+      return { kind: "throttled", status: 429, retryAfterMs: ra * 1000 };
+    }
+    return { kind: "unreachable", status: status, error: status ? ("http " + status) : "no status" };
+  }
+
+  // GET one /api/tsa/* route. cb(outcome) is called exactly once. deps = the licence deps
+  // ({xhr, store, now, setTimer, clearTimer}); the Bearer token is the stored licence key.
+  function dossierGet(path, cb, deps) {
+    var d = deps || licenseDeps;
+    var done = false, timer = null;
+    function finish(o) {
+      if (done) return;
+      done = true;
+      if (timer != null) { try { d.clearTimer(timer); } catch (e) {} }
+      cb(o);
+    }
+    if (DOSSIER_PATHS.indexOf(path) < 0) { finish({ kind: "unreachable", error: "bad_path" }); return; }
+    var token = null;
+    try { token = TSALicense.peek(d).state.token; } catch (e) { token = null; }
+    // No valid key: nothing to send. The licence module locks on its own rules.
+    if (!TSALicense.validToken(token)) { finish({ kind: "licence_invalid", error: "no_token" }); return; }
+    var now = d.now();
+    if (now < dossierRetryUntil) {
+      finish({ kind: "throttled", retryAfterMs: dossierRetryUntil - now, local: true });
+      return;
+    }
+    timer = d.setTimer(function () { finish({ kind: "unreachable", error: "timeout" }); }, DOSSIER_TIMEOUT_MS);
+    try {
+      d.xhr({
+        method: "GET",
+        url: DOSSIER_API_BASE + path,
+        headers: { "Authorization": "Bearer " + token },
+        anonymous: true,   // no cookies: the server reads only the header
+        timeout: DOSSIER_TIMEOUT_MS,
+        onload: function (r) {
+          var body = null;
+          try { body = JSON.parse(r && r.responseText); } catch (e) { body = null; }
+          var o = dossierClassify(r ? Number(r.status) : 0, body, r && r.responseHeaders);
+          if (o.kind === "throttled") dossierRetryUntil = d.now() + o.retryAfterMs;
+          finish(o);
+        },
+        onerror: function () { finish({ kind: "unreachable", error: "network" }); },
+        ontimeout: function () { finish({ kind: "unreachable", error: "timeout" }); }
+      });
+    } catch (e) {
+      finish({ kind: "unreachable", error: "network" });
+    }
+  }
   // ==TSA-NET-END==
 
   // ============================================================
@@ -82,9 +187,9 @@
   // ============================================================
   // TSA is paid for (Xanax, via Dossier). The user gets a tsa1_ key on
   // dossier.aec3.org (user menu → TSA licence) and pastes it into TSA. Only that
-  // key is ever sent, only to dossier-api.aec3.org, and only in a header: the Torn
-  // API key never leaves api.torn.com. This is an honesty lock, not DRM — the
-  // source is public.
+  // key is ever sent, only to dossier-api.aec3.org, and only in a header. TSA holds
+  // no Torn API key at all: Dossier reads Torn with the key its user saved there.
+  // This is an honesty lock, not DRM — the source is public.
   //
   // decide(state, now, outcome) is pure (no clock, no storage, no network), so the
   // rules can be tested in node: tests/license.test.mjs loads the text between the
@@ -340,6 +445,271 @@
     clearTimer: function (t) { clearTimeout(t); }
   };
 
+  // ============================================================
+  // TSA DATA — the Dossier routes, cached, with their fallbacks
+  // ============================================================
+  // Pure where it can be (plan, applyTradeLog), so tests/data.test.mjs loads the
+  // text between the TSA-DATA markers with vm, beside TSA-NET and TSA-LICENSE.
+  //   - get(): one route; an answer younger than maxAgeMs is reused with no request;
+  //     concurrent callers share one request. /me and /market are also kept in
+  //     storage, so a Dossier outage still has the last holdings and market to show.
+  //   - after a failed history/reference call that route waits FAIL_WAIT_MS before
+  //     it is asked again (the 429 wait is dossierGet's, from Retry-After).
+  //   - plan(): two answers (/me, /market) -> lock licence | lock key | render, and
+  //     what to render from.
+  //   - the trade log: a Quick Trade done here is laid over /me until Dossier's own
+  //     poll is newer than the trade, so a refresh does not "undo" it for ~5 min.
+  // ==TSA-DATA-BEGIN==
+  var TSAData = (function () {
+    // keep(body): whether an answer is worth reusing and storing. A cold Dossier
+    // (market data [], holdings "warming") answers 200 too; storing that would
+    // overwrite the last useful copy with an empty one.
+    function hasRows(b) { return !!(b && Array.isArray(b.data) && b.data.length); }
+    function isPolled(b) { return !!(b && b.holdings_status === "ok"); }
+    function always() { return true; }
+    var ROUTES = {
+      market:    { path: "/api/tsa/market",    store: "tsa_dossier_market", keep: hasRows },
+      me:        { path: "/api/tsa/me",        store: "tsa_dossier_me",     keep: isPolled },
+      history:   { path: "/api/tsa/history",   store: null, keep: always },
+      reference: { path: "/api/tsa/reference", store: null, keep: always }
+    };
+    var FAIL_WAIT_MS = 5 * 60 * 1000;
+    var MARKET_FALLBACK_MAX_MS = 30 * 60 * 1000;   // stored interval snapshots older than this are not scored
+    var CACHE_MAX_AGE_MS = 24 * 3600 * 1000;    // older stored data is not shown at all
+    var TRADE_LOG_KEY = "tsa_trade_log";
+    var TRADE_LOG_MAX_MS = 30 * 60 * 1000;      // Dossier polls every 5 min; 30 min is a hard cap
+    var mem = {};          // name -> {body, ms}
+    var inflight = {};     // name -> [callbacks]
+    var failUntil = {};    // name -> ms
+    var epoch = 0;         // bumped by clear(): an answer to an older request is never kept
+
+    function readStored(deps, name) {
+      var r = ROUTES[name];
+      if (!r || !r.store) return null;
+      try {
+        var o = JSON.parse(deps.store.get(r.store) || "null");
+        if (o && typeof o === "object" && typeof o.ms === "number" && o.body && typeof o.body === "object") return o;
+      } catch (e) {}
+      return null;
+    }
+
+    // The newest answer known for a route, from memory or storage; null if none,
+    // or if it is older than CACHE_MAX_AGE_MS.
+    function last(deps, name) {
+      var m = mem[name] || readStored(deps, name);
+      if (!m) return null;
+      if (deps.now() - m.ms >= CACHE_MAX_AGE_MS) return null;
+      return m;
+    }
+
+    function remember(deps, name, body, ms) {
+      mem[name] = { body: body, ms: ms };
+      var r = ROUTES[name];
+      if (r && r.store) {
+        try { deps.store.set(r.store, JSON.stringify(mem[name])); } catch (e) {}   // a full store only costs the fallback
+      }
+    }
+
+    // cb(res): res = {kind, body?, ms?, cached?, fallback?, outcome?}
+    //   kind "ok"      body = the route's JSON, ms = when it was received; when the
+    //                  body is not worth keeping (see keep), fallback = last(name)
+    //   any other kind the dossierGet outcome kind; fallback = last(name) or null
+    function get(deps, name, maxAgeMs, cb) {
+      var r = ROUTES[name];
+      if (!r) { cb({ kind: "unreachable", fallback: null, outcome: { kind: "unreachable", error: "bad_route" } }); return; }
+      var now = deps.now();
+      var m = mem[name];
+      if (m && maxAgeMs > 0 && now - m.ms < maxAgeMs) { cb({ kind: "ok", body: m.body, ms: m.ms, cached: true }); return; }
+      if (failUntil[name] && now < failUntil[name]) {
+        cb({ kind: "unreachable", fallback: last(deps, name), outcome: { kind: "unreachable", error: "waiting" } });
+        return;
+      }
+      if (inflight[name]) { inflight[name].push(cb); return; }
+      var list = inflight[name] = [cb];
+      var myEpoch = epoch;
+      dossierGet(r.path, function (o) {
+        if (inflight[name] === list) inflight[name] = null;
+        var res;
+        if (myEpoch !== epoch) {
+          // Asked under a licence key that has since been replaced or removed: the
+          // answer may be another account's, so it is neither kept nor passed on.
+          res = { kind: "unreachable", fallback: null, outcome: { kind: "unreachable", error: "stale" } };
+        } else if (o.kind === "ok") {
+          var t = deps.now();
+          delete failUntil[name];
+          if (r.keep(o.body)) {
+            remember(deps, name, o.body, t);
+            res = { kind: "ok", body: o.body, ms: t };
+          } else {
+            res = { kind: "ok", body: o.body, ms: t, fallback: last(deps, name) };
+          }
+        } else {
+          // A 429 waits exactly its Retry-After (the server's number), anything else FAIL_WAIT_MS.
+          if (!r.store && o.kind === "throttled") failUntil[name] = deps.now() + (o.retryAfterMs || FAIL_WAIT_MS);
+          else if (!r.store && o.kind === "unreachable") failUntil[name] = deps.now() + FAIL_WAIT_MS;
+          res = { kind: o.kind, fallback: last(deps, name), outcome: o };
+        }
+        for (var i = 0; i < list.length; i++) list[i](res);
+      }, deps);
+    }
+
+    // Forget everything held for a licence: memory, the stored /me and /market and
+    // the trade log. Called when the licence key changes or is removed, so one
+    // Dossier account's holdings are never shown under another's key.
+    function clear(deps) {
+      mem = {};
+      failUntil = {};
+      inflight = {};
+      epoch++;
+      Object.keys(ROUTES).forEach(function (n) {
+        var st = ROUTES[n].store;
+        if (st) { try { deps.store.set(st, "null"); } catch (e) {} }
+      });
+      try { deps.store.set(TRADE_LOG_KEY, "[]"); } catch (e) {}
+    }
+
+    function resetWaits() { failUntil = {}; }
+
+    // ---- trade log ----
+    function readLog(deps) {
+      try {
+        var l = JSON.parse(deps.store.get(TRADE_LOG_KEY) || "[]");
+        return Array.isArray(l) ? l : [];
+      } catch (e) { return []; }
+    }
+
+    // One executed Quick Trade: delta > 0 bought, < 0 sold. ts in unix seconds.
+    function logTrade(deps, sym, delta, price) {
+      var nowMs = deps.now();
+      var l = readLog(deps).filter(function (e) { return e && nowMs - e.ts * 1000 < TRADE_LOG_MAX_MS; });
+      l.push({ sym: String(sym).toUpperCase(), delta: Math.round(delta), price: price > 0 ? price : 0, ts: Math.floor(nowMs / 1000) });
+      try { deps.store.set(TRADE_LOG_KEY, JSON.stringify(l)); } catch (e) {}
+    }
+
+    // Pure. A copy of /me's body with every logged trade NEWER than its poll
+    // (meta.source_ts) applied to `stocks`, the Torn v1 shape buildOwnedMap reads,
+    // and to `money_onhand`. A buy adds a transaction at its price and costs
+    // shares x price; a sell takes shares from the NEWEST transactions first (the
+    // swing layer TSA's own swing maths takes them from) and pays shares x price x
+    // sellFee. A trade logged without a price moves shares but not cash.
+    // idBySym: SYM -> Torn stock id. The input is never modified.
+    function applyTradeLog(me, log, idBySym, nowMs, sellFee) {
+      if (!me || typeof me !== "object") return me;
+      var src = (me.meta && typeof me.meta.source_ts === "number") ? me.meta.source_ts : 0;
+      var todo = (log || []).filter(function (e) {
+        return e && typeof e.ts === "number" && e.ts > src && nowMs - e.ts * 1000 < TRADE_LOG_MAX_MS &&
+               idBySym[e.sym] != null && typeof e.delta === "number" && e.delta !== 0;
+      });
+      if (!todo.length) return me;
+      var fee = sellFee > 0 ? sellFee : 1;
+      var cash = (typeof me.money_onhand === "number" && isFinite(me.money_onhand)) ? me.money_onhand : null;
+      var out = {};
+      for (var k in me) { if (Object.prototype.hasOwnProperty.call(me, k)) out[k] = me[k]; }
+      var stocks = {};
+      var srcStocks = me.stocks && typeof me.stocks === "object" ? me.stocks : {};
+      Object.keys(srcStocks).forEach(function (id) {
+        var h = srcStocks[id], txs = {};
+        Object.keys((h && h.transactions) || {}).forEach(function (t) {
+          var x = h.transactions[t];
+          txs[t] = { shares: x.shares, bought_price: x.bought_price, time_bought: x.time_bought };
+        });
+        var c = {};
+        for (var f in h) { if (Object.prototype.hasOwnProperty.call(h, f)) c[f] = h[f]; }
+        c.transactions = txs;
+        stocks[id] = c;
+      });
+      todo.forEach(function (e, i) {
+        var id = String(idBySym[e.sym]);
+        var h = stocks[id];
+        if (e.delta > 0) {
+          if (!h) h = stocks[id] = { stock_id: Number(id), total_shares: 0, transactions: {} };
+          h.transactions["tsa_local_" + e.ts + "_" + i] = { shares: e.delta, bought_price: e.price || 0, time_bought: e.ts };
+          h.total_shares = (h.total_shares || 0) + e.delta;
+          if (cash != null && e.price > 0) cash -= e.delta * e.price;
+          return;
+        }
+        if (!h) return;
+        var left = -e.delta;
+        var keys = Object.keys(h.transactions).sort(function (a, b) {
+          return (h.transactions[b].time_bought || 0) - (h.transactions[a].time_bought || 0);
+        });
+        for (var j = 0; j < keys.length && left > 0; j++) {
+          var tx = h.transactions[keys[j]];
+          var take = Math.min(tx.shares || 0, left);
+          tx.shares = (tx.shares || 0) - take;
+          left -= take;
+          if (tx.shares <= 0) delete h.transactions[keys[j]];
+        }
+        h.total_shares = Math.max(0, (h.total_shares || 0) + e.delta + left);
+        if (cash != null && e.price > 0) cash += (-e.delta - left) * e.price * fee;
+        if (!Object.keys(h.transactions).length) delete stocks[id];
+      });
+      out.stocks = stocks;
+      if (cash != null) out.money_onhand = Math.max(0, Math.round(cash));
+      return out;
+    }
+
+    // ---- what a load does with its two answers ----
+    // Pure. meRes / marketRes are get() results, nowMs the clock. Returns
+    //   {lock: "licence"|"key"|null, me, meMs, holdingsLive, warming,
+    //    market, marketMs, marketLive, dossier: null|"throttled"|"unreachable", retryMs}
+    //   holdingsLive  /me answered 200 with holdings_status "ok" just now — the only
+    //                 case in which a holdings DIFF (realized profit) may be booked
+    //   me            the /me body to show: live, or the stored one, or null
+    //   market        the /market body to use: live (with rows), or the stored one if
+    //                 it is younger than MARKET_FALLBACK_MAX_MS, or null (page prices)
+    function plan(meRes, marketRes, nowMs) {
+      var res = [meRes, marketRes];
+      for (var i = 0; i < res.length; i++) {
+        if (res[i] && (res[i].kind === "licence_invalid" || res[i].kind === "licence_inactive")) return { lock: "licence" };
+      }
+      for (var j = 0; j < res.length; j++) {
+        if (res[j] && res[j].kind === "key_required") return { lock: "key" };
+      }
+      var p = { lock: null, me: null, meMs: null, holdingsLive: false, warming: false,
+                market: null, marketMs: null, marketLive: false, dossier: null, retryMs: null };
+      function note(r) {
+        if (r.kind === "throttled") {
+          p.dossier = "throttled";
+          var ra = r.outcome && r.outcome.retryAfterMs;
+          if (ra != null && (p.retryMs == null || ra > p.retryMs)) p.retryMs = ra;
+        } else if (p.dossier !== "throttled") {
+          p.dossier = "unreachable";
+        }
+      }
+      if (meRes && meRes.kind === "ok") {
+        if (meRes.body.holdings_status === "ok") {
+          p.me = meRes.body; p.meMs = meRes.ms; p.holdingsLive = true;
+        } else {
+          // "warming": Dossier has not polled this player since it started. Show the
+          // last holdings known here, if any, and say why they are not fresh.
+          p.warming = true;
+          var fb = meRes.fallback || null;
+          if (fb) { p.me = fb.body; p.meMs = fb.ms; }
+        }
+      } else if (meRes) {
+        note(meRes);
+        if (meRes.fallback) { p.me = meRes.fallback.body; p.meMs = meRes.fallback.ms; }
+      }
+      if (marketRes && marketRes.kind === "ok" && hasRows(marketRes.body)) {
+        p.market = marketRes.body; p.marketMs = marketRes.ms; p.marketLive = true;
+      } else if (marketRes) {
+        if (marketRes.kind !== "ok") note(marketRes);
+        var mf = marketRes.fallback;
+        if (mf && hasRows(mf.body) && nowMs - mf.ms < MARKET_FALLBACK_MAX_MS) { p.market = mf.body; p.marketMs = mf.ms; }
+      }
+      return p;
+    }
+
+    return {
+      get: get, last: last, clear: clear, resetWaits: resetWaits, plan: plan,
+      logTrade: logTrade, readLog: readLog, applyTradeLog: applyTradeLog,
+      FAIL_WAIT_MS: FAIL_WAIT_MS, CACHE_MAX_AGE_MS: CACHE_MAX_AGE_MS, TRADE_LOG_MAX_MS: TRADE_LOG_MAX_MS,
+      MARKET_FALLBACK_MAX_MS: MARKET_FALLBACK_MAX_MS
+    };
+  })();
+  // ==TSA-DATA-END==
+
   // Skip alert/signal toasts when the tab isn't actively viewed — the toast
   // TTL would expire before the user returns. Alerts/signals remain
   // un-consumed and re-fire on the next loadData() when active.
@@ -348,7 +718,7 @@
   // document.hasFocus() === false even while the page is fully on screen (the on-load
   // fetch in createUIOnce has gated on visibilityState alone for exactly this reason),
   // so every hasFocus-gated timer silently never fires there: auto-refresh, price
-  // alerts and the history warm-up all did nothing on the platform the owner actually
+  // alerts and the (since removed) history warm-up all did nothing on the platform the owner actually
   // uses. A hidden tab still fails this test, so the "no background traffic" rule is
   // kept — a page you are looking at is not a background page.
   // Owner decision 2026-08-25: this is the gate for anything periodic.
@@ -356,50 +726,15 @@
     return document.visibilityState !== "hidden";
   }
 
-  var TORN_API_KEY = lsGet("tsa-torn-apikey", "");
-
-  function getTornKey() {
-    return lsGet("tsa-torn-apikey", "");
-  }
-
-  var KEY_BUILDER_URL = "https://www.torn.com/preferences.php#tab=api?step=addNewKey&user=basic,money,stocks&faction=donations&market=itemmarket&title=TORN%20STOCK%20ANALYZER";
-
-  function showKeyOnboarding(contentEl, onSave) {
-    // renders inside #tsa-overlay, so the tokens resolve and switch themselves
-    var bg   = "var(--tsa-bg)";
-    var bg2  = "var(--tsa-bg-raised)";
-    var text = "var(--tsa-fg)";
-    var muted = "var(--tsa-fg-muted)";
-    var border = "var(--tsa-border)";
-    contentEl.innerHTML =
-      "<div style=\"padding:18px;background:" + bg + ";font-family:var(--tsa-sans)\">" +
-        "<div style=\"font-size:var(--tsa-fs-body);font-weight:bold;color:" + text + ";margin-bottom:6px\">API Key Required</div>" +
-        "<div style=\"font-size:var(--tsa-fs-micro);color:" + muted + ";margin-bottom:14px;line-height:1.5\">Torn Stock Analyzer needs a Torn API key to load stock and portfolio data. Your key is stored only in your browser and sent exclusively to api.torn.com.</div>" +
-        "<a href=\"" + KEY_BUILDER_URL + "\" target=\"_blank\" style=\"display:block;text-align:center;padding:10px;border-radius:var(--tsa-r-3);background:var(--tsa-accent);color:var(--tsa-on-accent);font-size:var(--tsa-fs-micro);font-weight:bold;text-decoration:none;margin-bottom:14px\">Create custom key (recommended)</a>" +
-        "<div style=\"font-size:var(--tsa-fs-micro);color:" + muted + ";margin-bottom:6px;text-align:center\">— or enter an existing key below —</div>" +
-        "<div style=\"font-size:var(--tsa-fs-micro);color:" + muted + ";margin-bottom:6px\">Limited Access key or custom key</div>" +
-        "<input id=\"tsa-key-input\" type=\"text\" placeholder=\"Paste API key here\" style=\"width:100%;box-sizing:border-box;padding:8px 10px;border-radius:var(--tsa-r-2);border:1px solid " + border + ";background:" + bg2 + ";color:" + text + ";font-size:var(--tsa-fs-micro);margin-bottom:10px\">" +
-        "<button id=\"tsa-key-save\" style=\"width:100%;padding:9px;border-radius:var(--tsa-r-2);border:none;background:var(--tsa-accent);color:var(--tsa-on-accent);font-size:var(--tsa-fs-body);font-weight:bold;cursor:pointer\">Save key</button>" +
-      "</div>";
-    document.getElementById("tsa-key-save").addEventListener("click", function() {
-      var val = (document.getElementById("tsa-key-input").value || "").trim();
-      if (!val) return;
-      lsSet("tsa-torn-apikey", val);
-      lsSet("tsa_stock_catalogue_fail_ts", "0");   // new key, fresh attempt
-      TORN_API_KEY = val;
-      if (onSave) onSave();
-    });
-  }
-
-  // On load: handle PDA key injection, do NOT prompt — onboarding shown inline when needed
-  if (!TORN_API_KEY || TORN_API_KEY === "###PDA-APIKEY###") {
-    var pdaKey = "###PDA-APIKEY###";
-    if (pdaKey.indexOf("PDA-APIKEY") === -1) {
-      // Running in PDA — key was injected
-      TORN_API_KEY = pdaKey;
-      lsSet("tsa-torn-apikey", TORN_API_KEY);
-    }
-  }
+  // TSA no longer holds a Torn API key (2.52.0): every figure comes from Dossier,
+  // which reads Torn with the key its user saved there. A key an older version
+  // stored is deleted on every start — idempotent, and it is the only place one
+  // could still be sitting. The same goes for markers only the removed direct
+  // Torn/tornsy calls used. Owner decision 2026-11-01 (breaking change approved).
+  ["tsa-torn-apikey", "tsa_stock_catalogue_fail_ts", "tsa_tornsy_blocked_until",
+   "tsa_tornsy_throttle_step"].forEach(function (k) {
+    try { localStorage.removeItem(k); } catch (e) {}
+  });
   var roiPlannerActive = false;
   var isDesktop = window.innerWidth > 768 || !/Mobi|Android/i.test(navigator.userAgent);
   var autoRefreshTimer = null;
@@ -420,7 +755,7 @@
     var mins = getAutoRefreshInterval();
     if (mins <= 0) return;
     // Pause auto-refresh while the tab isn't actively viewed — no point
-    // hitting the API for a panel nobody is looking at. Resumed by the
+    // hitting Dossier for a panel nobody is looking at. Resumed by the
     // visibilitychange / focus listener below, which fires one immediate
     // loadData() that then re-enters this function with a fresh schedule.
     if (!isOnScreen()) return;
@@ -487,7 +822,9 @@
 
   var lastOwnedMap = null;
   var lastRaw = null;
-  var lastMissingBatches = 0; // tornsy batches missing at last load (drives the partial-data banner on cached re-renders)
+  var lastMissingBatches = 0; // interval groups missing at last load (drives the partial-data banner on cached re-renders)
+  var lastPricesFromPage = false; // last load priced from the page (no market data from Dossier)
+  var lastDataBanner = ""; // Dossier status line of the last load (throttled / unreachable / warming); plain text
   var prevLoadPrices = {}; // price baseline from the PREVIOUS real load (trend arrows); cached re-renders must not touch it
   var lastLoadTs = 0; // wall-clock of the last successful fetch — footer "Updated:" stamp (render time would mislabel cached data as fresh)
   var lastBestRec = null; // Best ROI recommendation from last data load
@@ -994,21 +1331,21 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     return Object.prototype.hasOwnProperty.call(roiTierCap, up) ? roiTierCap[up] : Infinity;
   }
   function saveRoiTierCap() { lsSet("tsa_roi_tier_cap", JSON.stringify(roiTierCap)); }
-  var itemPrices = {}; // cache: itemId -> price
-  // itemNames are stable, persist them — saves an API call per id every reload.
+  var itemPrices = {}; // itemId -> value (Torn market_value via Dossier); filled by fillItemValuesFromCatalogue
+  // itemNames are stable, persist them.
   var itemNames = (function() {
     try { return JSON.parse(lsGet("tsa_item_names", "{}")) || {}; }
     catch(e) { return {}; }
   })();
-  // itemIdsByName: name → id reverse map, populated by a one-time
-  // /torn/?selections=items fetch. Used to resolve DYNAMIC_BENEFIT_STOCKS.
+  // itemIdsByName: name → id reverse map, from Dossier's item catalogue
+  // (/api/tsa/reference, daily). Used to resolve DYNAMIC_BENEFIT_STOCKS.
   var itemIdsByName = (function() {
     try { return JSON.parse(lsGet("tsa_item_ids_by_name", "{}")) || {}; }
     catch(e) { return {}; }
   })();
-  // itemMarketValues: name → Torn's official baseline market_value, from the
-  // same items fetch. Used to give synthesised DYNAMIC_BENEFIT_STOCKS entries
-  // a real `payout` so income math has a sensible baseline.
+  // itemMarketValues: name → Torn's official market_value, from the same
+  // catalogue. It is the item value everywhere (itemPrices is filled from it), and
+  // gives synthesised DYNAMIC_BENEFIT_STOCKS entries their `payout`.
   var itemMarketValues = (function() {
     try { return JSON.parse(lsGet("tsa_item_market_values", "{}")) || {}; }
     catch(e) { return {}; }
@@ -1349,24 +1686,15 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     return true;
   }
 
-  // Cached torn/?selections=stocks payload. Benefit requirements are game
-  // mechanics and change ~never, so one call per user per DAY is plenty.
+  // The stock catalogue (Torn's torn/?selections=stocks, as Dossier caches it) and
+  // the item catalogue (names + Torn's market_value), both from Dossier's
+  // /api/tsa/reference. Benefit requirements are game mechanics and change ~never,
+  // so one call per user per DAY is plenty.
   var STOCK_CATALOGUE_TTL_MS = 24 * 60 * 60 * 1000;
-  // NEGATIVE CACHE. A FAILED catalogue call leaves stockCatalogue null, and the TTL
-  // guard below only short-circuits when it is non-null — so without this a key that
-  // cannot read the catalogue would spend one wasted API call on EVERY page load,
-  // for as long as the script is installed. One hour, not 24: the usual cause is a
-  // key missing the `stocks` selection under Torn (error 16, distinct from the
-  // `stocks` selection under User that the holdings call uses), and someone who
-  // ticks that box should not have to wait a day to see it work.
-  var STOCK_CATALOGUE_FAIL_TTL_MS = 60 * 60 * 1000;
-  function catalogueFailedRecently() {
-    var t = parseInt(lsGet("tsa_stock_catalogue_fail_ts", "0"), 10) || 0;
-    return t > 0 && (Date.now() - t) < STOCK_CATALOGUE_FAIL_TTL_MS;
-  }
-  function noteCatalogueFailure() {
-    lsSet("tsa_stock_catalogue_fail_ts", String(Date.now()));
-  }
+  // Dossier answered, but without the stock or the item half (its cache was empty,
+  // e.g. right after a restart): ask again sooner than a day, not on every load.
+  var REFERENCE_PARTIAL_RETRY_MS = 15 * 60 * 1000;
+  var REFERENCE_TS_KEY = "tsa_reference_ts";
   // A cached payload past its TTL is still USED (it triggers a refresh, it does
   // not stop being true) — expiring it into nothing would drop the whole install
   // back to the hardcoded fallback for one load every 24h.
@@ -1381,43 +1709,81 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     catch(e) { return false; }
   }
 
-  // Fetch the catalogue at most once per TTL and install what it yields.
+  // Item names and values for every id the ROI table prices. Item income is valued
+  // at Torn's market_value (a rolling average), not the lowest listing: owner
+  // decision 2026-11-01, so pricing an item costs no call at all.
+  function fillItemValuesFromCatalogue() {
+    var nameById = {};
+    Object.keys(itemIdsByName).forEach(function(n) { nameById[itemIdsByName[n]] = n; });
+    ITEM_IDS.forEach(function(id) {
+      var n = nameById[id];
+      if (!n) return;
+      itemNames[id] = n;
+      if (typeof itemMarketValues[n] === "number") itemPrices[id] = itemMarketValues[n];
+    });
+    lsSet("tsa_item_names", JSON.stringify(itemNames));
+  }
+
+  // Store one /api/tsa/reference body. Either half may be null (Dossier's cache is
+  // empty, e.g. right after a restart); a null half leaves what is held here alone.
+  function applyReference(body) {
+    var items = body && body.items;
+    if (items && typeof items === "object") {
+      var byName = {}, values = {};
+      Object.keys(items).forEach(function(id) {
+        var it = items[id];
+        var n = parseInt(id, 10);
+        if (!it || typeof it.name !== "string" || !it.name || !(n > 0)) return;
+        byName[it.name] = n;
+        if (typeof it.market_value === "number" && isFinite(it.market_value)) values[it.name] = it.market_value;
+      });
+      if (Object.keys(byName).length) {
+        // In place, never reassigned: the maps are read by name all over the file.
+        Object.keys(itemIdsByName).forEach(function(k) { delete itemIdsByName[k]; });
+        Object.keys(itemMarketValues).forEach(function(k) { delete itemMarketValues[k]; });
+        Object.keys(byName).forEach(function(k) { itemIdsByName[k] = byName[k]; });
+        Object.keys(values).forEach(function(k) { itemMarketValues[k] = values[k]; });
+        lsSet("tsa_item_ids_by_name", JSON.stringify(itemIdsByName));
+        lsSet("tsa_item_market_values", JSON.stringify(itemMarketValues));
+      }
+    }
+    var stocks = body && body.stocks;
+    if (stocks && typeof stocks === "object" && Object.keys(stocks).length) {
+      stockCatalogue = stocks;
+      lsSet("tsa_stock_catalogue", JSON.stringify(stocks));
+      lsSet("tsa_stock_catalogue_ts", String(Date.now()));
+    }
+  }
+
+  // Fetch the reference at most once per TTL and install what it yields.
   // Never rejects: a failed call resolves false and the current tables stand.
   function refreshStockCatalogue() {
-    var ts = parseInt(lsGet("tsa_stock_catalogue_ts", "0"), 10) || 0;
-    if (stockCatalogue && (Date.now() - ts) < STOCK_CATALOGUE_TTL_MS) {
+    var ts = parseInt(lsGet(REFERENCE_TS_KEY, "0"), 10) || 0;
+    var complete = !!stockCatalogue && Object.keys(itemIdsByName).length > 0;
+    var ttl = complete ? STOCK_CATALOGUE_TTL_MS : REFERENCE_PARTIAL_RETRY_MS;
+    if ((Date.now() - ts) < ttl) {
+      if (!stockCatalogue) benefitTableStatus = "hardcoded (Dossier has no catalogue yet)";
       return Promise.resolve(false);
     }
-    if (!stockCatalogue && catalogueFailedRecently()) {
-      benefitTableStatus = "hardcoded (catalogue not readable by this key)";
-      return Promise.resolve(false);
-    }
-    var key = getTornKey();
-    if (!key) { benefitTableStatus = "hardcoded (no API key)"; return Promise.resolve(false); }
-    return fetchJSON("https://api.torn.com/torn/?selections=stocks&key=" + key)
-      .then(function(d) {
-        if (!d || d.error || !d.stocks) {
-          var code = (d && d.error) ? (parseInt(d.error.code, 10) || 0) : 0;
-          noteCatalogueFailure();
-          // 16 is the one worth naming: the key is valid but lacks the `stocks`
-          // selection under Torn. Ticking it is a one-click fix the user can make,
-          // so say so instead of printing a bare number.
-          benefitTableStatus = (code === 16)
-            ? "hardcoded (key lacks Torn>stocks)"
-            : ("hardcoded (catalogue call: " + (code ? ("error " + code) : "no stocks in body") + ")");
-          return false;
+    return new Promise(function(resolve) {
+      TSAData.get(licenseDeps, "reference", 0, function(res) {
+        if (res.kind !== "ok") {
+          if (!stockCatalogue) benefitTableStatus = "hardcoded (Dossier catalogue unavailable)";
+          resolve(false);
+          return;
         }
-        stockCatalogue = d.stocks;
-        lsSet("tsa_stock_catalogue_fail_ts", "0");
-        lsSet("tsa_stock_catalogue", JSON.stringify(d.stocks));
-        lsSet("tsa_stock_catalogue_ts", String(Date.now()));
-        return applyStockCatalogue();
-      })
-      .catch(function(e) {
-        noteCatalogueFailure();
-        benefitTableStatus = "hardcoded (catalogue call threw)";
-        return false;
+        // Stamped whatever the body held: an empty answer is still an answer, and the
+        // TTL above decides how soon an incomplete one is asked for again.
+        lsSet(REFERENCE_TS_KEY, String(Date.now()));
+        try { applyReference(res.body); } catch (e) {}
+        if (!stockCatalogue) {
+          benefitTableStatus = "hardcoded (Dossier has no catalogue yet)";
+          resolve(false);
+          return;
+        }
+        resolve(applyStockCatalogue());
       });
+    });
   }
 
   // Warm-cache install, before anything reads the tables. On a cold profile both
@@ -1426,47 +1792,29 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   applyStockCatalogue();
 
   // ============================================================
-  // PER-SYMBOL TORNSY HISTORY — FETCH LAYER ONLY
+  // PER-SYMBOL HISTORY — FROM DOSSIER'S /api/tsa/history
   // ============================================================
-  // Two endpoints, one symbol per call. Shape VERIFIED 2026-08-25 against
-  // ~/.claude/Torn-API-fixtures/tornsy_per_symbol_20260825.md:
-  //   /api/{SYM}?interval=d1&limit=2000  -> 1956 rows, 5.36 years, 125 KB
-  //   /api/{SYM}?interval=h1&limit=200   -> 200 rows, 8.3 days, 13 KB
-  // The body is {"data": [[ts, open, high, low, close, total_shares], ...]},
-  // OLDEST FIRST, and nothing else: no status, no metadata, no symbol echo. So a
-  // response is only ever keyed by the symbol we asked for.
+  // Two summaries per symbol, both computed by Dossier from tornsy's per-symbol
+  // series (signals.py long_term_context / band_streak — the functions TSA's own
+  // warm-up used to port) and served as they are:
+  //   lt  the long-term summary: days, first_ts, all_time_high/low,
+  //       position_all_time, vs_year_ago, month/quarter/year {high, low, position},
+  //       band_days, and price (the basis every position was measured against)
+  //   h1  the last 200 hourly closes with their stamps
+  // TSA used to fetch these itself, 70 calls per warm-up on a paced timer. It now
+  // asks Dossier at most every HIST_REFRESH_MS, inside a load — so there is no timer,
+  // and nothing here can outlive a licence.
   //
-  // Three traps, all of them silent:
-  //   ts is unix SECONDS, not ms.
-  //   open/high/low/close are STRINGS — parseFloat every one, reject 0/NaN.
-  //   `limit` is not a row count (2000 asked, 1956 returned: the daily series has
-  //   real holes), so a date is read off ts and NEVER derived from an index.
-  //
-  // This block fetches, derives, stores. It has NO consumer yet — nothing here
-  // feeds calcScore, a buy zone or an indicator. Its only outputs are the three
-  // readiness flags and one status string.
-  //
-  // The SERIES IS NEVER STORED: 125 KB x 35 symbols = 4.4 MB against a ~5 MB
-  // localStorage ceiling that TSA already degrades price history to stay under.
-  // Parse, derive, discard — d1 leaves a ~200 B summary, h1 leaves 200 closes.
+  // Nothing here feeds calcScore. Its outputs are the stores below, the readiness
+  // flags (the buy zone reads d1_ok) and one status string.
 
   // The band, defined HERE because this is where it is measured. DIP_MAX_POS below
   // reads this value instead of repeating the number — the streak and the position
   // must always judge the same band, and two literals would eventually disagree.
   var HIST_BAND_PCT = 10;
-  var HIST_D1_MAX_AGE_MS = 86400 * 1000;   // daily candles move once a day
-  var HIST_H1_MAX_AGE_MS = 21600 * 1000;   // six-hourly, same gates as dossier
-  var HIST_TICK_MS       = 3000;           // warm-up cadence: one call per 3 s
-  var HIST_MIN_GAP_MS    = 2000;           // HARD FLOOR between calls
-  var HIST_MAX_IN_FLIGHT = 1;              // tornsy's own client is one-at-a-time
-  var HIST_ERR_BACKOFF_MS     = 3000;      // ordinary error: exponential from here
-  var HIST_ERR_BACKOFF_MAX_MS = 300000;
-  // Stand-down rungs in SECONDS, one probe call per rung. Copied from dossier's
-  // TornsyClient. We NEVER ramp faster than HIST_TICK_MS on a success streak:
-  // additive increase is the direction that trips a throttle, and tornsy
-  // publishes no limit, so there is no safe number to increase towards.
-  var HIST_THROTTLE_LADDER = [120, 300, 900, 1800];
-  var HIST_D1_LIMIT = 2000, HIST_H1_LIMIT = 200;
+  var HIST_REFRESH_MS    = 30 * 60 * 1000;   // /api/tsa/history at most this often
+  var HIST_WAIT_MS       = 2000;             // a load waits for it this long, no longer
+  var HIST_H1_LIMIT      = 200;
   var HIST_H1_MIN_CLOSES = 35;             // MACD/RSI need this many points
   var HIST_D1_MIN_ROWS   = 30;             // 30-day window
   var HIST_D1_YEAR_ROWS  = 365;            // vs_year_ago + the year window
@@ -1479,8 +1827,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   var HIST_LT_TS_KEY = "tsa_lt_context_ts";
   var HIST_H1_KEY    = "tsa_h1_closes";
   var HIST_H1_TS_KEY = "tsa_h1_closes_ts";
-  var HIST_BLOCK_KEY = "tsa_tornsy_blocked_until";
-  var HIST_STEP_KEY  = "tsa_tornsy_throttle_step";
+  var HIST_FETCH_KEY = "tsa_hist_fetch_ts";
 
   function histLoadMap(key) {
     try { return JSON.parse(lsGet(key, "{}")) || {}; } catch (e) { return {}; }
@@ -1488,357 +1835,93 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   function histSaveMap(key, obj) { lsSet(key, JSON.stringify(obj)); }
 
   var histLtStore = histLoadMap(HIST_LT_KEY);   // SYM -> long-term summary
-  var histLtTs    = histLoadMap(HIST_LT_TS_KEY); // SYM -> ms of last d1 fetch
+  var histLtTs    = histLoadMap(HIST_LT_TS_KEY); // SYM -> ms Dossier fetched that symbol's daily series
   var histH1Store = histLoadMap(HIST_H1_KEY);   // SYM -> {closes, stamps}
-  var histH1Ts    = histLoadMap(HIST_H1_TS_KEY); // SYM -> ms of last h1 fetch
+  var histH1Ts    = histLoadMap(HIST_H1_TS_KEY); // SYM -> ms Dossier fetched that symbol's hourly series
 
   function histNum(v) { var n = parseFloat(v); return isFinite(n) ? n : 0; }
 
-  // Rows exactly as long_term_context receives them in dossier (_fetch_daily):
-  // length-filtered only. The >0 filters live INSIDE the derivations, as they do
-  // there, so `days` counts the same rows on both sides of the port.
-  function histRawRows(data) {
-    if (!data || !Array.isArray(data.data)) return null;
-    return data.data.filter(function(r) { return Array.isArray(r) && r.length >= 5; });
-  }
-
-  function histNewestClose(rows) {
-    for (var i = rows.length - 1; i >= 0; i--) {
-      var c = histNum(rows[i][4]);
-      if (c > 0) return c;
-    }
-    return 0;
-  }
-
-  // Close from `days` CALENDAR days before the newest row, located by ts. Port of
-  // signals.py `_close_days_back`, including why it cannot be `closes[-days]`:
-  // the last element is today, so day N back is index -(N+1), AND tornsy's daily
-  // series has real holes, so N rows back is not N days back. Returns null when
-  // nothing sits within tolDays of the target rather than quietly substituting a
-  // row from another month.
-  function histCloseDaysBack(rows, days, tolDays) {
-    if (tolDays === undefined) tolDays = 7;
-    if (!rows || !rows.length) return null;
-    var usable = rows.filter(function(r) {
-      return r.length >= 5 && histNum(r[4]) > 0 && typeof r[0] === "number";
-    });
-    if (!usable.length) return null;
-    var target = usable[usable.length - 1][0] - days * 86400;
-    var best = usable[0], bestD = Math.abs(usable[0][0] - target);
-    for (var i = 1; i < usable.length; i++) {
-      var d = Math.abs(usable[i][0] - target);
-      if (d < bestD) { best = usable[i]; bestD = d; }
-    }
-    if (bestD > tolDays * 86400) return null;
-    return histNum(best[4]);
-  }
-
-  function histPctVs(price, ref) {
-    if (!ref || ref <= 0 || !price || price <= 0) return null;
-    return (price / ref - 1) * 100;
-  }
-
-  // Position in the last N ROWS' range. The window size is in ROWS, matching
-  // long_term_context.window(30) — the side that must not move, because the
-  // dossier zone result is backtested on it. Too short a series returns null.
-  function histWindow(rows, price, days) {
-    if (!rows || rows.length < days) return null;
-    var hi = 0, lo = 0, seenHi = false, seenLo = false;
-    for (var i = rows.length - days; i < rows.length; i++) {
-      var r = rows[i];
-      if (r.length < 5) continue;
-      var h = histNum(r[2]), l = histNum(r[3]);
-      if (h > 0 && (!seenHi || h > hi)) { hi = h; seenHi = true; }
-      if (l > 0 && (!seenLo || l < lo)) { lo = l; seenLo = true; }
-    }
-    if (!seenHi || !seenLo) return null;
-    var rng = hi - lo;
-    return { high: hi, low: lo,
-             position: rng > 0 ? ((price - lo) / rng * 100) : null };
-  }
-
-
-  // Port of signals.py `long_term_context` — same field names, same maths. The
-  // mirror shares the original's computation instead of re-deriving the numbers
-  // a second way. Deliberately NOT folded into calcScore: that function is a
-  // faithful port whose only purpose is to agree with dossier number for number,
-  // and feeding it inputs it never had would make the cross-check meaningless.
-  // CONSECUTIVE DAYS CLOSED IN THE BOTTOM `threshold`% OF THE OWN TRAILING RANGE —
-  // "how long has this been cheap". Port of the reference implementation's
-  // band_streak, and the reason it can exist here at all is that `rows` is in hand
-  // at derive time: only the STORAGE of the series is given up, not the access.
-  // The result is one integer in the ~200 B summary, so it costs no space and no
-  // extra call.
+  // Store one /api/tsa/history body. A symbol missing from a NON-EMPTY answer is
+  // dropped here too (Dossier no longer has a basis for it); an empty answer —
+  // Dossier cold after a restart — leaves everything held here alone.
   //
-  // 🪤 The window is 30 ROWS, not 31 — `rows.slice(i - 29, i + 1)` — so it measures
-  // the same interval as the 30-day window in the summary. When the two disagreed,
-  // a stock could sit in the zone while its streak read 0, showing WAIT where BUY
-  // belonged (136 of 68,198 day-symbols in the reference measurement).
-  //
-  // 🪤 Judged on the CLOSE, never on the live price. A past day only ever had a
-  // close to be judged on; mixing the two makes the streak mean different things at
-  // its two ends. 0 when the newest close sits outside the band, which the UI reads
-  // as "new" — the honest gap between a price that moved today and a finished day.
-  function histBandStreak(rows, threshold, lookback) {
-    var th = (threshold === undefined) ? HIST_BAND_PCT : threshold;
-    var lb = (lookback === undefined) ? 30 : lookback;
-    var back = lb - 1;
-    if (!rows || rows.length < lb) return 0;
-    var streak = 0;
-    for (var i = rows.length - 1; i >= back; i--) {
-      var row = rows[i];
-      // A short row must break, not throw: a raise here would drop the whole stock.
-      if (!row || row.length < 5) break;
-      var close = histNum(row[4]);
-      // Highs and lows are tracked with SEPARATE seen-flags, exactly as the Python
-      // builds `his` and `los` as two independently >0-filtered lists. One shared
-      // flag is a silent defect: a row with a high but a zero low would set the
-      // flag with `lo` still 0, and every later min() against 0 keeps it there —
-      // the position then measures against a low of zero. `histRawRows` filters on
-      // length only, so a zero low is reachable, not hypothetical.
-      var hi = 0, lo = 0, seenHi = false, seenLo = false;
-      for (var j = i - back; j <= i; j++) {
-        var w = rows[j];
-        if (!w || w.length < 5) continue;
-        var h = histNum(w[2]), l = histNum(w[3]);
-        if (h > 0 && (!seenHi || h > hi)) { hi = h; seenHi = true; }
-        if (l > 0 && (!seenLo || l < lo)) { lo = l; seenLo = true; }
+  // The *_ts stores take Dossier's own fetch time, not the time this answer
+  // arrived: dipNotePrice records one price point per distinct d1 stamp, so the
+  // stamp must move on the daily-candle cadence, never on how often TSA asks.
+  // A null stamp (Dossier's design mode) keeps the stamp held here.
+  function histApply(body) {
+    var syms = body && body.symbols;
+    if (!syms || typeof syms !== "object") return 0;
+    var known = STOCKS_LIST.map(function(x) { return String(x).toUpperCase(); });
+    var keys = Object.keys(syms);
+    if (!keys.length) return 0;
+    var seen = {}, n = 0;
+    keys.forEach(function(k) {
+      var s = String(k).toUpperCase();
+      var e = syms[k];
+      if (known.indexOf(s) < 0 || !e || typeof e !== "object") return;
+      seen[s] = true;
+      if (e.lt && typeof e.lt === "object") {
+        histLtStore[s] = e.lt;
+        if (typeof e.lt_ts === "number" && e.lt_ts > 0) histLtTs[s] = e.lt_ts * 1000;
+      } else {
+        delete histLtStore[s];
+        delete histLtTs[s];
       }
-      // Python: `if not close or not his or not los: break`, then `if hi <= lo`.
-      if (!(close > 0) || !seenHi || !seenLo || !(hi > lo)) break;
-      if ((close - lo) / (hi - lo) * 100 > th) break;
-      streak++;
-    }
-    return streak;
-  }
-
-  function histLongTermContext(price, rows) {
-    if (!rows || !rows.length || !(price > 0)) return null;
-    var ath = 0, atl = 0, seenHi = false, seenLo = false, seenClose = false;
-    for (var i = 0; i < rows.length; i++) {
-      var r = rows[i];
-      if (r.length < 5) continue;
-      var h = histNum(r[2]), l = histNum(r[3]), c = histNum(r[4]);
-      if (h > 0 && (!seenHi || h > ath)) { ath = h; seenHi = true; }
-      if (l > 0 && (!seenLo || l < atl)) { atl = l; seenLo = true; }
-      if (c > 0) seenClose = true;
-    }
-    if (!seenHi || !seenLo || !seenClose) return null;
-    var span = ath - atl;
-    return {
-      days: rows.length,
-      first_ts: rows[0][0],
-      all_time_high: ath,
-      all_time_low: atl,
-      position_all_time: span > 0 ? ((price - atl) / span * 100) : null,
-      vs_year_ago: histPctVs(price, histCloseDaysBack(rows, 365)),
-      month:   histWindow(rows, price, 30),
-      // The buy zone's second gate, measured on the same band and the same 30-row
-      // window as `month` above — HIST_BAND_PCT and HIST_D1_MIN_ROWS are passed
-      // explicitly so the two halves of one signal cannot drift apart.
-      band_days: histBandStreak(rows, HIST_BAND_PCT, HIST_D1_MIN_ROWS),
-      quarter: histWindow(rows, price, 90),
-      year:    histWindow(rows, price, 365),
-      // The price every position above was measured against. Kept so a consumer
-      // can re-derive a position from high/low with a fresher price instead of
-      // reading a stale one as current — the basis has to be visible for that.
-      price: price
-    };
-  }
-
-  // h1: only the closes and their stamps survive — 200 floats, ~2 KB per symbol.
-  // Mirrors _fetch_candles' close>0 filter so closes and stamps line up index
-  // for index. total_shares is dropped: it is shares outstanding, not volume,
-  // and nothing here reads it.
-  function histH1Closes(rows) {
-    if (!rows) return null;
-    var closes = [], stamps = [];
-    for (var i = 0; i < rows.length; i++) {
-      var c = histNum(rows[i][4]);
-      if (c <= 0) continue;
-      closes.push(c);
-      stamps.push(rows[i][0]);
-    }
-    return closes.length ? { closes: closes, stamps: stamps } : null;
-  }
-
-  // -- rate discipline -------------------------------------------------------
-  // blocked_until is PERSISTED, unlike dossier's in-memory equivalent: dossier's
-  // process outlives a stand-down, a browser tab does not. Without this, a
-  // reload resets the stand-down and goes straight back to hammering an IP that
-  // was just blocked.
-  function histBlockedUntil() { return parseInt(lsGet(HIST_BLOCK_KEY, "0"), 10) || 0; }
-  function histThrottleStep() { return parseInt(lsGet(HIST_STEP_KEY, "0"), 10) || 0; }
-
-  var histInFlight = 0;
-  var histLastCallTs = 0;
-  var histBackoffUntil = 0;   // ordinary-error backoff; in memory on purpose
-  var histBackoffMs = 0;
-  var histD1Cursor = 0, histH1Cursor = 0;
-  var histTimer = null;
-
-  function histNoteThrottle(now) {
-    var step = histThrottleStep();
-    var rung = HIST_THROTTLE_LADDER[Math.min(step, HIST_THROTTLE_LADDER.length - 1)];
-    lsSet(HIST_BLOCK_KEY, String(now + rung * 1000));
-    lsSet(HIST_STEP_KEY, String(step + 1));
-    histRecomputeStatus(now);
-  }
-
-  function histNoteSuccess() {
-    lsSet(HIST_BLOCK_KEY, "0");
-    lsSet(HIST_STEP_KEY, "0");
-    histBackoffUntil = 0;
-    histBackoffMs = 0;
-  }
-
-  function histNoteError(now) {
-    histBackoffMs = histBackoffMs
-      ? Math.min(histBackoffMs * 2, HIST_ERR_BACKOFF_MAX_MS)
-      : HIST_ERR_BACKOFF_MS;
-    histBackoffUntil = now + histBackoffMs;
-  }
-
-  // A LiteSpeed throttle answers with an HTML page and can carry HTTP 200, so a
-  // 200 is not proof of data. 403/429, a content type that is not JSON, or a
-  // body opening with "<" all mean BLOCKED — never "empty series". Reading a
-  // block as empty data is what turns one stand-down into a retry storm.
-  function histIsThrottled(status, contentType, body) {
-    if (status === 403 || status === 429) return true;
-    var ct = String(contentType || "").toLowerCase();
-    if (ct && ct.indexOf("json") === -1) return true;
-    var b = String(body || "").replace(/^[\s\uFEFF]+/, "");
-    if (b.charAt(0) === "<") return true;
-    return false;
-  }
-
-  function histContentType(r) {
-    var h = (r && r.responseHeaders) || "";
-    var m = /^[ \t]*content-type[ \t]*:[ \t]*([^\r\n]+)/im.exec(h);
-    return m ? m[1] : "";
-  }
-
-  // The whole rate model in one predicate: one call in flight, never faster than
-  // the hard floor, nothing at all while a stand-down or a backoff is live, and
-  // nothing while the tab is not being looked at.
-  //
-  // Gated on isOnScreen(), not on focus: a page the user is looking at is not a
-  // background page, and PDA's webview never reports focus (see isOnScreen).
-  function histMayCall(now) {
-    if (histInFlight >= HIST_MAX_IN_FLIGHT) return false;
-    if (now < histBlockedUntil()) return false;
-    if (now < histBackoffUntil) return false;
-    if (now - histLastCallTs < HIST_MIN_GAP_MS) return false;
-    if (!isOnScreen()) return false;
-    return true;
-  }
-
-  // Next symbol whose cached entry is missing or past maxAge, round-robining
-  // from a per-store cursor so ordering can never starve a symbol. Port of
-  // signals.py `_next_stale`; returns the advanced cursor because JS has no
-  // setattr. The cursor advances at PICK time, so a symbol that keeps failing
-  // does not block the other 34.
-  function histNextStale(syms, tsStore, maxAge, now, cursor) {
-    if (!syms || !syms.length) return null;
-    for (var i = 0; i < syms.length; i++) {
-      var idx = (cursor + i) % syms.length;
-      var sym = syms[idx];
-      var t = tsStore[sym] || 0;
-      if (!t || (now - t) >= maxAge) {
-        return { sym: sym, cursor: (idx + 1) % syms.length, age: now - t };
-      }
-    }
-    return null;
-  }
-
-  // GET one series. Deliberately NOT fetchJSON: that retries three times on any
-  // 4xx, which against a throttle is three extra hits on an IP that just said
-  // stop, and it cannot see the status or content type a block is detected from.
-  function histFetch(sym, interval, limit, cb) {
-    var url = "https://tornsy.com/api/" + String(sym).toUpperCase() +
-              "?interval=" + interval + "&limit=" + limit;
-    var settled = false;
-    histInFlight++;
-    histLastCallTs = Date.now();
-    function finish(data, err) {
-      if (settled) return;
-      settled = true;
-      histInFlight--;
-      cb(data, err);
-    }
-    try {
-      gmXhr({
-        method: "GET", url: url,
-        // Identifies the traffic to tornsy instead of leaving it anonymous. Only
-        // GM_xmlhttpRequest honours a custom UA; PDA_httpGet and native fetch
-        // send the browser's own. Known limitation, not a blocker.
-        headers: { "User-Agent": "TornStockAnalyzer/" + TSA_VERSION + " (userscript)" },
-        onload: function(r) {
-          var body = (r && r.responseText) || "";
-          if (histIsThrottled(r && r.status, histContentType(r), body)) {
-            histNoteThrottle(Date.now());
-            finish(null, "throttled");
-            return;
-          }
-          // Declared WITHOUT an initialiser so the catch's assignment is the thing
-          // that defines it: `var data = null` first would make `data = null` in the
-          // catch a no-op, which is exactly what ESLint's no-useless-assignment flags.
-          var data;
-          try { data = JSON.parse(body); } catch (e) { data = null; }
-          if (!data) { histNoteError(Date.now()); finish(null, "parse"); return; }
-          histNoteSuccess();
-          finish(data, null);
-        },
-        onerror: function() {
-          histNoteError(Date.now());
-          finish(null, "network");
+      var h = e.h1;
+      if (h && Array.isArray(h.closes) && Array.isArray(h.stamps)) {
+        var closes = [], stamps = [];
+        for (var i = 0; i < h.closes.length && i < h.stamps.length; i++) {
+          var c = histNum(h.closes[i]);
+          if (c > 0) { closes.push(c); stamps.push(h.stamps[i]); }
         }
-      });
-    } catch (e) {
-      histNoteError(Date.now());
-      finish(null, "throw");
-    }
-  }
-
-  function histFetchD1(sym) {
-    var s = String(sym).toUpperCase();
-    histFetch(s, "d1", HIST_D1_LIMIT, function(data) {
-      if (!data) { histRecomputeStatus(Date.now()); return; }
-      var rows = histRawRows(data);
-      // No rows: leave the timestamp alone so the round-robin comes back to it,
-      // instead of recording an empty summary as if it were a good fetch.
-      if (!rows || !rows.length) return;
-      var live = histNum(lastLoadPrices[s]);
-      var price = live > 0 ? live : histNewestClose(rows);
-      var lt = histLongTermContext(price, rows);
-      if (!lt) return;
-      histLtStore[s] = lt;
-      histLtTs[s] = Date.now();
-      histSaveMap(HIST_LT_KEY, histLtStore);
-      histSaveMap(HIST_LT_TS_KEY, histLtTs);
-      histRecomputeStatus(Date.now());
-      // `rows` dies here. The 125 KB series is never written to localStorage.
+        histH1Store[s] = { closes: closes.slice(-HIST_H1_LIMIT), stamps: stamps.slice(-HIST_H1_LIMIT) };
+        if (typeof e.h1_ts === "number" && e.h1_ts > 0) histH1Ts[s] = e.h1_ts * 1000;
+      } else {
+        delete histH1Store[s];
+        delete histH1Ts[s];
+      }
+      n++;
     });
+    [histLtStore, histLtTs, histH1Store, histH1Ts].forEach(function(m) {
+      Object.keys(m).forEach(function(k) { if (!seen[k]) delete m[k]; });
+    });
+    histSaveMap(HIST_LT_KEY, histLtStore);
+    histSaveMap(HIST_LT_TS_KEY, histLtTs);
+    histSaveMap(HIST_H1_KEY, histH1Store);
+    histSaveMap(HIST_H1_TS_KEY, histH1Ts);
+    return n;
   }
 
-  function histFetchH1(sym) {
-    var s = String(sym).toUpperCase();
-    histFetch(s, "h1", HIST_H1_LIMIT, function(data) {
-      if (!data) { histRecomputeStatus(Date.now()); return; }
-      var parsed = histH1Closes(histRawRows(data));
-      if (!parsed) return;
-      histH1Store[s] = parsed;
-      histH1Ts[s] = Date.now();
-      histSaveMap(HIST_H1_KEY, histH1Store);
-      histSaveMap(HIST_H1_TS_KEY, histH1Ts);
-      histRecomputeStatus(Date.now());
+  // Resolves once /history is applied, skipped (fresh enough) or has failed —
+  // never rejects, so a load can wait for it without being able to fail on it.
+  // Runs only inside a licensed load: there is no other caller and no timer.
+  function histMaybeRefresh() {
+    var last = parseInt(lsGet(HIST_FETCH_KEY, "0"), 10) || 0;
+    if (Date.now() - last < HIST_REFRESH_MS) return Promise.resolve(false);
+    return new Promise(function(resolve) {
+      TSAData.get(licenseDeps, "history", 0, function(res) {
+        if (res.kind === "ok") {
+          try {
+            histApply(res.body);
+            // A cold Dossier answers with no symbols: ask again on the next load.
+            if (res.body && res.body.symbols && Object.keys(res.body.symbols).length) {
+              lsSet(HIST_FETCH_KEY, String(Date.now()));
+            }
+          } catch (e) {}
+          histLastFailed = false;
+        } else {
+          histLastFailed = true;
+        }
+        histRecomputeStatus();
+        resolve(res.kind === "ok");
+      });
     });
   }
 
   // -- readiness -------------------------------------------------------------
   // Every flag is PER SYMBOL. A symbol with a full basis is ready the moment it
-  // has one; it never waits for the other 34. That is the whole point of a
-  // progressive warm-up, and a global gate would throw it away.
+  // has one; it never waits for the other 34.
   function histRowOk(row) {
     if (!row || !row.interval) return false;
     for (var i = 0; i < HIST_SCORE_INTERVALS.length; i++) {
@@ -1866,66 +1949,19 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   // One string, in the shape of benefitTableStatus: it says why the panel shows
   // what it shows, and nothing more.
   var historyStatus = "history 0/" + STOCKS_LIST.length;
-  function histRecomputeStatus(now) {
-    var blocked = histBlockedUntil();
-    if (blocked > now) {
-      var mins = Math.ceil((blocked - now) / 60000);
-      historyStatus = "tornsy throttled, retry in " + mins + "m";
-      return historyStatus;
-    }
+  var histLastFailed = false;
+  function histRecomputeStatus() {
     var ready = 0;
     for (var i = 0; i < STOCKS_LIST.length; i++) {
       var f = histReadiness(STOCKS_LIST[i], null);
       if (f.d1_ok && f.h1_ok) ready++;
     }
     historyStatus = "history " + ready + "/" + STOCKS_LIST.length +
-                    (ready >= STOCKS_LIST.length ? "" : " warming");
+                    (ready >= STOCKS_LIST.length ? "" : " warming") +
+                    (histLastFailed ? " (Dossier unreachable)" : "");
     return historyStatus;
   }
-
-  // One symbol per tick, oldest first across BOTH stores, so d1 and h1 interleave
-  // instead of 35 d1 calls having to land before the first h1 does.
-  function histTick(now) {
-    if (!histMayCall(now)) return null;
-    var syms = STOCKS_LIST.map(function(s) { return s.toUpperCase(); });
-    var d1 = histNextStale(syms, histLtTs, HIST_D1_MAX_AGE_MS, now, histD1Cursor);
-    var h1 = histNextStale(syms, histH1Ts, HIST_H1_MAX_AGE_MS, now, histH1Cursor);
-    if (!d1 && !h1) return null;
-    // Ties go to d1: the long-term summary is the half nothing else substitutes.
-    if (d1 && (!h1 || d1.age >= h1.age)) {
-      histD1Cursor = d1.cursor;
-      histFetchD1(d1.sym);
-      return { sym: d1.sym, interval: "d1" };
-    }
-    histH1Cursor = h1.cursor;
-    histFetchH1(h1.sym);
-    return { sym: h1.sym, interval: "h1" };
-  }
-
-  // ==TSA-HIST-GATE-BEGIN==
-  // The licence gate runs inside loadData, but the warm-up ticks on its own: with
-  // the panel left open and no refresh, it would outlive an expired licence. So
-  // every tick reads the cached decision first (no request). Still open: tick.
-  // Locked, or a check is due: stop the timer and go through the gate, which
-  // locks from the cache or does the one check it would do anyway. A hidden tab
-  // waits instead — histTick would not spend a call there either.
-  function histLicensedTick() {
-    var d = TSALicense.peek(licenseDeps);
-    if (!d.locked && !d.needsCheck) { histTick(Date.now()); return; }
-    if (d.needsCheck && !isOnScreen()) return;
-    if (histTimer) { clearInterval(histTimer); histTimer = null; }
-    licenseEnsure(false, function (d2) {
-      if (d2.locked) { licenseLockApp(); return; }
-      if (licenseAppStarted) histStart();
-    });
-  }
-
-  function histStart() {
-    if (histTimer) return;
-    histRecomputeStatus(Date.now());
-    histTimer = setInterval(histLicensedTick, HIST_TICK_MS);
-  }
-  // ==TSA-HIST-GATE-END==
+  histRecomputeStatus();
 
   // ============================================================
   // BUY ZONE — ITS OWN SECTION, WITH ITS OWN FORWARD MEASUREMENT
@@ -1943,13 +1979,12 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   // scores those calls on this owner's own book, so the hit rate on display is
   // measured here rather than imported from a study.
   //
-  // DIP_RIPE_DAYS IS applied. histBandStreak computes the streak while the daily
-  // series is still in hand at derive time and keeps it as one integer in the
-  // summary: step 4a gives up STORING the series, not reading it. Deriving the
+  // DIP_RIPE_DAYS IS applied. The streak is band_streak's, computed by Dossier on
+  // the full daily series and served as one integer, lt.band_days. Deriving the
   // streak from the 8-day h1 window would have been a different measurement wearing
   // the same name — that is the version that was rejected, not this one. Only BUY
   // calls are logged for scoring, because BUY is what the section recommends.
-  var DIP_MAX_POS     = HIST_BAND_PCT;  // same band histBandStreak measures
+  var DIP_MAX_POS     = HIST_BAND_PCT;  // same band band_days is measured on
   var DIP_HOLD_DAYS   = 7;     // hold horizon, and the horizon calls are scored on
   var DIP_RIPE_DAYS   = 3;     // days settled in the band before BUY, not just WAIT
   var DIP_SELL_TARGET = 1.0;   // +1.0% net is what a call has to reach to count
@@ -1991,7 +2026,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     if (!histReadiness(s, null).d1_ok) return null;
     var lt = histLtStore[s];
     var m = lt && lt.month;
-    // A flat 30 days has no range to be at the bottom of; histWindow already
+    // A flat 30 days has no range to be at the bottom of; long_term_context already
     // returns position null there, and so must this.
     if (!m || !(m.high > 0) || !(m.low > 0) || !(m.high > m.low)) return null;
     var px = histNum(lastLoadPrices[s]) || histNum(lt.price);
@@ -2271,84 +2306,9 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     return "$" + n.toFixed(0);
   }
 
-  function fetchItemPrice(itemId, cb) {
-    if (itemPrices[itemId] !== undefined) { cb(itemPrices[itemId]); return; }
-    var url = "https://api.torn.com/market/" + itemId + "?selections=itemmarket&key=" + getTornKey();
-    gmXhr({
-      method: "GET", url: url,
-      onload: function(r) {
-        try {
-          var d = JSON.parse(r.responseText);
-          var listings = d.itemmarket && d.itemmarket.listings ? d.itemmarket.listings : [];
-          if (listings.length > 0) {
-            // Use lowest price
-            var lowest = listings.reduce(function(a,b){ return a.price < b.price ? a : b; });
-            itemPrices[itemId] = lowest.price;
-            cb(lowest.price);
-          } else { itemPrices[itemId] = 0; cb(0); }
-        } catch(e) { itemPrices[itemId] = 0; cb(0); }
-      },
-      onerror: function() { itemPrices[itemId] = 0; cb(0); }
-    });
-  }
-
-  function fetchItemName(itemId, cb) {
-    if (itemNames[itemId]) { cb(itemNames[itemId]); return; }
-    var url = "https://api.torn.com/torn/" + itemId + "?selections=items&key=" + getTornKey();
-    gmXhr({
-      method: "GET", url: url,
-      onload: function(r) {
-        try {
-          var d = JSON.parse(r.responseText);
-          var entry = d.items && d.items[itemId];
-          if (entry && entry.name) {
-            itemNames[itemId] = entry.name;
-            lsSet("tsa_item_names", JSON.stringify(itemNames));
-            cb(entry.name);
-          } else { cb(""); }
-        } catch(e) { cb(""); }
-      },
-      onerror: function() { cb(""); }
-    });
-  }
-
-  // One-shot fetch of the full Torn items dictionary to resolve any
-  // DYNAMIC_BENEFIT_STOCKS item names → IDs. Skipped if every needed name is
-  // already cached locally.
-  function ensureDynamicItemIds(cb) {
-    var allKnown = Object.keys(DYNAMIC_BENEFIT_STOCKS).every(function(sym) {
-      return itemIdsByName[DYNAMIC_BENEFIT_STOCKS[sym].itemName];
-    });
-    if (allKnown) { cb(); return; }
-    var url = "https://api.torn.com/torn/?selections=items&key=" + getTornKey();
-    gmXhr({
-      method: "GET", url: url,
-      onload: function(r) {
-        try {
-          var d = JSON.parse(r.responseText);
-          if (d.items) {
-            Object.keys(d.items).forEach(function(id) {
-              var item = d.items[id];
-              if (item && item.name) {
-                itemIdsByName[item.name] = parseInt(id, 10);
-                if (typeof item.market_value === "number") {
-                  itemMarketValues[item.name] = item.market_value;
-                }
-              }
-            });
-            lsSet("tsa_item_ids_by_name", JSON.stringify(itemIdsByName));
-            lsSet("tsa_item_market_values", JSON.stringify(itemMarketValues));
-          }
-        } catch(e) {}
-        cb();
-      },
-      onerror: function() { cb(); }
-    });
-  }
-
   // Once item IDs are resolved, splice T1-T6 entries for each dynamic stock
-  // into ROI_TABLE (and its lookup map) and register their item ID for price /
-  // name fetching. Idempotent.
+  // into ROI_TABLE (and its lookup map) and register their item ID so it is
+  // valued from the catalogue. Idempotent.
   function augmentRoiTableWithDynamicStocks() {
     Object.keys(DYNAMIC_BENEFIT_STOCKS).forEach(function(sym) {
       var def = DYNAMIC_BENEFIT_STOCKS[sym];
@@ -2370,23 +2330,16 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   }
 
   function fetchAllItemPrices(cb) {
-    // Resolve any pending dynamic item IDs first, then add their entries to
-    // ROI_TABLE, then fetch market price + display name for the (possibly
-    // expanded) ITEM_IDS list.
-    ensureDynamicItemIds(function() {
-      // The item fetch is what makes item-paying benefits priceable, so retry the
-      // catalogue install here: on a cold profile the module-init attempt ran with
-      // an empty itemMarketValues and was (correctly) rejected as implausible.
+    // The reference (at most daily) carries item ids, names and market values, so
+    // nothing here is fetched per item. Then: re-install the catalogue (on a cold
+    // profile the module-init attempt ran with an empty itemMarketValues and was,
+    // correctly, rejected as implausible), add the dynamic stocks' rows, and value
+    // every item id the (possibly expanded) ROI table needs.
+    refreshStockCatalogue().then(function() {
       applyStockCatalogue();
       augmentRoiTableWithDynamicStocks();
-      var remaining = ITEM_IDS.length * 2;
-      var done = false;
-      function finish() { if (!done) { done = true; cb(); } }
-      setTimeout(finish, 10000); // failsafe: call cb after 10s even if a request never returns
-      ITEM_IDS.forEach(function(id) {
-        fetchItemPrice(id, function() { remaining--; if (remaining === 0) finish(); });
-        fetchItemName(id,  function() { remaining--; if (remaining === 0) finish(); });
-      });
+      fillItemValuesFromCatalogue();
+      cb();
     });
   }
 
@@ -2401,8 +2354,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   }
 
   // Per-cycle payout of ONE benefit tier, in dollars. Item-paying stocks are valued
-  // at the LIVE item market price; ROI_TABLE.payout is only the baseline used until
-  // that price has loaded (and is the real figure for cash stocks, where item is 0).
+  // at the item's current market_value (Torn's, via Dossier); ROI_TABLE.payout is
+  // only the baseline used until that value has loaded (and is the real figure for cash stocks, where item is 0).
   // Every income / ROI / payback figure in the planner - buy side AND sell side -
   // goes through this one function, so the two sides cannot drift onto different
   // price bases again. ONE DOCUMENTED EXCEPTION, display only: the tier table's second
@@ -3828,25 +3781,18 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       });
     }
 
-    var key = getTornKey();
-    Promise.all([
-      fetchJSON("https://api.torn.com/user/?selections=basic,money&key=" + key).catch(function() { return null; }),
-      fetchJSON("https://api.torn.com/faction/?selections=donations&key=" + key).catch(function() { return null; })
-    ]).then(function(results) {
-      var cashBalance = 0;
-      var armoryFunds = 0;
-      var userData = results[0];
-      var factionData = results[1];
-      if (userData && !userData.error) {
-        cashBalance = userData.money_onhand || 0;
-        var playerId = userData.player_id;
-        if (playerId && factionData && factionData.donations && factionData.donations[playerId]) {
-          armoryFunds = factionData.donations[playerId].money_balance || 0;
-        }
-      }
+    // Cash and the armoury balance from /api/tsa/me — reused when the load just
+    // fetched it (<60 s), so opening the planner right after a refresh is free.
+    // Anything but a usable answer renders with 0 / 0, as a failed call always did;
+    // the load itself owns the lock screens.
+    TSAData.get(licenseDeps, "me", ME_PLANNER_MAX_AGE_MS, function(res) {
+      var me = (res.kind === "ok" && res.body && res.body.holdings_status === "ok") ? res.body
+             : (res.fallback ? res.fallback.body : null);
+      // Trades done here since Dossier's poll are paid for already: cash follows them.
+      if (me) me = meWithTrades(me);
+      var cashBalance = (me && typeof me.money_onhand === "number") ? me.money_onhand : 0;
+      var armoryFunds = (me && me.armory && me.armory.ok) ? (me.armory.money_balance || 0) : 0;
       renderAndAttach(cashBalance, armoryFunds);
-    }).catch(function() {
-      renderAndAttach(0, 0);
     });
   }
 
@@ -3854,43 +3800,6 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var el = document.createElement("style");
     el.textContent = STYLES;
     document.head.appendChild(el);
-  }
-
-  function fetchJSON(url, retries) {
-    if (retries === undefined) retries = 3;
-    return new Promise(function(resolve, reject) {
-      var attempt = function(n) {
-        gmXhr({
-          method: "GET", url: url,
-          onload: function(r) {
-            // HTTP-level errors (4xx/5xx) take the same retry path as
-            // network/parse errors, so transient hiccups are retried instead
-            // of an error body being accepted as data. Exception: a parseable
-            // Torn-style {error: ...} body resolves, so the caller can map it
-            // to a friendly message. (All gmXhr adapter paths supply r.status;
-            // if it's ever missing, the check is false and we parse as before.)
-            if (r.status >= 400) {
-              var errBody = null;
-              try { errBody = JSON.parse(r.responseText); } catch (_) { /* not JSON */ }
-              if (errBody && errBody.error) { resolve(errBody); return; }
-              if (n > 1) { setTimeout(function() { attempt(n - 1); }, 2000); }
-              else reject(new Error("HTTP " + r.status + " after 3 attempts: " + url));
-              return;
-            }
-            try { resolve(JSON.parse(r.responseText)); }
-            catch (e) {
-              if (n > 1) { setTimeout(function() { attempt(n - 1); }, 2000); }
-              else reject(new Error("Parse error: " + r.responseText.substring(0, 80)));
-            }
-          },
-          onerror: function() {
-            if (n > 1) { setTimeout(function() { attempt(n - 1); }, 2000); }
-            else reject(new Error("Network error after 3 attempts: " + url));
-          }
-        });
-      };
-      attempt(retries);
-    });
   }
 
   function buildOwnedMap(tornData) {
@@ -4565,21 +4474,6 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     t.appendChild(btn);
     document.body.appendChild(t);
     setTimeout(function() { if (t.parentNode) t.parentNode.removeChild(t); }, 10000);
-  }
-
-  var API_ERRORS = {
-    "Incorrect key":  "Invalid API key — click 🔑 to update it.",
-    "Access level":   "API key is missing required permissions — click 🔑 to create a new key.",
-    "Too many":       "Too many requests — wait a moment and try again.",
-    "Player not found": "Player profile not found. Check the API key."
-  };
-
-  function friendlyApiError(msg) {
-    var keys = Object.keys(API_ERRORS);
-    for (var i = 0; i < keys.length; i++) {
-      if (msg && msg.indexOf(keys[i]) !== -1) return API_ERRORS[keys[i]];
-    }
-    return msg;
   }
 
   function getTsaStorageSize() {
@@ -5520,15 +5414,20 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
 
       // Partial-data banner: scores/signals below are computed from
       // incomplete interval data — say so instead of rendering as if full.
-      if (missingBatches === 4) {
-        // Fully down: prices are the page's own, so there is no history to score with.
-        // Be explicit that trading is unaffected — the whole point of not blanking out.
+      if (lastPricesFromPage) {
+        // No market data: prices are the page's own, so there is no history to score
+        // with. Be explicit that trading is unaffected — the whole point of not blanking out.
         html = "<div style=\"padding:8px 14px;font-size:var(--tsa-fs-micro);font-weight:700;color:" + "var(--tsa-neg)" + ";background:var(--tsa-neg-bg);border-bottom:1px solid var(--tsa-neg-border)\">" +
-          "\u26d4 tornsy is down \u2014 no signals or charts. Prices are read from this page, " +
+          "\u26d4 No market data from Dossier \u2014 no signals or charts. Prices are read from this page, " +
           "so holdings, the ROI planner and buying/selling all still work.</div>" + html;
       } else if (missingBatches > 0) {
         html = "<div style=\"padding:8px 14px;font-size:var(--tsa-fs-micro);font-weight:700;color:" + "var(--tsa-warn)" + ";background:var(--tsa-warn-bg);border-bottom:1px solid var(--tsa-warn-border)\">" +
-          "\u26a0 tornsy partial \u2014 " + missingBatches + "/4 interval batches missing, signals degraded</div>" + html;
+          "\u26a0 Market data partial \u2014 " + missingBatches + "/4 interval groups missing or stale, signals degraded</div>" + html;
+      }
+      // Dossier's own state (throttled / unreachable / still loading holdings), on top.
+      if (lastDataBanner) {
+        html = "<div style=\"padding:8px 14px;font-size:var(--tsa-fs-micro);font-weight:700;color:var(--tsa-warn);background:var(--tsa-warn-bg);border-bottom:1px solid var(--tsa-warn-border)\">" +
+          "\u26a0 " + escHtml(lastDataBanner) + "</div>" + html;
       }
 
       content.innerHTML = html;
@@ -5743,8 +5642,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     else loadData();
   }
 
-  // Instant holdings view, painted the moment the (fast) Torn user call lands,
-  // before the slower tornsy price batches arrive. Shows ONLY price-independent
+  // Instant holdings view, painted the moment Dossier's /me lands, before the
+  // larger /market answer arrives. Shows ONLY price-independent
   // data (shares + cost basis) from buildOwnedMap; renderFromData overwrites it
   // with the full panel once live prices are in. The caller guards against the
   // ROI planner being open.
@@ -5817,6 +5716,97 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     }
   }
 
+  // How long a /me or /market answer is reused before it is asked for again. Dossier
+  // itself moves on a 1-min (price) / 5-min (holdings) cadence, so a refresh inside
+  // 30 s would only fetch the same bytes again.
+  var ME_MAX_AGE_MS         = 30 * 1000;
+  var MARKET_MAX_AGE_MS     = 30 * 1000;
+  var ME_PLANNER_MAX_AGE_MS = 60 * 1000;
+
+  // /me with every Quick Trade done here since Dossier's last poll laid over it.
+  function meWithTrades(me) {
+    return TSAData.applyTradeLog(me, TSAData.readLog(licenseDeps), STOCK_SYM_MAP, Date.now(), SELL_FEE);
+  }
+
+  function dataFmtTime(ms) {
+    try { return new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }); }
+    catch (e) { return new Date(ms).toISOString().slice(11, 16); }
+  }
+
+  // The one status line a load shows about Dossier, as plain text (rendered with
+  // escHtml). "" when everything came fresh.
+  function dataBannerText(p) {
+    var parts = [];
+    if (p.dossier === "throttled") {
+      var secs = p.retryMs != null ? Math.max(1, Math.ceil(p.retryMs / 1000)) : null;
+      parts.push("Dossier throttled — showing the last data" + (secs ? ", next try in " + secs + "s" : ""));
+    } else if (p.dossier === "unreachable") {
+      parts.push("Dossier unreachable — " + (p.market ? "market from " + dataFmtTime(p.marketMs) + ", prices from page" : "prices from page") +
+        ", " + (p.me ? "holdings from " + dataFmtTime(p.meMs) : "no holdings available"));
+    }
+    if (p.warming) {
+      parts.push("Dossier is still loading your holdings (it polls every 5 min)" +
+        (p.me ? " — showing holdings from " + dataFmtTime(p.meMs) : " — try again in a few minutes"));
+    }
+    return parts.join(" · ");
+  }
+
+  // One delayed reload, for a load that had nothing to show (holdings still
+  // warming, or a licence answer that disagreed with the data routes). Only while
+  // the page is on screen and no auto-refresh is due anyway; cleared by a lock.
+  var DATA_RETRY_MS = 90 * 1000;
+  var dataRetryTimer = null;
+  function dataRetrySoon() {
+    if (dataRetryTimer) { clearTimeout(dataRetryTimer); dataRetryTimer = null; }
+    if (autoRefreshTimer || !isOnScreen()) return;
+    dataRetryTimer = setTimeout(function() {
+      dataRetryTimer = null;
+      if (licenseAppStarted && isOnScreen()) loadData();
+    }, DATA_RETRY_MS);
+  }
+
+  // The licence key changed or was removed. Everything held for the previous
+  // account goes: Dossier answers (stored and in flight), the trade log, the
+  // holdings snapshot the realized-profit diff compares against (diffing account
+  // B against account A's snapshot would book every A stock as sold), and any
+  // load still running under the old key.
+  function dataForgetAccount() {
+    TSAData.clear(licenseDeps);
+    lsSet("tsa_prev_holdings", "{}");
+    lastOwnedMap = null;
+    lastRaw = null;
+    licenseGen++;
+  }
+
+  // A data route said 401 or 403 "licence inactive". The licence module decides:
+  // a forced check applies its own rules (401 = rejected, active:false = expired).
+  function dataLicenceFail() {
+    licenseEnsure(true, function(d) {
+      if (d.locked) { licenseLockApp(); return; }
+      // The check still says active (or is inside a 429 wait / the 72 h grace):
+      // nothing to lock on, but this load has no data to show either.
+      dataShowError("Dossier did not accept the licence for data. Trying again shortly.");
+    });
+  }
+
+  // The error panel with a Retry button. Re-arms auto-refresh (a failed load must
+  // not end the loop) and, with auto-refresh off, schedules one retry.
+  function dataShowError(msg) {
+    var content = document.getElementById("tsa-content");
+    if (!content) return;
+    content.innerHTML = "<div class=\"tsa-error\">" + escHtml(msg) + "</div>" +
+      "<div class=\"tsa-footer\"><span id=\"tsa-error-next\" style=\"font-size:var(--tsa-fs-micro)\"><span id='tsa-countdown'></span></span><button class=\"tsa-refresh\" id=\"tsa-refresh-btn\">Retry</button></div>";
+    var retryBtn = document.getElementById("tsa-refresh-btn");
+    if (retryBtn) retryBtn.addEventListener("click", loadData);
+    scheduleAutoRefresh();
+    if (autoRefreshEndTime) {
+      var nextEl = document.getElementById("tsa-error-next");
+      if (nextEl) nextEl.insertAdjacentText("afterbegin", "Auto-retry");
+    } else {
+      dataRetrySoon();
+    }
+  }
+
   function loadDataInner() {
     // A lock bumps licenseGen; every continuation of this load checks it, so a load
     // still in flight when the licence locks renders, alerts and schedules nothing.
@@ -5824,103 +5814,94 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     cleanOldIntents();
     var content = document.getElementById("tsa-content");
     content.style.background = "var(--tsa-bg)";
-
-    // Check for API key
-    var key = getTornKey();
-    if (!key || key === "###PDA-APIKEY###") {
-      showKeyOnboarding(content, function() { loadData(); });
-      return;
-    }
-
     content.innerHTML = "<div class=\"tsa-loading\">Fetching data...</div>";
 
-    // A failed tornsy batch resolves to null instead of rejecting the whole
-    // Promise.all — the panel renders from whatever arrived (every batch
-    // carries the live price) with a visible "partial data" banner. Only a
-    // failed Torn call, or ALL four tornsy batches failing, shows the error UI.
-    var tornsyFetch = function(url) {
-      return fetchJSON(url).catch(function() { return null; });
-    };
-
-    // money,basic piggyback on the stocks call: money_onhand + player_id feed
-    // the bridge-pill capital (same numbers the ROI Planner fetches on open).
-    var userPromise = fetchJSON("https://api.torn.com/user/?selections=stocks,money,basic&key=" + getTornKey());
-    // Faction armory balance — counted as capital by the planner's bridgebuilder.
-    // Non-faction users get an API error body → armory stays 0.
-    var factionPromise = fetchJSON("https://api.torn.com/faction/?selections=donations&key=" + getTornKey()).catch(function() { return null; });
-    // Benefit requirements / frequencies / payout descriptions, straight from Torn
-    // instead of a hand-maintained table. Cached 24h, so this is at most one extra
-    // call per user per day and usually zero. It is awaited in the Promise.all
-    // below purely for ORDER: the tables must be installed before anything is
+    // Everything from Dossier, authenticated by the licence alone: holdings + cash +
+    // armoury (/me), prices + interval snapshots (/market), the stock/item catalogue
+    // (/reference, daily) and the long-term history (/history, every 30 min). None of
+    // these promises rejects; plan() below decides what the answers add up to.
+    var meP = new Promise(function(resolve) { TSAData.get(licenseDeps, "me", ME_MAX_AGE_MS, resolve); });
+    var marketP = new Promise(function(resolve) { TSAData.get(licenseDeps, "market", MARKET_MAX_AGE_MS, resolve); });
+    // Awaited purely for ORDER: the tables must be installed before anything is
     // computed from them. Never rejects — a failure leaves the fallback standing.
     var cataloguePromise = refreshStockCatalogue();
-    var t1p = tornsyFetch("https://tornsy.com/api/stocks?interval=m30,h1,h2,h3,h4");
-    var t2p = tornsyFetch("https://tornsy.com/api/stocks?interval=h6,h8,h10,h12,h16");
-    // `ohlc=` rides along in a request that is already being made — same response,
-    // no extra call, no extra rate cost. It gives the week's real high/low instead
-    // of the max of seven daily closes (see the weekPeak comment in calcScore).
-    // TRAP: ohlc accepts a SMALLER key set than interval — h1/h6/h12/d1/w1/n1/y1
-    // are 200, but an OFFSET like d7 (or d2/d3/h20) is a 400 that kills the whole
-    // batch. d7 stays in `interval`, never in `ohlc`. Verified 2026-08-25.
-    // w1 is asked for on two batches on purpose: either one landing keeps the
-    // candle path alive if the other fails.
-    var t3p = tornsyFetch("https://tornsy.com/api/stocks?interval=h20,d1,d2,d3,d4&ohlc=w1");
-    var t4p = tornsyFetch("https://tornsy.com/api/stocks?interval=d5,d6,d7,w1,h5&ohlc=w1");
+    // History (the largest answer, every 30 min) feeds only the buy zone and its
+    // status line: the render waits for it at most HIST_WAIT_MS, then goes ahead
+    // with what is stored. A late answer is applied for the next render.
+    var historyPromise = Promise.race([histMaybeRefresh(), new Promise(function(r) { setTimeout(r, HIST_WAIT_MS); })]);
 
-    // Instant holdings: the Torn user call is fast, the tornsy price batches are
-    // the slow part. Paint a price-independent holdings list the moment the user
-    // call lands, instead of blocking the whole panel on tornsy. The full render
-    // below overwrites this once prices are in.
+    // Instant holdings: paint a price-independent holdings list the moment /me
+    // lands, instead of waiting for the market. The full render below overwrites it.
     var fullRendered = false;
-    userPromise.then(function(tornData) {
+    meP.then(function(res) {
       if (gen !== licenseGen) return;
       if (fullRendered) return;              // prices already landed — skip the flash
       if (roiPlannerActive) return;          // don't clobber an open ROI planner
-      if (!tornData || tornData.error) return; // real error surfaced by Promise.all below
-      renderHoldingsSkeleton(buildOwnedMap(tornData));
-    }).catch(function() {});                 // Promise.all owns the error UI
+      if (res.kind !== "ok" || !res.body || res.body.holdings_status !== "ok") return;
+      renderHoldingsSkeleton(buildOwnedMap(meWithTrades(res.body)));
+    });
 
-    Promise.all([
-      userPromise, t1p, t2p, t3p, t4p, factionPromise, cataloguePromise
-    ]).then(function(results) {
+    Promise.all([meP, marketP, cataloguePromise, historyPromise]).then(function(results) {
       if (gen !== licenseGen) return;
+      var p = TSAData.plan(results[0], results[1], Date.now());
+      if (p.lock === "licence") { dataLicenceFail(); return; }
+      if (p.lock === "key") { dataKeyLock(); return; }
       fullRendered = true;
-      var tornData = results[0];
-      var t1 = results[1];
-      var t2 = results[2];
-      var t3 = results[3];
-      var t4 = results[4];
-      var factionData = results[5];
 
-      if (tornData.error) { throw new Error(friendlyApiError(tornData.error.error)); }
-
-      lastCashBalance = tornData.money_onhand || 0;
-      lastArmoryFunds = 0;
-      var bpPlayerId = tornData.player_id;
-      if (bpPlayerId && factionData && !factionData.error && factionData.donations && factionData.donations[bpPlayerId]) {
-        lastArmoryFunds = factionData.donations[bpPlayerId].money_balance || 0;
+      // No holdings known at all (Dossier still warming for this player, or down,
+      // with nothing stored here): do NOT render an empty book as if it were real —
+      // the planner and the Quick Trade recommendations would then advise buying
+      // blocks the user already owns. Say why, and try again.
+      if (!p.me) {
+        throw new Error(p.warming
+          ? "Dossier is still loading your holdings (it polls every 5 min). TSA tries again shortly."
+          : (p.dossier === "throttled" ? "Dossier throttled and no holdings stored yet. TSA tries again shortly."
+                                       : "Dossier unreachable and no holdings stored yet. TSA tries again shortly."));
       }
+      var me = meWithTrades(p.me);
+      var tornData = me;
+      lastCashBalance = (me && typeof me.money_onhand === "number") ? me.money_onhand : 0;
+      lastArmoryFunds = (me && me.armory && me.armory.ok) ? (me.armory.money_balance || 0) : 0;
 
-      // Count unusable batches (failed fetch, or a JSON error body that
-      // carries no stock array) so the banner reflects what's really missing.
-      var missingBatches = [t1, t2, t3, t4].filter(function(t) {
-        return !t || !Array.isArray(t.data || t);
-      }).length;
+      // Market: Dossier's merged rows (one "batch" — mergeIntervals reads
+      // call.data). Dossier down or cold: the page's own prices, laid over the last
+      // stored market when that is recent (plan() gives it only under 30 min), so
+      // holdings, the ROI planner and the Quick Trade bar never blank out.
+      var missingBatches, raw, fromPage = false;
+      if (p.market && p.marketLive) {
+        raw = mergeIntervals([p.market]);
+        missingBatches = Math.max(0, Math.min(4, parseInt(p.market.missing_batches, 10) || 0));
+      } else {
+        var dom = buildRawFromDom();
+        if (p.market) {
+          raw = mergeIntervals([p.market]);
+          var domPx = {};
+          dom.forEach(function(r) { domPx[r.stock] = r.price; });
+          raw.forEach(function(r) { if (domPx[r.stock] > 0) r.price = domPx[r.stock]; });
+          missingBatches = Math.max(0, Math.min(4, parseInt(p.market.missing_batches, 10) || 0));
+        } else {
+          raw = dom;
+          fromPage = true;
+          missingBatches = 4;
+        }
+      }
+      if (!raw.length) {
+        throw new Error(p.dossier ? "Dossier unreachable and no prices on the page" : "No market data from Dossier and no prices on the page");
+      }
+      lastPricesFromPage = fromPage;
+      lastDataBanner = dataBannerText(p);
+
       var ownedMap = buildOwnedMap(tornData);
-      // tornsy fully down: fall back to the page's own prices instead of throwing.
-      // Throwing blanked the whole panel — holdings, ROI planner and the Quick Trade
-      // bar's pills with it — even though none of those need tornsy. Only give up if
-      // the page has no prices either (not the stocks page / markup changed).
-      var raw = (missingBatches === 4) ? buildRawFromDom() : mergeIntervals([t1, t2, t3, t4]);
-      if (missingBatches === 4 && raw.length === 0) {
-        throw new Error("tornsy.com unreachable and no prices on the page");
-      }
-
       // Enrich ownedMap with correct benefit_shares/swing_shares using live prices
       enrichOwnedMap(ownedMap, raw);
 
-      // Track realized profit from sold positions
-      if (getShowRealized()) {
+      // Track realized profit from sold positions — only from holdings Dossier
+      // polled just now, and from the poll ITSELF, never with the local trade log
+      // laid over it. A stored or "warming" copy is not today's book, and the
+      // overlay is a guess that stops applying on its own clock: diffing either
+      // against the last snapshot would invent sales, or book one twice.
+      var polledMap = p.holdingsLive ? buildOwnedMap(p.me) : null;
+      if (polledMap && getShowRealized()) {
         try {
           var prevHoldings = JSON.parse(localStorage.getItem("tsa_prev_holdings") || "{}");
           var realizedEvents = getRealizedEvents();
@@ -5930,7 +5911,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
             var rpSym = prevSyms[rpi];
             var prevEntry = prevHoldings[rpSym];
             if (!prevEntry) continue;
-            var curEntry = ownedMap[rpSym];
+            var curEntry = polledMap[rpSym];
             var prevShares = prevEntry.shares || 0;
             var curShares = curEntry ? (curEntry.shares || 0) : 0;
             var soldShares = prevShares - curShares;
@@ -5950,17 +5931,19 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           localStorage.setItem("tsa_realized_events", JSON.stringify(realizedEvents));
         } catch(e) {}
       }
-      // Save the holdings snapshot on EVERY load, regardless of the
-      // show-realized toggle. If it only updated while the toggle was on,
+      // Save the holdings snapshot on EVERY load with live holdings, regardless of
+      // the show-realized toggle. If it only updated while the toggle was on,
       // re-enabling it later would diff against a stale snapshot and book
       // every interim sale as realized profit at TODAY'S price instead of
       // the actual sale price. Sales made while the toggle was off are
       // simply not recorded (their sale price is unknowable).
-      var holdingsSnap = {};
-      Object.keys(ownedMap).forEach(function(s) {
-        holdingsSnap[s] = { shares: ownedMap[s].shares || 0, avg_price: ownedMap[s].avg_price || 0 };
-      });
-      lsSet("tsa_prev_holdings", JSON.stringify(holdingsSnap));
+      if (polledMap) {
+        var holdingsSnap = {};
+        Object.keys(polledMap).forEach(function(s) {
+          holdingsSnap[s] = { shares: polledMap[s].shares || 0, avg_price: polledMap[s].avg_price || 0 };
+        });
+        lsSet("tsa_prev_holdings", JSON.stringify(holdingsSnap));
+      }
 
       // Store for ROI planner
       lastOwnedMap = ownedMap;
@@ -5974,8 +5957,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       prevLoadPrices = {};
       Object.keys(lastLoadPrices).forEach(function(k) { prevLoadPrices[k] = lastLoadPrices[k]; });
       raw.forEach(function(r) {
-        var p = parseFloat(r.price) || 0;
-        if (r.stock && p > 0) lastLoadPrices[r.stock] = p;
+        var px = parseFloat(r.price) || 0;
+        if (r.stock && px > 0) lastLoadPrices[r.stock] = px;
       });
 
       // Best ROI recommendation for the Quick Trade bar = the planner's
@@ -5998,12 +5981,12 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
 
       renderFromData(ownedMap, raw, missingBatches);
 
-      // Live item prices feed the bridge pill's income math (planner parity).
-      // TTL-gated to 30 min so auto-refresh doesn't re-fetch ~18 item endpoints
-      // every cycle; pills re-render once prices land.
+      // Item values feed the bridge pill's income math (planner parity). They come
+      // with the daily reference, so this costs no request inside its TTL; the
+      // 30-min gate only spares the re-render. Pills re-render once values land.
       if (Date.now() - lastItemFetchTs > 30 * 60 * 1000) {
         lastItemFetchTs = Date.now();
-        fetchAllItemPrices(function() { renderQtPills(); });
+        fetchAllItemPrices(function() { if (gen === licenseGen) renderQtPills(); });
       }
 
       // Re-arm the auto-refresh AFTER rendering, from the fetch path only —
@@ -6013,18 +5996,9 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
 
     }).catch(function(e) {
       if (gen !== licenseGen) return;
-      content.innerHTML = "<div class=\"tsa-error\">Error: " + escHtml(e.message) + "</div>" +
-        "<div class=\"tsa-footer\"><span id=\"tsa-error-next\" style=\"font-size:var(--tsa-fs-micro)\"><span id='tsa-countdown'></span></span><button class=\"tsa-refresh\" id=\"tsa-refresh-btn\">Retry</button></div>";
-      var retryBtn = document.getElementById("tsa-refresh-btn");
-      if (retryBtn) retryBtn.addEventListener("click", loadData);
-      // A failed load must NOT kill the auto-refresh loop — re-arm it so a
-      // transient API/tornsy error only skips one cycle. Safe no-op when
-      // auto-refresh is off or the tab isn't actively viewed.
-      scheduleAutoRefresh();
-      if (autoRefreshEndTime) {
-        var nextEl = document.getElementById("tsa-error-next");
-        if (nextEl) nextEl.insertAdjacentText("afterbegin", "Auto-retry");
-      }
+      // A failed load must NOT kill the auto-refresh loop — dataShowError re-arms it,
+      // so a transient error only skips one cycle.
+      dataShowError("Error: " + e.message);
     });
   }
 
@@ -6534,6 +6508,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       lsSet("qt_intent_" + symb, JSON.stringify({ price: intentPrice, ts: Math.floor(Date.now() / 1000) }));
     }
     qtUpdateLocalCache(symb, action === "buyShares" ? shares : -shares);
+    // Laid over Dossier's /me until its next poll has the trade (up to ~5 min).
+    TSAData.logTrade(licenseDeps, symb, action === "buyShares" ? shares : -shares, intentPrice || qtGetPrice(symb));
     showToast(label, "success");
     // The preview line described a trade that has now happened. The pointer is still
     // resting on the button, so no mouseenter or blur will fire to clear it — without
@@ -8180,6 +8156,9 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   var licenseLast = null;         // the last decision, for the lock screen; null = first check still out
   var licenseGen = 0;             // bumped on every lock; loads started before it are dropped
   var LICENSE_SITE_URL = "https://dossier.aec3.org";
+  var dataLockReason = null;      // "key_required" while Dossier has no usable Torn key for this licence
+
+  function dataKeyLock() { licenseLockApp("key_required"); }
 
   function licenseEnsure(force, cb) {
     return TSALicense.ensure(licenseDeps, force, function (d) {
@@ -8189,27 +8168,29 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     });
   }
 
-  // Starts what the licence gates: Quick Trade bar, first load, history warm-up.
+  // Starts what the licence gates: Quick Trade bar and the first load. History comes
+  // with the loads (at most every 30 min), so there is no timer of its own to start.
   // fromUser = the user asked for the panel, so load it now whatever the visibility.
   function licenseStartApp(fromUser) {
     if (licenseAppStarted) { if (fromUser) loadDataInner(); return; }
     licenseAppStarted = true;
+    dataLockReason = null;
     if (!document.getElementById("qt-bar")) createQuickTradeBar();
     applyQtBarVisibility();
     if (fromUser) { _firstLoadKicked = true; loadDataInner(); }
     else initialLoad();
-    // Per-symbol history warm-up. Independent of loadData: it is its own paced
-    // round-robin, and every tick re-checks visibility and the stand-down before
-    // it spends a call.
-    histStart();
   }
 
   // Stops everything periodic and hides the Quick Trade bar, then shows the lock.
-  function licenseLockApp() {
+  // reason "key_required": the licence is fine, but Dossier holds no usable Torn
+  // key for this account, so it has no data to give (owner decision 2026-11-01:
+  // no market-only mode). Same lockdown, its own screen.
+  function licenseLockApp(reason) {
     licenseLocked = true;
     licenseAppStarted = false;
+    dataLockReason = reason === "key_required" ? reason : null;
     licenseGen++;
-    if (histTimer) { clearInterval(histTimer); histTimer = null; }
+    if (dataRetryTimer) { clearTimeout(dataRetryTimer); dataRetryTimer = null; }
     if (autoRefreshTimer) { clearTimeout(autoRefreshTimer); autoRefreshTimer = null; }
     if (autoRefreshCountdownInterval) { clearInterval(autoRefreshCountdownInterval); autoRefreshCountdownInterval = null; }
     autoRefreshEndTime = null;
@@ -8265,6 +8246,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     msgEl.textContent = "Checking key…";
     msgEl.style.color = "var(--tsa-fg-muted)";
     if (btn) btn.disabled = true;
+    var before = TSALicense.peek(licenseDeps).state.token;
     TSALicense.tryToken(licenseDeps, val, function (r) {
       if (btn) btn.disabled = false;
       if (!r.applied) {
@@ -8272,6 +8254,9 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         msgEl.style.color = "var(--tsa-neg)";
         return;
       }
+      // A different key may belong to a different Dossier account: never show the
+      // previous one's holdings under it.
+      if (val !== before) dataForgetAccount();
       licenseEnsure(false, function (d) {
         if (d.locked) { licenseLockApp(); return; }
         showToast("TSA licence active", "success");
@@ -8291,6 +8276,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       return;
     }
     var d = licenseLast;
+    if (dataLockReason === "key_required" && !d.locked) { showKeyRequiredLock(content); return; }
 
     var wrap = licenseEl("div", "padding:18px;background:var(--tsa-bg);font-family:var(--tsa-sans)");
     wrap.appendChild(licenseEl("div", "font-size:var(--tsa-fs-body);font-weight:bold;color:var(--tsa-fg);margin-bottom:6px", "TSA licence required"));
@@ -8347,7 +8333,33 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     wrap.appendChild(msg);
 
     wrap.appendChild(licenseEl("div", "font-size:var(--tsa-fs-micro);color:var(--tsa-fg-faint);line-height:1.5",
-      "Only this licence key is sent, and only to dossier-api.aec3.org — never your Torn API key. It is checked at most every 12 hours; if Dossier is down, a confirmed licence keeps working for 72 hours."));
+      "Only this licence key is sent, and only to dossier-api.aec3.org. It is checked at most every 12 hours; if Dossier is down, a confirmed licence keeps working for 72 hours."));
+    content.appendChild(wrap);
+  }
+
+  // The licence is active, but Dossier answered 403 "torn key required": it has no
+  // usable Torn API key for this account (none saved, rejected by Torn, or not
+  // polled), so there is nothing to show. Nothing that shows data runs behind this.
+  function showKeyRequiredLock(content) {
+    var wrap = licenseEl("div", "padding:18px;background:var(--tsa-bg);font-family:var(--tsa-sans)");
+    wrap.appendChild(licenseEl("div", "font-size:var(--tsa-fs-body);font-weight:bold;color:var(--tsa-fg);margin-bottom:6px", "Torn API key needed in Dossier"));
+    wrap.appendChild(licenseEl("div", "font-size:var(--tsa-fs-micro);color:var(--tsa-fg);background:var(--tsa-warn-bg);border:1px solid var(--tsa-warn-border);border-radius:var(--tsa-r-2);padding:8px 10px;margin-bottom:12px;line-height:1.5",
+      "Add your Torn API key in Dossier to use TSA"));
+    wrap.appendChild(licenseEl("div", "font-size:var(--tsa-fs-micro);color:var(--tsa-fg-muted);margin-bottom:12px;line-height:1.5",
+      "TSA reads your stocks, holdings and history from Dossier. Your licence is active, but Dossier has no working Torn API key for your account. After you add one, Dossier polls with it within 5 minutes — then press Check again."));
+
+    var link = licenseEl("a", "display:block;text-align:center;padding:8px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-border);color:var(--tsa-accent);font-size:var(--tsa-fs-micro);font-weight:bold;text-decoration:none;margin-bottom:12px", "Open Dossier");
+    link.href = LICENSE_SITE_URL;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    wrap.appendChild(link);
+
+    var again = licenseEl("button", LICENSE_BTN_SECONDARY + ";margin-bottom:8px", "Check again");
+    again.addEventListener("click", function () { loadData(); });
+    wrap.appendChild(again);
+
+    wrap.appendChild(licenseEl("div", "font-size:var(--tsa-fs-micro);color:var(--tsa-fg-faint);line-height:1.5",
+      "TSA sends only your licence key, only to dossier-api.aec3.org."));
     content.appendChild(wrap);
   }
 
@@ -8419,6 +8431,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         return;
       }
       TSALicense.clear(licenseDeps);
+      dataForgetAccount();
       licenseEnsure(false, function () { licenseLockApp(); });
     });
   }
@@ -8471,7 +8484,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     document.body.appendChild(overlay);
     applyOverlayPosition(getOverlayPosition());
 
-    // Apply theme + API key changes from the Settings panel.
+    // Apply theme changes from the Settings panel.
     function applyThemeChange(isDark) {
       if (isDark) overlay.classList.add("tsa-dark");
       else overlay.classList.remove("tsa-dark");
@@ -8604,11 +8617,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         // ── Account ─────────────────────
         "<div style=\"" + section + "\">" +
         "<div style=\"" + sectionH + "\">Account</div>" +
-        "<div style=\"margin-bottom:12px\">" +
-          "<div style=\"" + labelTitle + "\">Torn API key</div>" +
-          "<input id=\"tsa-setting-apikey\" type=\"password\" autocomplete=\"off\" value=\"" + (TORN_API_KEY || "") + "\" style=\"" + inputStyle + "\">" +
-          "<div style=\"" + hint + "\">Stored in your browser only — never sent anywhere except <code>api.torn.com</code>. Get a key at torn.com/preferences.php#tab=api.</div>" +
-        "</div>" +
+        "<div style=\"" + hint + ";margin:0 0 12px\">TSA reads all its data from Dossier, which uses the Torn API key saved in your Dossier account. TSA sends only your licence key, only to dossier-api.aec3.org.</div>" +
         "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">TSA licence</div>" +
           "<div id=\"tsa-license-status\"></div>" +
@@ -8656,7 +8665,6 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         var rd = parseInt((document.getElementById("tsa-setting-realized-days") || {}).value || "7", 10);
         var posVal = document.getElementById("tsa-setting-position").value;
         var themeVal = document.getElementById("tsa-setting-theme").value;
-        var keyVal = (document.getElementById("tsa-setting-apikey").value || "").trim();
         // The max= attributes are advisory only — a browser does not enforce them
         // on a non-submitted input read via .value, so bound them here too.
         if (isNaN(profit) || profit <= 0 || profit > 10) { showToast("Profit target must be 0.1–10%", "warn"); return; }
@@ -8688,16 +8696,6 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         var wasDark = lsGet("tsa_dark", "false") === "true";
         var nowDark = themeVal === "dark";
         if (wasDark !== nowDark) applyThemeChange(nowDark);
-        // API key: only persist if changed and non-empty.
-        if (keyVal && keyVal !== TORN_API_KEY) {
-          TORN_API_KEY = keyVal;
-          lsSet("tsa-torn-apikey", keyVal);
-        }
-        // Cleared on ANY settings save, not only on a CHANGED key: widening a key's
-        // permissions on Torn's side leaves the key string identical, so gating this
-        // on "the key changed" made the obvious fix — re-save the key — a no-op, and
-        // left the stale reason on screen for an hour.
-        if (keyVal) lsSet("tsa_stock_catalogue_fail_ts", "0");
         var saveBtn = document.getElementById("tsa-settings-save");
         if (saveBtn) {
           saveBtn.textContent = "Saved ✓";
@@ -8714,10 +8712,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     });
 
     document.getElementById("tsa-update-btn").addEventListener("click", function() {
-      // An explicit refresh clears the catalogue failure marker: pressing this IS
-      // the request to try again. Costs at most one extra call, and only when the
-      // user asked for it.
-      lsSet("tsa_stock_catalogue_fail_ts", "0");
+      // An explicit refresh ends the 5-min wait after a failed history/reference
+      // call: pressing this IS the request to try again. A 429's Retry-After is
+      // still honoured — that wait is the server's, not ours.
+      TSAData.resetWaits();
       loadData();
     });
 
@@ -8901,18 +8899,18 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   // prefetch and defers the full load to the focus / visibility handler.
   // Runs only from licenseStartApp, i.e. only with an open licence.
   function initialLoad() {
-    var key = getTornKey();
-    if (!key || key === "###PDA-APIKEY###") return;
     if (document.visibilityState !== "hidden") { _firstLoadKicked = true; loadDataInner(); return; }
-    fetchJSON("https://api.torn.com/user/?selections=stocks&key=" + key)
-      .then(function(tornData) {
-        if (!tornData || tornData.error) return;
-        var map = buildOwnedMap(tornData);
-        enrichOwnedMap(map, null);
-        lastOwnedMap = map;
-        qtUpdateExec(); // refresh swing shares label in QT bar
-      })
-      .catch(function() {});
+    var gen = licenseGen;
+    TSAData.get(licenseDeps, "me", ME_MAX_AGE_MS, function(res) {
+      if (gen !== licenseGen) return;
+      if (res.kind === "licence_invalid" || res.kind === "licence_inactive") { dataLicenceFail(); return; }
+      if (res.kind === "key_required") { dataKeyLock(); return; }
+      if (res.kind !== "ok" || !res.body || res.body.holdings_status !== "ok") return;
+      var map = buildOwnedMap(meWithTrades(res.body));
+      enrichOwnedMap(map, null);
+      lastOwnedMap = map;
+      qtUpdateExec(); // refresh swing shares label in QT bar
+    });
   }
 
   if (document.readyState === "loading") {
