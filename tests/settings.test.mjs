@@ -67,18 +67,24 @@ test("Top 5 section shows only for the literal true", () => {
   assert.equal(load({ tsa_show_top5: "1" }).getShowTop5(), false);
 });
 
+// Source with whole-line // comments removed, so prose mentions never count as code.
+const CODE = SRC.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+
 test("the Top 5 panel and its empty state are both behind getShowTop5", () => {
-  const guard = SRC.indexOf("if (!getShowTop5()) {");
-  const panel = SRC.indexOf("} else if (top5Buy.length > 0) {", guard);
-  const empty = SRC.indexOf(">Buy signals\" + top5HiddenHtml(", panel);
-  assert.ok(guard >= 0, "guard missing");
-  assert.ok(panel > guard && panel - guard < 400, "Top 5 panel is not the else-branch of the guard");
-  assert.ok(empty > panel, "Buy signals empty state missing after the panel");
+  // One guard, whose else-branches are the panel and then the empty state. Only
+  // comment lines may sit between the guard and the panel branch.
+  assert.equal((CODE.match(/if \(!getShowTop5\(\)\)/g) || []).length, 1, "expected exactly one guard");
+  const m = CODE.match(/if \(!getShowTop5\(\)\) \{\s*\} else if \(top5Buy\.length > 0\) \{/);
+  assert.ok(m, "Top 5 panel is not the else-branch of the guard");
+  const empty = CODE.indexOf(">Buy signals\" + top5HiddenHtml(", m.index);
+  assert.ok(empty > m.index, "Buy signals empty state missing after the panel");
+  assert.equal((CODE.match(/>Buy signals" \+ top5HiddenHtml\(/g) || []).length, 1);
+  assert.equal((CODE.match(/"Top " \+ top5Buy\.length \+ " buy"/g) || []).length, 1);
 });
 
 test("dipScan is still called from exactly one place", () => {
-  const calls = SRC.match(/[^\w.]dipScan\(/g) || [];
-  const defs = SRC.match(/function dipScan\(/g) || [];
+  const calls = CODE.match(/[^\w.]dipScan\(/g) || [];
+  const defs = CODE.match(/function dipScan\(/g) || [];
   assert.equal(defs.length, 1);
   assert.equal(calls.length - defs.length, 1);
 });
