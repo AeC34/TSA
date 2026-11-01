@@ -20,7 +20,9 @@ import vm from "node:vm";
 const HERE = new URL(".", import.meta.url);
 const GOLDEN = new URL("fixtures/calcscore.golden.json", HERE);
 const SRC_PATH = process.env.TSA_GOLDEN_SRC || new URL("../torn_stock_analyzer.js", HERE);
-const SRC = readFileSync(SRC_PATH, "utf8");
+// Normalise line endings: a Windows checkout, or `git archive` with core.autocrlf=true,
+// hands over CRLF, and the "\n  }\n" end markers below would then never match.
+const SRC = readFileSync(SRC_PATH, "utf8").replace(/\r\n/g, "\n");
 const NOW_MS = Date.UTC(2026, 10, 1, 12, 0, 0);
 const NOW_S = NOW_MS / 1000;
 
@@ -29,6 +31,7 @@ function fn(name) {
   const a = SRC.indexOf("\n  function " + name + "(");
   assert.ok(a >= 0, "function " + name + " missing");
   const b = SRC.indexOf("\n  }\n", a);
+  assert.ok(b > a, "function " + name + " has no closing '  }' line");
   return SRC.slice(a + 1, b + 4);
 }
 // "  var NAME = ..." up to the end of its statement (one line, or a "  };"/"  ];" close).
