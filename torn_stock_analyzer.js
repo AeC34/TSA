@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.51.2
+// @version      2.51.3
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Requires a paid TSA licence key from dossier.aec3.org (Xanax); only that key is sent, to dossier-api.aec3.org, to check it — your Torn API key is sent only to api.torn.com.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -1902,11 +1902,30 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     return { sym: h1.sym, interval: "h1" };
   }
 
+  // ==TSA-HIST-GATE-BEGIN==
+  // The licence gate runs inside loadData, but the warm-up ticks on its own: with
+  // the panel left open and no refresh, it would outlive an expired licence. So
+  // every tick reads the cached decision first (no request). Still open: tick.
+  // Locked, or a check is due: stop the timer and go through the gate, which
+  // locks from the cache or does the one check it would do anyway. A hidden tab
+  // waits instead — histTick would not spend a call there either.
+  function histLicensedTick() {
+    var d = TSALicense.peek(licenseDeps);
+    if (!d.locked && !d.needsCheck) { histTick(Date.now()); return; }
+    if (d.needsCheck && !isOnScreen()) return;
+    if (histTimer) { clearInterval(histTimer); histTimer = null; }
+    licenseEnsure(false, function (d2) {
+      if (d2.locked) { licenseLockApp(); return; }
+      if (licenseAppStarted) histStart();
+    });
+  }
+
   function histStart() {
     if (histTimer) return;
     histRecomputeStatus(Date.now());
-    histTimer = setInterval(function() { histTick(Date.now()); }, HIST_TICK_MS);
+    histTimer = setInterval(histLicensedTick, HIST_TICK_MS);
   }
+  // ==TSA-HIST-GATE-END==
 
   // ============================================================
   // BUY ZONE — ITS OWN SECTION, WITH ITS OWN FORWARD MEASUREMENT

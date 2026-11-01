@@ -516,3 +516,145 @@ test("fetch fallback forwards headers; callers without headers get none", async 
   await new Promise((r) => ctx.gmXhr({ method: "GET", url: "https://api.torn.com/x", onload: r }));
   assert.equal(JSON.stringify(seen[1]), JSON.stringify({ method: "GET" }));
 });
+
+// ---------------------------------------------------------------- the history warm-up timer
+
+// Loads the warm-up timer (TSA-HIST-GATE) beside the licence module, with the
+// script's own wiring stubbed: licenseEnsure is the script's thin wrapper,
+// licenseLockApp clears histTimer like the real one, histTick only counts ticks.
+// setInterval / clearInterval are fakes driven by tick().
+function warmup({ now = () => T0, store, onScreen = true } = {}) {
+  const gm = gmStub();
+  const intervals = [];
+  const ctx = load({
+    GM_xmlhttpRequest: gm.fn,
+    histTimer: null,
+    licenseAppStarted: true,
+    HIST_TICK_MS: 3000,
+    histTicks: 0,
+    locks: 0,
+    setInterval: (fn, ms) => { const t = { fn, ms, live: true }; intervals.push(t); return t; },
+    clearInterval: (t) => { if (t) t.live = false; },
+  });
+  vm.runInContext(block("TSA-HIST-GATE") + `
+    function histTick() { histTicks++; }
+    function histRecomputeStatus() {}
+    function isOnScreen() { return onScreenNow(); }
+    function licenseEnsure(force, cb) { return TSALicense.ensure(licenseDeps, force, cb); }
+    function licenseLockApp() {
+      locks++;
+      licenseAppStarted = false;
+      if (histTimer) { clearInterval(histTimer); histTimer = null; }
+    }`, ctx);
+  const timers = fakeTimers();
+  ctx.licenseDeps = { xhr: (o) => ctx.gmXhr(o), store, now, setTimer: timers.set, clearTimer: timers.clear };
+  ctx.onScreenNow = () => onScreen;
+  // one 3 s period: every live interval fires once
+  const tick = () => intervals.filter((t) => t.live).forEach((t) => t.fn());
+  const live = () => intervals.filter((t) => t.live).length;
+  const answer = (body, code = 200) => gm.calls[gm.calls.length - 1].onload({ status: code, responseText: JSON.stringify(body) });
+  return { ctx, gm, tick, live, answer, setOnScreen: (v) => { onScreen = v; } };
+}
+
+test("warm-up: a fresh licence ticks, from the cache, with no request", () => {
+  const ctx0 = load();
+  const store = memStore({ tsa_license: JSON.stringify(activeAt(ctx0.TSALicense, T0)) });
+  const w = warmup({ store, now: () => T0 + H });
+  w.ctx.histStart();
+  w.tick(); w.tick();
+  assert.equal(w.ctx.histTicks, 2);
+  assert.equal(w.gm.calls.length, 0);
+  assert.equal(w.live(), 1);
+});
+
+test("warm-up: the licence expires with the panel open → the timer stops and TSA locks", () => {
+  const ctx0 = load();
+  const exp = Math.floor((T0 + 2 * H) / 1000);   // licence period ends 2 h after the last check
+  const store = memStore({ tsa_license: JSON.stringify(activeAt(ctx0.TSALicense, T0, exp)) });
+  let now = T0 + H;
+  const w = warmup({ store, now: () => now });
+  w.ctx.histStart();
+  w.tick();
+  assert.equal(w.ctx.histTicks, 1);
+  now = exp * 1000;                               // expiry reached: a check is due
+  w.tick();
+  assert.equal(w.ctx.histTicks, 1);               // no warm-up call on the due tick
+  assert.equal(w.live(), 0);                      // timer stopped while the check is out
+  assert.equal(w.gm.calls.length, 1);             // the one check the gate does anyway
+  w.answer({ active: false, expires_ts: exp, renew: "r" });
+  assert.equal(w.ctx.locks, 1);
+  assert.equal(w.ctx.histTimer, null);
+  w.tick(); w.tick();
+  assert.equal(w.ctx.histTicks, 1);               // nothing runs while locked
+  assert.equal(w.gm.calls.length, 1);
+});
+
+test("warm-up: a licence already locked in the cache stops the timer with no request", () => {
+  const ctx0 = load();
+  let now = T0 + H;
+  const store = memStore({ tsa_license: JSON.stringify(activeAt(ctx0.TSALicense, T0)) });
+  const w = warmup({ store, now: () => now });
+  w.ctx.histStart();
+  w.tick();
+  // another tab saw the renewal fail: the stored state is now inactive
+  store.set("tsa_license", JSON.stringify(ctx0.TSALicense.decide({ token: TOKEN }, now, inactive()).state));
+  w.tick();
+  assert.equal(w.ctx.locks, 1);
+  assert.equal(w.live(), 0);
+  assert.equal(w.gm.calls.length, 0);
+  assert.equal(w.ctx.histTicks, 1);
+});
+
+test("warm-up: at the 12 h re-check a still-active licence resumes the timer", () => {
+  const ctx0 = load();
+  let now = T0 + 12 * H;
+  const store = memStore({ tsa_license: JSON.stringify(activeAt(ctx0.TSALicense, T0)) });
+  const w = warmup({ store, now: () => now });
+  w.ctx.histStart();
+  w.tick();
+  assert.equal(w.gm.calls.length, 1);
+  w.answer({ active: true, expires_ts: null });
+  assert.equal(w.ctx.locks, 0);
+  assert.equal(w.live(), 1);                      // restarted, exactly one interval
+  w.tick(); w.tick();
+  assert.equal(w.ctx.histTicks, 2);
+  assert.equal(w.gm.calls.length, 1);
+});
+
+test("warm-up: Dossier down keeps the 72 h grace — ticks go on, then lock after 72 h", () => {
+  const ctx0 = load();
+  let now = T0 + 12 * H;
+  const store = memStore({ tsa_license: JSON.stringify(activeAt(ctx0.TSALicense, T0)) });
+  const w = warmup({ store, now: () => now });
+  w.ctx.histStart();
+  w.tick();
+  w.gm.calls[0].onerror();                        // check fails: still open, in grace
+  assert.equal(w.ctx.locks, 0);
+  assert.equal(w.live(), 1);
+  w.tick();
+  assert.equal(w.ctx.histTicks, 1);
+  assert.equal(w.gm.calls.length, 1);             // no new check inside RETRY_MS
+  now = T0 + 72 * H - 1;                          // retry due, still in grace
+  w.tick();
+  w.gm.calls[1].onerror();
+  assert.equal(w.ctx.locks, 0);
+  assert.equal(w.live(), 1);
+  now = T0 + 72 * H;                              // grace over: locks from the cache, no request
+  w.tick();
+  assert.equal(w.ctx.locks, 1);
+  assert.equal(w.live(), 0);
+  assert.equal(w.gm.calls.length, 2);
+});
+
+test("warm-up: a hidden tab makes no licence check when one is due", () => {
+  const ctx0 = load();
+  const store = memStore({ tsa_license: JSON.stringify(activeAt(ctx0.TSALicense, T0)) });
+  const w = warmup({ store, now: () => T0 + 13 * H, onScreen: false });
+  w.ctx.histStart();
+  w.tick();
+  assert.equal(w.gm.calls.length, 0);
+  assert.equal(w.ctx.histTicks, 0);
+  w.setOnScreen(true);
+  w.tick();
+  assert.equal(w.gm.calls.length, 1);
+});
