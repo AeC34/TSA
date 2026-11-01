@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.52.1
+// @version      2.53.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. The Top-5 buy list only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Requires a paid TSA licence key from dossier.aec3.org (Xanax) and your Torn API key saved in Dossier: all stock, holdings and history data is read from Dossier. TSA sends only your licence key, only to dossier-api.aec3.org.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -4636,12 +4636,19 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   function getPillsAlways() {
     return lsGet("tsa_pills_always", "false") === "true";
   }
-  // Which list fills the Quick Buy pills. "top5" is the default and is exactly the
-  // behaviour every user had before this setting existed; "buyzone" swaps in the Buy
-  // zone. Any unrecognised stored value falls back to "top5" rather than leaving the
-  // pills empty on a typo.
+  // Which list fills the Quick Buy pills. "buyzone" is the default: the Buy zone's
+  // rule is evidence-based on price history and is the preferred buy signal. An
+  // explicitly stored "top5" is still honoured; any other stored value falls back to
+  // "buyzone" rather than leaving the pills empty on a typo.
   function getQtBuySource() {
-    return lsGet("tsa_qt_buy_source", "top5") === "buyzone" ? "buyzone" : "top5";
+    return lsGet("tsa_qt_buy_source", "buyzone") === "top5" ? "top5" : "buyzone";
+  }
+  // Whether the Top 5 buy section (or its "Buy signals" empty state) is drawn. Off by
+  // default since the Buy zone is the preferred signal. Display only: the Top 5
+  // ranking is still computed every render either way, because Watch, the Top 5
+  // pill source and the signal log all read it.
+  function getShowTop5() {
+    return lsGet("tsa_show_top5", "false") === "true";
   }
   function getTop5MinScore() {
     var v = parseInt(lsGet("tsa_top5_min_score", "35"), 10);
@@ -5063,7 +5070,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           "</div>";
       }
 
-      if (top5Buy.length > 0) {
+      if (!getShowTop5()) {
+        // Top 5 section hidden by setting: draw nothing. top5Buy above is still
+        // computed and used elsewhere; only this panel is skipped.
+      } else if (top5Buy.length > 0) {
         html += "<div style=\"padding:10px 14px 6px;background:" + d.bg + "\">" +
           "<div style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;margin-bottom:8px;font-weight:bold\">" +
           "Top " + top5Buy.length + " buy" + top5HiddenHtml(d, top5Hidden) + "</div>";
@@ -8712,6 +8722,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
             "<option value=\"buyzone\"" + (getQtBuySource() === "buyzone" ? " selected" : "") + ">Buy zone</option>" +
           "</select>" +
         "</div>" +
+        "<label style=\"" + checkLabel + "\">" +
+          "<input type=\"checkbox\" id=\"tsa-setting-show-top5\"" + (getShowTop5() ? " checked" : "") + " style=\"width:15px;height:15px;cursor:pointer\">" +
+          "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Show Top 5 buy section</span>" +
+        "</label>" +
         "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">Min score for Top 5 (0–160)</div>" +
           "<input id=\"tsa-setting-top5-min\" type=\"number\" step=\"1\" min=\"0\" max=\"160\" value=\"" + getTop5MinScore() + "\" style=\"" + inputStyle + "\">" +
@@ -8800,6 +8814,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         var showQtBar = document.getElementById("tsa-setting-show-qt-bar").checked;
         var pillsAlways = document.getElementById("tsa-setting-pills-always").checked;
         var qtBuySource = (document.getElementById("tsa-setting-qt-buy-source") || {}).value;
+        var showTop5 = !!(document.getElementById("tsa-setting-show-top5") || {}).checked;
         var top5Min = parseInt(document.getElementById("tsa-setting-top5-min").value, 10);
         var reqInv = document.getElementById("tsa-setting-req-investors").checked;
         var rd = parseInt((document.getElementById("tsa-setting-realized-days") || {}).value || "7", 10);
@@ -8822,9 +8837,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         lsSet("tsa_show_qt_chart", showQtChart ? "true" : "false");
         lsSet("tsa_show_qt_bar", showQtBar ? "true" : "false");
         lsSet("tsa_pills_always", pillsAlways ? "true" : "false");
-        // Anything but the buyzone literal stores as top5, so a missing element or a
-        // hand-edited value can never leave the pills pointed at nothing.
-        lsSet("tsa_qt_buy_source", qtBuySource === "buyzone" ? "buyzone" : "top5");
+        // Anything but the top5 literal stores as buyzone (the default), so a missing
+        // element or a hand-edited value can never leave the pills pointed at nothing.
+        lsSet("tsa_qt_buy_source", qtBuySource === "top5" ? "top5" : "buyzone");
+        lsSet("tsa_show_top5", showTop5 ? "true" : "false");
         applyQtBarVisibility();
         lsSet("tsa_top5_min_score", top5Min.toString());
         lsSet("tsa_show_realized", showRealized ? "true" : "false");
