@@ -447,19 +447,24 @@ test("stored /me lives 6 h, market 24 h; an expired copy is deleted from storage
   assert.equal(s.store.get("tsa_dossier_market"), "null");
 });
 
-test("purge on start deletes expired /me and trades older than 30 min, keeps the rest", () => {
+test("purge on start trims only the trade log; every other key is left exactly as stored", () => {
   const s = setup();
   get(s, "me"); s.answer(200, OK.me);
   get(s, "market"); s.answer(200, OK.market);
   s.ctx.TSAData.logTrade(s.deps, "FHG", 10, 500);
   s.ctx.TSAData.purge(s.deps);
-  assert.notEqual(s.store.get("tsa_dossier_me"), "null");
   assert.equal(s.ctx.TSAData.readLog(s.deps).length, 1);
+  // 7 h later: /me is past its 6 h and is not shown, but purge does NOT touch it
+  // (owner decision 2026-11-02: nothing is deleted or overwritten on start).
+  const before = { ...s.store.m };
   const s2 = setup({ store: s.store, now: T0 + 7 * 3600 * 1000 });
   s2.ctx.TSAData.purge(s2.deps);
-  assert.equal(s.store.get("tsa_dossier_me"), "null");
-  assert.notEqual(s.store.get("tsa_dossier_market"), "null");
   assert.equal(s2.ctx.TSAData.readLog(s2.deps).length, 0);
+  for (const k of Object.keys(before)) {
+    if (k === "tsa_trade_log") continue;
+    assert.equal(s.store.m[k], before[k], k + " changed by purge");
+  }
+  assert.deepEqual(Object.keys(s.store.m).sort(), Object.keys(before).sort());
   assert.match(SRC, /try \{ TSAData\.purge\(licenseDeps\); \} catch \(e\) \{\}/);
 });
 
@@ -538,19 +543,25 @@ test("logTrade appends and trims entries older than 30 min", () => {
 
 // ---------------------------------------------------------------- the script as a whole
 
-test("source: no Torn API / tornsy call, no Torn key, @connect only dossier-api.aec3.org", () => {
-  assert.equal((SRC.match(/api\.torn\.com|tornsy\.com/g) || []).length, 0);
-  assert.equal((SRC.match(/getTornKey|TORN_API_KEY|KEY_BUILDER_URL|PDA-APIKEY/g) || []).length, 0);
-  const connects = SRC.match(/^\/\/ @connect\s+\S+/gm);
-  assert.deepEqual(connects, ["// @connect      dossier-api.aec3.org"]);
-  assert.match(SRC, /^\/\/ @version\s+2\.53\.1$/m);
-  // the only GM request left is dossierGet's (the licence check builds its own URL)
+test("source: free mode is back (own Torn key, api.torn.com + tornsy.com), Dossier stays an option", () => {
+  const connects = SRC.match(/^\/\/ @connect\s+\S+/gm).map((x) => x.split(/\s+/).pop()).sort();
+  assert.deepEqual(connects, ["api.torn.com", "dossier-api.aec3.org", "tornsy.com"]);
+  assert.match(SRC, /^\/\/ @version\s+2\.54\.0$/m);
+  // the 2.50 key field and storage key, so a key saved by 2.50 still works
+  assert.match(SRC, /var TORN_API_KEY = lsGet\("tsa-torn-apikey", ""\);/);
+  assert.match(SRC, /id=\\"tsa-setting-apikey\\"/);
+  assert.match(SRC, /id=\\"tsa-key-input\\"/);
+  // GM requests: dossierGet, the licence check, and the 2.50 direct callers
   const xhrUrls = SRC.match(/url:\s*[^,\n]+/g).map((x) => x.replace(/\s+/g, " "));
-  assert.deepEqual(xhrUrls.sort(), ["url: CHECK_URL", "url: DOSSIER_API_BASE + path", "url: url"].sort());
+  assert.deepEqual([...new Set(xhrUrls)].sort(), ["url: CHECK_URL", "url: DOSSIER_API_BASE + path", "url: url"].sort());
 });
 
-test("source: the stored Torn key is deleted on start, and no interval timer fetches data", () => {
-  assert.match(SRC, /\["tsa-torn-apikey",[^\]]*\]\.forEach\(function \(k\) \{\s*try \{ localStorage\.removeItem\(k\); \}/);
-  const intervals = SRC.match(/setInterval\([^)]*\)/g) || [];
-  assert.deepEqual(intervals, ["setInterval(updateCountdownLabel, 1000)"]);
+test("source: nothing removes a stored key on start; the only interval timers are the countdown and the 2.50 warm-up", () => {
+  assert.equal(/removeItem\(k\)/.test(SRC), false);
+  assert.equal(/migrateQtBuySource/.test(SRC), false);
+  const intervals = SRC.match(/setInterval\([^\r\n]*/g) || [];
+  assert.deepEqual(intervals.map((x) => x.trim()).sort(), [
+    "setInterval(function() { histTick(Date.now()); }, HIST_TICK_MS);",
+    "setInterval(updateCountdownLabel, 1000);",
+  ].sort());
 });

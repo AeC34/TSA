@@ -29,52 +29,28 @@ function load(stored = {}) {
   };
   const ctx = vm.createContext({ localStorage });
   vm.runInContext([fn("lsGet"), fn("lsSet"), fn("getQtBuySource"), fn("getShowTop5"),
-    fn("top5SectionVisible"), fn("migrateQtBuySource")].join("\n"), ctx);
+    fn("top5SectionVisible")].join("\n"), ctx);
   ctx.m = m;
   return ctx;
 }
 
 const MARK = "tsa_qt_buy_source_migrated_253";
 
-test("migration resets a stored top5 to buyzone once and sets the marker", () => {
-  const ctx = load({ tsa_qt_buy_source: "top5" });
-  ctx.migrateQtBuySource();
-  assert.equal(ctx.m.tsa_qt_buy_source, "buyzone");
-  assert.equal(ctx.m[MARK], "1");
-  assert.equal(ctx.getQtBuySource(), "buyzone");
-});
-
-test("migration also runs for a user with nothing stored", () => {
-  const ctx = load();
-  ctx.migrateQtBuySource();
-  assert.equal(ctx.m.tsa_qt_buy_source, "buyzone");
-  assert.equal(ctx.m[MARK], "1");
-});
-
-test("after the migration, a top5 picked again is left alone on later starts", () => {
-  const ctx = load({ tsa_qt_buy_source: "top5" });
-  ctx.migrateQtBuySource();
-  ctx.m.tsa_qt_buy_source = "top5"; // user re-picks Top 5 in Settings
-  ctx.migrateQtBuySource();
-  ctx.migrateQtBuySource();
-  assert.equal(ctx.getQtBuySource(), "top5");
-});
-
-test("migration is skipped when the marker is already set", () => {
-  const ctx = load({ tsa_qt_buy_source: "top5", [MARK]: "1" });
-  ctx.migrateQtBuySource();
-  assert.equal(ctx.getQtBuySource(), "top5");
-});
-
-test("migration is called once, at top level of the start sequence", () => {
+// 2.54.0: the 2.53.1 one-time reset of tsa_qt_buy_source is gone (it overwrote a
+// user's own choice). Only the Settings save writes the pill source; the 2.53.1
+// marker is never written nor removed.
+test("no start-up migration: the pill source is written only by the Settings save", () => {
   const CODE_ = SRC.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
-  const calls = CODE_.match(/[^\w.]migrateQtBuySource\(\)/g) || [];
-  const defs = CODE_.match(/function migrateQtBuySource\(\)/g) || [];
-  assert.equal(defs.length, 1);
-  assert.equal(calls.length - defs.length, 1);
-  assert.match(CODE_, /\n  migrateQtBuySource\(\);\n/);
-  // it runs before the first render can read the pill source
-  assert.ok(CODE_.indexOf("\n  migrateQtBuySource();\n") < CODE_.indexOf("function renderFromData("));
+  assert.equal(/migrateQtBuySource/.test(CODE_), false);
+  assert.equal((CODE_.match(/"tsa_qt_buy_source"/g) || []).length, 2); // getQtBuySource + the save
+  assert.match(CODE_, /lsSet\("tsa_qt_buy_source", qtBuySource === "top5" \? "top5" : "buyzone"\);/);
+  assert.equal(CODE_.includes(MARK), false);
+});
+
+test("a stored top5 from before 2.53.1 stays top5 (marker set or not)", () => {
+  assert.equal(load({ tsa_qt_buy_source: "top5" }).getQtBuySource(), "top5");
+  assert.equal(load({ tsa_qt_buy_source: "top5", [MARK]: "1" }).getQtBuySource(), "top5");
+  assert.equal(load({ tsa_qt_buy_source: "buyzone", [MARK]: "1" }).getQtBuySource(), "buyzone");
 });
 
 test("Top 5 section: hidden by default, shown by the toggle", () => {
