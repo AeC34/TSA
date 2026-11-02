@@ -6567,6 +6567,11 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     } catch (e) { return false; }
   }
 
+  // A well-formed licence key is stored (active or not), from the cached state only.
+  function licenceKeyStored() {
+    try { return TSALicense.validToken(TSALicense.peek(licenseDeps).state.token); } catch (e) { return false; }
+  }
+
   function hasTornKey() {
     var k = getTornKey();
     return !!k && k !== "###PDA-APIKEY###";
@@ -6792,8 +6797,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     }).catch(function(e) {
       if (gen !== licenseGen) return;
       // A failed load must NOT kill the auto-refresh loop — dataShowError re-arms it,
-      // so a transient error only skips one cycle.
-      dataShowError("Error: " + e.message);
+      // so a transient error only skips one cycle. Without a Torn key in TSA there
+      // was nothing to fall back to: say that free mode is one key away.
+      dataShowError("Error: " + e.message + (hasTornKey() ? ""
+        : " Or use TSA free with your own Torn API key: Settings → Account."));
     });
   }
 
@@ -7528,9 +7535,13 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       lsSet("qt_intent_" + symb, JSON.stringify({ price: intentPrice, ts: Math.floor(Date.now() / 1000) }));
     }
     qtUpdateLocalCache(symb, action === "buyShares" ? shares : -shares);
-    // Licence mode: laid over Dossier's /me until its next poll has the trade (up
-    // to ~5 min). Free mode reads Torn directly, which already has it.
-    if (dataMode === "dossier") TSAData.logTrade(licenseDeps, symb, action === "buyShares" ? shares : -shares, intentPrice || qtGetPrice(symb));
+    // Laid over Dossier's /me until its next poll has the trade (up to ~5 min).
+    // Logged whenever a licence key is stored, not only while this load came from
+    // Dossier: a trade made on a fallback (free-mode) load is still missing from
+    // Dossier's /me when the next load is a licence load, and without the log that
+    // load would show the old holdings. applyTradeLog skips a trade the poll
+    // already has (ts <= source_ts). Free mode itself reads Torn, which has it.
+    if (licenceKeyStored()) TSAData.logTrade(licenseDeps, symb, action === "buyShares" ? shares : -shares, intentPrice || qtGetPrice(symb));
     showToast(label, "success");
     // The preview line described a trade that has now happened. The pointer is still
     // resting on the button, so no mouseenter or blur will fire to clear it — without
