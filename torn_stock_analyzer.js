@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.54.0
+// @version      2.55.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Free to use with your own Torn API key: TSA reads your holdings from api.torn.com and prices and history from tornsy.com, and the key stays in your browser. Optional, paid: a TSA licence key from dossier.aec3.org (Xanax) lets TSA read the same data from Dossier instead (only the licence key is sent, only to dossier-api.aec3.org); without a licence, or if it lapses, TSA keeps working on your own key.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -4340,7 +4340,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     return html;
   }
 
-  function showROIPlanner(ownedMap, raw) {
+  function showROIPlanner(ownedMap, raw, cacheOnly) {
     var content = document.getElementById("tsa-content");
     if (!content) return;
     content.style.background = "var(--tsa-bg)";
@@ -4463,13 +4463,12 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
             return;
           }
           qtUiTrade(sym, shares, "buyShares", "Bought " + shares.toLocaleString("en-US") + " " + sym + " (" + tier + ")");
-          showROIPlanner(ownedMap, raw);
         });
       });
     }
 
     function renderAndAttach(cashBalance, armoryFunds) {
-      fetchAllItemPrices(function() {
+      function paint() {
         content.innerHTML = renderROIPlanner(ownedMap, raw, cashBalance, armoryFunds);
         attachListeners();
         var footerDivider = "var(--tsa-border)";
@@ -4480,8 +4479,12 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
             '<span style="font-size:var(--tsa-fs-micro);color:var(--tsa-fg-faint);font-family:var(--tsa-mono)">' + benefitTableStatus + ' &nbsp;·&nbsp; ' + new Date().toLocaleTimeString("en-GB") + '</span>' +
           '</div>'
         );
-      });
+      }
+      if (cacheOnly) paint();
+      else fetchAllItemPrices(paint);
     }
+
+    if (cacheOnly) { renderAndAttach(lastCashBalance, lastArmoryFunds); return; }
 
     // Free mode (as in 2.50): cash and the armoury balance straight from Torn.
     if (dataMode !== "dossier") {
@@ -5463,12 +5466,12 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   // tracking (realized P/L, alerts, price recording, holdings snapshot)
   // stays in loadData — this only computes scores and renders. recordSignals
   // (inside) dedupes per symbol+minute, so re-rendering is safe.
-  function renderFromData(ownedMap, raw, missingBatches, fromCache) {
+  function renderFromData(ownedMap, raw, missingBatches, fromCache, localTrade) {
     var content = document.getElementById("tsa-content");
     if (!content) return;
     var ownedSymbols = Object.keys(ownedMap);
       // If ROI planner is active, show it instead
-      if (roiPlannerActive) { showROIPlanner(ownedMap, raw); return; }
+      if (roiPlannerActive && !localTrade) { showROIPlanner(ownedMap, raw); return; }
       var cachedPriceHistory = loadHistory();
       var stockResults = STOCKS_LIST
         .map(function(s) { return calcScore(s, raw, ownedMap, cachedPriceHistory); })
@@ -6471,6 +6474,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
 
       // Refresh the torn-stock-pocket-style Quick Buy / Swing pills under the QT bar
       renderQtPills();
+      if (roiPlannerActive && localTrade) showROIPlanner(ownedMap, raw, true);
 
   }
 
@@ -7299,6 +7303,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   var qtMapsBuiltAt = 0;   // throttles the preview's map rebuild — see qtRenderConsequence
 
   function qtBuildMaps() {
+    qt_stocks = {}; qt_stockRows = {}; qt_stockId = {};
     $("ul[class^='stock_']").each(function() {
       // Guard the logo parse: a card missing its <img> or a src without
       // "logos/" must skip (return = continue the .each) rather than throw,
@@ -7379,6 +7384,106 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       base = 0;
     }
     qt_localShareCache[sym] = { val: Math.max(0, base + amt), domAtWrite: domNow };
+  }
+
+  // Reconcile a trade against the last loaded position, never against the API.
+  // DOM echoes of a Quick Trade have no delta and cannot apply the buy twice.
+  function applyLocalTrade(sym, deferRender) {
+    if (!lastOwnedMap) return false;
+    var old = lastOwnedMap[sym];
+    var oldShares = old ? old.shares : 0;
+    var shares = qtGetOwnedShares(sym);
+    if (shares === oldShares) return false;
+    var price = qtGetPrice(sym);
+    var delta = shares - oldShares;
+    if (shares <= 0) {
+      delete lastOwnedMap[sym];
+    } else {
+      var o = old;
+      if (!o) {
+        var id = Object.keys(STOCK_ID_MAP).find(function(k) { return STOCK_ID_MAP[k] === sym; });
+        var stocks = {};
+        stocks[id] = { dividend: PASSIVE_STOCKS.indexOf(sym) < 0 ? {} : undefined,
+          transactions: { local: { shares: shares, bought_price: price,
+            time_bought: Math.floor(Date.now() / 1000) } } };
+        o = buildOwnedMap({ stocks: stocks })[sym];
+        if (!o) return false;
+        lastOwnedMap[sym] = o;
+      } else {
+        if (delta > 0) {
+          o.avg_price = ((o.avg_price || 0) * oldShares + price * delta) / shares;
+          o.transactions.unshift({ shares: delta, bought_price: price, time_bought: Math.floor(Date.now() / 1000) });
+        } else {
+          // Swing cost basis uses the newest lots first, just like the trade log.
+          var remaining = -delta;
+          o.transactions = o.transactions.map(function(t) {
+            var take = Math.min(t.shares || 0, remaining);
+            remaining -= take;
+            return Object.assign({}, t, { shares: (t.shares || 0) - take });
+          }).filter(function(t) { return t.shares > 0; });
+        }
+        o.shares = shares;
+      }
+      // Only Torn's payout can credit a higher tier; sells can lower it locally.
+      o.dividend_increment = Math.min(o.dividend_increment || 0, qtGetBenefitTier(sym, shares).tier);
+      o.has_dividend = o.dividend_increment > 0;
+    }
+    enrichOwnedMap(lastOwnedMap, lastRaw);
+    if (lastRaw && price > 0) {
+      var live = lastRaw.find(function(r) { return r.stock === sym; });
+      if (live) live.price = String(price);
+      else lastRaw.push({ stock: sym, price: String(price), interval: {} });
+    }
+    if (!deferRender) qtRenderLocalTrade();
+    return true;
+  }
+
+  function qtRenderLocalTrade() {
+    if (!lastOwnedMap || !lastRaw) return;
+    renderFromData(lastOwnedMap, lastRaw, lastMissingBatches, true, true);
+    qtRenderConsequence(null);
+  }
+
+  var qtOwnedObserver = null;
+  var qtOwnedCounts = {};
+  var qtOwnedFrame = null;
+
+  function qtObserveOwnedList() {
+    if (qtOwnedObserver) return;
+    var attached = false;
+    function attach() {
+      if (!document.querySelector("ul[class^='stock_']")) return false;
+      qtOwnedObserver.disconnect();
+      qtBuildMaps();
+      Object.keys(qt_stockRows).forEach(function(sym) {
+        var value = qtReadOwnedFromDom(sym);
+        if (value !== null) qtOwnedCounts[sym] = value;
+      });
+      // The body survives React replacing individual rows or the whole list.
+      qtOwnedObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+      attached = true;
+      return true;
+    }
+    qtOwnedObserver = new MutationObserver(function() {
+      if (!attached) { attach(); return; }
+      if (qtOwnedFrame !== null) return;
+      qtOwnedFrame = requestAnimationFrame(function() {
+        qtOwnedFrame = null;
+        qtBuildMaps();
+        var changed = false;
+        Object.keys(qt_stockRows).forEach(function(sym) {
+          var value = qtReadOwnedFromDom(sym);
+          if (value === null || value === qtOwnedCounts[sym]) return;
+          qtOwnedCounts[sym] = value;
+          if (applyLocalTrade(sym, true)) changed = true;
+        });
+        if (changed) qtRenderLocalTrade();
+      });
+    });
+    if (!attach()) {
+      // Wait once for Torn's initial list, without polling or observing each row.
+      qtOwnedObserver.observe(document, { childList: true, subtree: true });
+    }
   }
 
   function qtGetMoneyFast() {
@@ -7535,6 +7640,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       lsSet("qt_intent_" + symb, JSON.stringify({ price: intentPrice, ts: Math.floor(Date.now() / 1000) }));
     }
     qtUpdateLocalCache(symb, action === "buyShares" ? shares : -shares);
+    applyLocalTrade(symb);
     // Laid over Dossier's /me until its next poll has the trade (up to ~5 min).
     // Logged whenever a licence key is stored, not only while this load came from
     // Dossier: a trade made on a fallback (free-mode) load is still missing from
@@ -9807,6 +9913,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   function createUIOnce() {
     if (_uiCreated) return;
     _uiCreated = true;
+    qtObserveOwnedList();
     createUI();
     initialLoad();
     // Per-symbol history warm-up (free mode). Independent of loadData: it is its own
