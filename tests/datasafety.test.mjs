@@ -163,14 +163,14 @@ for (const visible of [true, false]) {
 for (const [name, ans] of [["503", F.J({ error: "down" }, 503)], ["403 licence inactive", F.J({ error: "licence inactive" }, 403)],
   ["403 torn key required", F.J({ error: "torn key required" }, 403)], ["401", F.J({ error: "unauthorized" }, 401)],
   ["a network error", "error"]]) {
-  test("(c) Dossier answering " + name + ": falls back to Torn + tornsy for the load, no data lost", async () => {
+  test("(c) Dossier answering " + name + ", licence still active: Dossier only, 0 Torn/tornsy calls, no data lost", async () => {
     const NOW = Date.now(), before = F.storeBoth(NOW);
     const b = await run(before, dossierFails(NOW, ans));
     assertNoDataLoss(before, b, "(c) " + name);
-    assert.ok(count(b, "api.torn.com") >= 2, b.hosts().join(","));
-    assert.ok(count(b, "tornsy.com") >= 4, b.hosts().join(","));
-    assert.match(b.content(), /this load used your own Torn API key/);
-    assert.match(text(b), /You own 1/);
+    assert.equal(count(b, "api.torn.com"), 0, b.hosts().join(","));
+    assert.equal(count(b, "tornsy.com"), 0, b.hosts().join(","));
+    assert.match(text(b), /Dossier/);
+    assert.doesNotMatch(b.content(), /this load used your own Torn API key/);
     assert.doesNotMatch(b.page(), LOCK_WORDS);
   });
 }

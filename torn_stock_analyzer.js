@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.55.0
+// @version      2.56.0
 // @author       AeC3
-// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner whose benefit-block roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Free to use with your own Torn API key: TSA reads your holdings from api.torn.com and prices and history from tornsy.com, and the key stays in your browser. Optional, paid: a TSA licence key from dossier.aec3.org (Xanax) lets TSA read the same data from Dossier instead (only the licence key is sent, only to dossier-api.aec3.org); without a licence, or if it lapses, TSA keeps working on your own key.
+// @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner that names the next benefit block to buy (affordable now, else by selling worse blocks, else the one closest to affordable) and whose roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Free to use with your own Torn API key: TSA reads your holdings from api.torn.com and prices and history from tornsy.com, and the key stays in your browser. Optional, paid: a TSA licence key from dossier.aec3.org (Xanax) lets TSA read the same data, and Dossier's Benefit Advisor recommendation, from Dossier instead (only the licence key is sent, only to dossier-api.aec3.org). While the licence is active TSA reads from Dossier only and never calls Torn or tornsy itself; without a licence, or if it lapses, TSA keeps working on your own key.
 // @match        https://www.torn.com/page.php?sid=stocks*
 // @run-at       document-end
 // @license      MIT
@@ -38,6 +38,14 @@
   // ==TSA-NET-BEGIN==
   var gmXhrWarned = false;
   function gmXhr(opts) {
+    // Licence mode is Dossier ONLY (owner decision 2026-11-05): while a licence is
+    // active, no request may reach api.torn.com or tornsy.com, whichever code path
+    // asks. The check lives outside the TSA-NET block (it needs the licence state),
+    // hence the typeof guard: the node tests load this adapter on its own.
+    if (typeof tsaSelfFetchBlocked === "function" && tsaSelfFetchBlocked(opts && opts.url)) {
+      setTimeout(function () { if (opts.onerror) opts.onerror({ error: "licence_mode" }); }, 0);
+      return;
+    }
     if (typeof GM_xmlhttpRequest !== "undefined") { return GM_xmlhttpRequest(opts); }
     if (typeof GM !== "undefined" && GM && typeof GM.xmlHttpRequest === "function") { return GM.xmlHttpRequest(opts); }
     // TornPDA exposes no GM API, but provides PDA_httpGet, which forwards the
@@ -79,7 +87,7 @@
 
   // ---- Dossier data client ----
   // Licence mode only (an optional, paid extra): with an active TSA licence, TSA
-  // reads its data from these four read-only routes on Dossier, which already polls
+  // reads its data from these five read-only routes on Dossier, which already polls
   // Torn and tornsy for its own users. Without one, TSA fetches api.torn.com and
   // tornsy.com itself with the user's own key (free mode, see loadDirect). The
   // request carries ONLY the TSA licence key, as a Bearer header, to
@@ -95,7 +103,7 @@
   //   throttled        429; Retry-After is honoured locally: nothing is sent until it passes
   //   unreachable      anything else: 5xx, network, timeout, an unreadable body
   var DOSSIER_API_BASE = "https://dossier-api.aec3.org";
-  var DOSSIER_PATHS = ["/api/tsa/market", "/api/tsa/me", "/api/tsa/history", "/api/tsa/reference"];
+  var DOSSIER_PATHS = ["/api/tsa/market", "/api/tsa/me", "/api/tsa/history", "/api/tsa/reference", "/api/tsa/benefit"];
   var DOSSIER_TIMEOUT_MS = 10000;
   var DOSSIER_RETRY_DEFAULT_S = 60;     // a 429 without a readable Retry-After
   var DOSSIER_RETRY_MAX_S = 3600;       // never trust a Retry-After for longer than this
@@ -474,6 +482,9 @@
     function isPolled(b) { return !!(b && b.holdings_status === "ok"); }
     function always() { return true; }
     function same(b) { return b; }
+    // /benefit: only an answer is worth keeping (an "unavailable" one included —
+    // that IS Dossier's answer, and TSA shows it rather than computing its own).
+    function hasAnswer(b) { return !!(b && b.answer && typeof b.answer === "object" && typeof b.answer.kind === "string"); }
 
     // The /me body reduced to what TSA reads, every number forced to a finite
     // number. Applied to every /me answer as it arrives, so the copy kept in
@@ -525,7 +536,10 @@
       market:    { path: "/api/tsa/market",    store: "tsa_dossier_market", keep: hasRows,  shape: same,   maxMs: 24 * 3600 * 1000 },
       me:        { path: "/api/tsa/me",        store: "tsa_dossier_me",     keep: isPolled, shape: trimMe, maxMs: 6 * 3600 * 1000 },
       history:   { path: "/api/tsa/history",   store: null, keep: always, shape: same, maxMs: 24 * 3600 * 1000 },
-      reference: { path: "/api/tsa/reference", store: null, keep: always, shape: same, maxMs: 24 * 3600 * 1000 }
+      reference: { path: "/api/tsa/reference", store: null, keep: always, shape: same, maxMs: 24 * 3600 * 1000 },
+      // Dossier's Benefit Advisor answer (licence mode's ONLY source of the ROI
+      // recommendation). Not stored: it follows the holdings, which move.
+      benefit:   { path: "/api/tsa/benefit",   store: null, keep: hasAnswer, shape: same, maxMs: 30 * 60 * 1000 }
     };
     var FAIL_WAIT_MS = 5 * 60 * 1000;
     var MARKET_FALLBACK_MAX_MS = 30 * 60 * 1000;   // stored interval snapshots older than this are not scored
@@ -3572,6 +3586,339 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     };
   }
 
+  // Every OWNED marginal benefit tier that could be sold, worst ROI first — the
+  // sell side of the upgrade swap and of the next-block rule's "via sale" step.
+  function computeSellUnits(ownedMap, raw) {
+    ownedMap = ownedMap || {};
+    // Sell units: EVERY owned benefit marginal tier (each stock, tier 1..effTopTier).
+    // A stock's tiers must be sold top-down (shares are fungible — to drop a lower tier
+    // you must sell everything above it). Because a higher tier has lower ROI, sorting
+    // all units by ROI ascending lays out each stock's tiers in top-down order, so
+    // accumulating a prefix of the sorted list never violates the top-down rule.
+    // effTopTier honours the planner tier cap (shares above the cap are already swing).
+    var sellUnits = [];
+    Object.keys(ownedMap).forEach(function(sym) {
+      var o = ownedMap[sym];
+      if (!o || !o.has_dividend || o.benefit_shares <= 0) return;
+      if (roiSymSkipped(sym)) return; // released to swing — not a benefit block
+      var inc = o.dividend_increment || 0;
+      var cap = roiSymTierCap(sym);
+      var effTopTier = Math.min(inc, cap === Infinity ? inc : cap);
+      if (effTopTier < 1) return;
+      var req = BENEFIT_REQ[sym] || 0;
+      if (req <= 0) return;
+      var liveEntry = raw ? raw.find(function(x) { return x.stock === sym; }) : null;
+      var livePrice = liveEntry ? (parseFloat(liveEntry.price) || 0) : 0;
+      if (livePrice <= 0) return;
+      var isPassive = PASSIVE_STOCKS.indexOf(sym) >= 0;
+      var topT = isPassive ? 1 : effTopTier; // passive stocks are single-tier
+      for (var t = 1; t <= topT; t++) {
+        var marginalShares = isPassive ? req : Math.pow(2, t - 1) * req;
+        var saleValue = marginalShares * livePrice * SELL_FEE; // net of Torn's 0.1% sell fee
+        if (saleValue <= 0) continue;
+        var entry = ROI_MAP[sym + "|T" + t];
+        if (!entry) continue;
+        var perCycle = getPerCycle(entry);
+        var cycleDays = getCycleDays(entry, ownedMap);
+        var weekly = perCycle ? perCycle / cycleDays * 7 : 0;
+        var tierCost = marginalShares * livePrice;
+        // ROI on the LIVE per-cycle payout the buy side uses (getPerCycle), so the two
+        // sides are genuinely comparable for the 9 item-paying stocks. The cost basis
+        // stays this tier's own parcel at live price: that is what selling the block
+        // actually returns, which is the right denominator for a sell decision.
+        var roi = (tierCost > 0 && perCycle) ? (perCycle / tierCost * (365 / cycleDays) * 100) : 0;
+        sellUnits.push({ sym: sym, tier: "T" + t, tierNum: t, roi: roi, shares: marginalShares, saleValue: saleValue, weekly: weekly });
+      }
+    });
+    // Lowest ROI first, then symbol alphabetically (deterministic instead of
+    // Object.keys order), then tier DESCENDING. The tier key is defence in depth
+    // only: within one symbol ROI is strictly decreasing in tier (the parcel doubles
+    // while the payout does not), so the ROI key already orders one stock's tiers
+    // top-down and the tier key cannot currently be reached. It stays as the explicit
+    // statement of the ordering the accumulate-a-prefix loop below depends on - it
+    // must never drop a lower tier while a higher one is still held.
+    sellUnits.sort(function(a, b) {
+      return (a.roi - b.roi) || a.sym.localeCompare(b.sym) || (b.tierNum - a.tierNum);
+    });
+    return sellUnits;
+  }
+
+  // ---- NEXT BLOCK: the same rule as Dossier's Benefit Advisor (2.56.0) ----
+  // Owner decision 2026-11-05: TSA names the same next benefit block Dossier does.
+  // Licence mode shows Dossier's own answer (/api/tsa/benefit) and runs none of
+  // this; free mode runs this port of dossier app/benefit_advisor.py pick_answer(),
+  // own_days_to_afford() and fund_by_sale(). Over the open roadmap rows, in the
+  // roadmap's own order (payback ascending, as Dossier's ranking):
+  //   buy      the first row affordable now: cost <= capital
+  //   viaSale  else the first row that selling worse blocks pays for
+  //   closest  else the row with the FEWEST days to afford, each judged against
+  //            capital minus that stock's OWN swing (its own shares cannot pay for
+  //            its own block) at the current weekly income; a tie keeps the
+  //            earlier row
+  //   save     else (no income, nothing reachable) the highest-income goal
+  //   none     nothing open at all
+  // ``capital`` is the planner's whole capital (cash + swing + armoury).
+
+  // fund_by_sale(): sell the worst blocks (units, ROI ascending) until the funds
+  // cover the cost. Skips the buy's own stock, stops at a block as good as the buy,
+  // and refuses a sale that loses more weekly income than the buy brings in.
+  function fundBySale(buySym, buyRoi, buyWeekly, cost, units, funds) {
+    var proceeds = 0, lost = 0, sells = [];
+    for (var i = 0; i < units.length; i++) {
+      var u = units[i];
+      if (u.sym === buySym) continue;
+      if (buyRoi <= u.roi) break;
+      sells.push(u);
+      proceeds += u.saleValue;
+      lost += u.weekly;
+      if (funds + proceeds >= cost) {
+        var net = buyWeekly - lost;
+        if (net <= 0) return null;   // a downgrade, never a plan
+        return { sells: sells, proceeds: proceeds, netWeekly: net, leftoverCash: funds + proceeds - cost };
+      }
+    }
+    return null;
+  }
+
+  // -> {kind, row, days, viaSale}. row is a computeRoadmap row (null for none/empty),
+  // days the whole days until it is affordable (0 for buy/viaSale, null = never).
+  function pickNextBlock(ownedMap, raw, capital, weeklyIncome, roadmapRows) {
+    ownedMap = ownedMap || {};
+    capital = capital || 0;
+    var all = roadmapRows || computeRoadmap(ownedMap, raw);
+    var rows = all.filter(function(r) { return !r.owned && !r.pending && r.cost > 0; });
+    var out = { kind: "none", row: null, days: null, viaSale: null };
+    if (rows.length === 0) { out.kind = all.length ? "none" : "empty"; return out; }
+    var i;
+    for (i = 0; i < rows.length; i++) {
+      if (rows[i].cost <= capital) { out.kind = "buy"; out.row = rows[i]; out.days = 0; return out; }
+    }
+    function capFor(sym) { return Math.max(0, capital - symSwingValue(sym, ownedMap, raw)); }
+    var units = computeSellUnits(ownedMap, raw);
+    for (i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var sale = fundBySale(r.sym, r.roi, (r.perCycle / r.freq) * 7, r.cost, units, capFor(r.sym));
+      if (sale && sale.sells.length > 0) { out.kind = "viaSale"; out.row = r; out.days = 0; out.viaSale = sale; return out; }
+    }
+    var best = -1, bestDays = null;
+    for (i = 0; i < rows.length; i++) {
+      var d = daysToAfford(rows[i].cost, capFor(rows[i].sym), weeklyIncome);
+      if (!isFinite(d)) continue;
+      if (best < 0 || d < bestDays) { best = i; bestDays = d; }
+    }
+    if (best >= 0) { out.kind = "closest"; out.row = rows[best]; out.days = bestDays; return out; }
+    var fp = computeFastestPath(ownedMap, raw, capital, weeklyIncome, all);
+    if (fp && fp.goal) {
+      out.kind = "save"; out.row = fp.goal;
+      out.days = isFinite(fp.baselineDays) ? fp.baselineDays : null;
+    }
+    return out;
+  }
+
+  // A roadmap row as the recommendation the rec widget, the bank pill and the
+  // planner's "Next move" read. sharesNeeded is the shares still missing to REACH
+  // the tier (a buy of exactly that many can never overshoot it).
+  function blockTarget(row, ownedMap, raw) {
+    if (!row) return null;
+    var req = BENEFIT_REQ[row.sym] || 0;
+    var le = raw ? raw.find(function(x) { return x.stock === row.sym; }) : null;
+    var lp = le ? (parseFloat(le.price) || 0) : 0;
+    return {
+      sym: row.sym, tier: row.tier, cost: row.cost, roi: row.roi || 0,
+      monthlyInc: row.monthlyInc || 0,
+      tierInfo: {
+        nextIncrement: row.tierNum,
+        sharesNeeded: row.sharesNeeded,
+        totalSharesNeeded: (Math.pow(2, row.tierNum) - 1) * req,
+        livePrice: lp
+      }
+    };
+  }
+
+  // One line on why the next block is the next block. Plain text; every symbol in
+  // it is one of the 35 known ones (blockTarget / dossierBlock), so it is HTML-safe.
+  function nextBlockWhy(ans) {
+    var d = ans && typeof ans.days === "number" && isFinite(ans.days) ? "~" + Math.round(ans.days).toLocaleString("en-US") + "d" : null;
+    switch (ans && ans.kind) {
+      case "buy": return "✓ Affordable now";
+      case "viaSale":
+        var sells = (ans.viaSale && ans.viaSale.sells) ? ans.viaSale.sells.map(function(u) { return u.sym + " " + u.tier; }) : [];
+        return sells.length ? "Sell " + sells.join(" + ") + " to afford it" : "Affordable by selling worse blocks";
+      case "closest": return "Closest to afford" + (d ? ": " + d : "");
+      case "save": return "Biggest income goal" + (d ? ": " + d : ": not reachable at current income");
+      default: return "—";
+    }
+  }
+
+  // ---- LICENCE MODE: Dossier's answer, adapted to the shapes TSA renders ----
+  // Nothing here decides anything: it reads /api/tsa/benefit's answer, bridge,
+  // fastest_path and swap, keeps only the 35 known symbols (so no Dossier string
+  // reaches the page) and forces every number through Number(). The block is
+  // Dossier's; the only local figure is how many shares are still missing, from
+  // the holdings TSA shows (Dossier's poll plus any Quick Trade since), so a click
+  // made before Dossier's next poll can never buy the same block twice.
+  function dNum(v) { var n = Number(v); return (typeof v === "number" || typeof v === "string") && isFinite(n) ? n : null; }
+  function dDays(v) { var n = dNum(v); return n === null ? Infinity : n; }
+  function dTier(v) { var n = dNum(v); return (n !== null && n >= 1 && n <= 20 && Math.floor(n) === n) ? n : null; }
+
+  function dossierBlock(row, ownedMap, raw) {
+    if (!row || typeof row !== "object") return null;
+    var sym = typeof row.sym === "string" ? row.sym : "";
+    if (!Object.prototype.hasOwnProperty.call(BENEFIT_REQ, sym)) return null;
+    var n = dTier(row.tier);
+    if (n === null) return null;
+    var req = BENEFIT_REQ[sym];
+    var total = (Math.pow(2, n) - 1) * req;
+    var o = ownedMap ? ownedMap[sym] : null;
+    var held = o ? (o.shares || 0) : 0;
+    var le = raw ? raw.find(function(x) { return x.stock === sym; }) : null;
+    var lp = le ? (parseFloat(le.price) || 0) : 0;
+    var dShares = dNum(row.shares_needed);
+    var dCost = dNum(row.cost);
+    var missing = Math.max(0, total - held);
+    if (!(lp > 0) && dShares > 0 && dCost > 0) lp = dCost / dShares;
+    var cost = (dShares === missing && dCost !== null) ? dCost : missing * lp;
+    return {
+      sym: sym, tier: "T" + n, cost: cost, roi: dNum(row.roi) || 0,
+      monthlyInc: dNum(row.monthly_inc) || 0, dailyInc: dNum(row.daily_inc) || 0,
+      tierInfo: { nextIncrement: n, sharesNeeded: missing, totalSharesNeeded: total, livePrice: lp }
+    };
+  }
+
+  // The status line licence mode shows when Dossier gave no block to name.
+  function dossierBenefitStatus(res) {
+    if (!res) return "Waiting for Dossier's Benefit Advisor.";
+    if (res.kind === "throttled") return "Dossier throttled: the recommendation comes back on the next refresh.";
+    if (res.kind === "key_required") return "Dossier has no working Torn API key for your account.";
+    if (res.kind === "licence_invalid" || res.kind === "licence_inactive") return "Dossier did not accept the TSA licence.";
+    if (res.kind !== "ok") return "Dossier unreachable: no recommendation until it answers.";
+    var k = res.body && res.body.answer ? res.body.answer.kind : null;
+    if (k === "unavailable") return "Dossier's Benefit Advisor is not available right now (its market data is still loading).";
+    if (k === "empty") return "Dossier's Benefit Advisor has no benefit blocks to rank yet.";
+    return "Dossier's Benefit Advisor has nothing to recommend right now.";
+  }
+
+  // The computeBridgePlan shape, from Dossier. target null + status text when
+  // Dossier named no block: licence mode then shows that status, never a local pick.
+  function dossierBenefitPlan(res, ownedMap, raw) {
+    var plan = {
+      fromDossier: true, status: null, answer: null, dynamicNextTiers: [], target: null,
+      fundCapital: 0, bridgeChain: [], daysBaseline: Infinity, bridgeGoal: null,
+      bridgeHorizonDays: 90, bridgeBaselineDays: 0, bridgeDaysWith: 0, swap: null, fastest: null
+    };
+    var body = (res && res.kind === "ok" && res.body && typeof res.body === "object") ? res.body : null;
+    var a = body && body.answer && typeof body.answer === "object" ? body.answer : null;
+    var pl = body && body.payload && typeof body.payload === "object" ? body.payload : {};
+    plan.fundCapital = dNum(pl.capital && pl.capital.total) || 0;
+    var kind = a && typeof a.kind === "string" ? a.kind : null;
+    var target = (kind === "buy" || kind === "viaSale" || kind === "closest" || kind === "save")
+      ? dossierBlock(a.row, ownedMap, raw) : null;
+    if (!target) { plan.status = dossierBenefitStatus(res); return plan; }
+    plan.target = target;
+    plan.answer = { kind: kind, days: dNum(a.days), viaSale: null };
+    if (kind === "viaSale" && a.row.affordable_via_sale && Array.isArray(a.row.affordable_via_sale.sells)) {
+      plan.answer.viaSale = { sells: a.row.affordable_via_sale.sells.map(function(u) {
+        var b = dossierBlock({ sym: u && u.sym, tier: u && u.tier }, null, null);
+        return b ? { sym: b.sym, tier: b.tier } : null;
+      }).filter(Boolean) };
+    }
+    plan.daysBaseline = plan.answer.days === null ? Infinity : plan.answer.days;
+    var ranking = Array.isArray(pl.ranking) ? pl.ranking : [];
+    function rankRow(sym, tier) {
+      for (var i = 0; i < ranking.length; i++) {
+        var r = ranking[i];
+        if (r && r.sym === sym && dTier(r.tier) === tier) return r;
+      }
+      return null;
+    }
+    var br = pl.bridge && typeof pl.bridge === "object" ? pl.bridge : null;
+    if (br) {
+      var g = dossierBlock(br.goal, ownedMap, raw);
+      plan.bridgeGoal = g;
+      plan.bridgeHorizonDays = dNum(br.horizon_days) || 90;
+      plan.bridgeBaselineDays = dDays(br.baseline_days);
+      plan.bridgeDaysWith = br.days_with_bridges == null ? plan.bridgeBaselineDays : dDays(br.days_with_bridges);
+      (Array.isArray(br.chain) ? br.chain : []).forEach(function(c) {
+        if (!c || typeof c !== "object") return;
+        var n = dTier(c.tier);
+        var rr = rankRow(c.sym, n) || { sym: c.sym, tier: n, cost: c.cost };
+        var b = dossierBlock(rr, ownedMap, raw);
+        if (!b) return;
+        plan.bridgeChain.push({
+          sym: b.sym, tier: b.tier, cost: dNum(c.cost) || b.cost, roi: dNum(c.roi) || 0,
+          extraIncome: dNum(c.extra_weekly) || 0, status: c.status === "now" ? "now" : "later",
+          daysUntil: dDays(c.days_until), daysSaved: dDays(c.days_saved), tierInfo: b.tierInfo
+        });
+      });
+    }
+    var fp = pl.fastest_path && typeof pl.fastest_path === "object" ? pl.fastest_path : null;
+    var fg = fp ? dossierBlock(fp.goal, ownedMap, raw) : null;
+    if (fg) {
+      var steps = [];
+      (Array.isArray(fp.steps) ? fp.steps : []).forEach(function(st) {
+        var b = dossierBlock({ sym: st && st.sym, tier: st && st.tier }, null, null);
+        if (!b) return;
+        steps.push({ sym: b.sym, tier: b.tier, tierNum: b.tierInfo.nextIncrement, cost: dNum(st.cost) || 0,
+                     days: dDays(st.days), daysSaved: dDays(st.days_saved) });
+      });
+      plan.fastest = {
+        goal: { sym: fg.sym, tier: fg.tier, cost: dNum(fp.goal.cost) || fg.cost, roi: fg.roi, monthlyInc: fg.monthlyInc },
+        baselineDays: dDays(fp.baseline_days), steps: steps, best: steps[0] || null
+      };
+    }
+    var sw = pl.swap && pl.swap.best && typeof pl.swap.best === "object" ? pl.swap.best : null;
+    var buy = sw ? dossierBlock(sw.buy, ownedMap, raw) : null;
+    if (buy && Array.isArray(sw.sells) && sw.sells.length > 0) {
+      var sells = [];
+      var ok = sw.sells.every(function(u) {
+        var b = dossierBlock({ sym: u && u.sym, tier: u && u.tier }, null, null);
+        if (!b) return false;
+        // The share count a sale trades is never taken from the server: one tier's own
+        // parcel, as computeSellUnits sells it. A Dossier figure that disagrees drops
+        // the swap rather than sell a different amount than "Sell SYM Tn" says.
+        var tn = b.tierInfo.nextIncrement, rq = BENEFIT_REQ[b.sym];
+        var sh = PASSIVE_STOCKS.indexOf(b.sym) >= 0 ? rq : Math.pow(2, tn - 1) * rq;
+        if (dNum(u && u.shares) !== sh) return false;
+        sells.push({ sym: b.sym, tier: b.tier, roi: dNum(u.roi) || 0, shares: sh,
+                     saleValue: dNum(u.sale_value) || 0, weekly: dNum(u.weekly_lost) || 0 });
+        return true;
+      });
+      if (ok && buy.tierInfo.sharesNeeded > 0) {
+        plan.swap = {
+          sells: sells,
+          buy: { sym: buy.sym, tier: buy.tier, roi: buy.roi, cost: buy.cost, shares: buy.tierInfo.sharesNeeded, tierInfo: buy.tierInfo },
+          netWeekly: dNum(sw.net_weekly) || 0, leftoverCash: dNum(sw.leftover_cash) || 0
+        };
+      }
+    }
+    return plan;
+  }
+
+  // ONE entry point for the ROI recommendation, so the planner, the rec widget and
+  // the Quick Trade pills cannot disagree: Dossier's answer in licence mode, TSA's
+  // own (same rule) in free mode.
+  function benefitPlan(ownedMap, raw, totalCapital, weeklyIncome, roadmapRows) {
+    if (dataMode === "dossier") return dossierBenefitPlan(lastDossierBenefit, ownedMap, raw);
+    return computeBridgePlan(ownedMap, raw, totalCapital, weeklyIncome, roadmapRows);
+  }
+  function benefitSwap(ownedMap, raw, liquidCash, plan) {
+    if (plan && plan.fromDossier) return plan.swap;
+    return computeUpgradeSwap(ownedMap, raw, liquidCash, plan);
+  }
+
+  // The planner's capital: cash + every swing position net of the sell fee + the
+  // faction armoury — the figure the next-block rule measures "affordable" against.
+  function planCapital(ownedMap, raw) {
+    var sw = 0;
+    Object.keys(ownedMap || {}).forEach(function(sym) {
+      var o = ownedMap[sym];
+      if (!o || !(o.swing_shares > 0)) return;
+      var le = raw ? raw.find(function(x) { return x.stock === sym; }) : null;
+      if (le) sw += (parseFloat(le.price) || 0) * o.swing_shares * SELL_FEE;
+    });
+    return (lastCashBalance || 0) + sw + (lastArmoryFunds || 0);
+  }
+
   // Target + bridgebuilder chain — shared by the ROI Planner and the Quick
   // Trade bridge pill so both always agree on the target and on bridgeChain.
   // Logic extracted 1:1 from renderROIPlanner; chain entries additionally
@@ -3612,8 +3959,12 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       return (b.roi - a.roi) || a.sym.localeCompare(b.sym);
     });
 
-    // Target = best ROI entry regardless of affordability
-    var target = dynamicNextTiers[0] || null;
+    // Target = the next-block rule (2.56.0, Dossier's rule): buy now → via a sale →
+    // the closest block → the biggest-income goal. dynamicNextTiers (best ROI per
+    // symbol) stays the upgrade swap's buy list.
+    var rmRows = roadmapRows || computeRoadmap(ownedMap, raw);
+    var answer = pickNextBlock(ownedMap, raw, totalCapital, weeklyIncome, rmRows);
+    var target = blockTarget(answer.row, ownedMap, raw);
 
     // Capital actually deployable toward the target. A stock's own swing value
     // can't fund building THAT stock's benefit block — selling those shares
@@ -3622,7 +3973,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     // renderer's verdict, which reads plan.fundCapital). Mirrors the swing
     // valuation in renderROIPlanner (livePrice × swing_shares net of 0.1% fee).
     var ownTargetSwing = target ? symSwingValue(target.sym, ownedMap, raw) : 0;
-    var fundCapital = Math.max(0, totalCapital - ownTargetSwing);
+    // A "buy now" answer is measured against the whole capital, as Dossier's is.
+    var fundCapital = answer.kind === "buy" ? totalCapital : Math.max(0, totalCapital - ownTargetSwing);
 
     // Bridgebuilder chain (sell-later model): a bridge is a benefit tier you buy
     // (or drip into via the pills), hold to collect dividends, then SELL again to
@@ -3632,8 +3984,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     // therefore come purely from the extra dividend income while held.
     //
     // ITS GOAL IS *NOT* `target`, AND THAT IS THE WHOLE FIX (2026-08-25).
-    // `target` is the best-ROI next increment, and it stays that way because the bank
-    // pill and the upgrade swap are built on it. But ROI falls strictly with tier
+    // `target` was then the best-ROI next increment (since 2.56.0 it is the next-block
+    // rule's pick, see pickNextBlock; the chain's own goal is unchanged). ROI falls strictly with tier
     // inside one symbol, so the best-ROI open row is ALWAYS the next increment of the
     // best symbol — a goal one buy away. daysToAfford then returned 0, every
     // candidate scored saved <= 0, and this chain came back EMPTY every single time.
@@ -3653,8 +4005,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     //     order — saving days is the entire purpose of the feature.
     var BRIDGE_HORIZON_DAYS = 90;
     var bridgeChain = [];
-    var daysBaseline = target ? daysToAfford(target.cost, fundCapital, weeklyIncome) : 0;
-    var rmRows = roadmapRows || computeRoadmap(ownedMap, raw);
+    var daysBaseline = target ? (answer.days === null ? Infinity : answer.days) : 0;
     var openRows = rmRows.filter(function(r) {
       return !r.owned && !r.pending && r.cost > 0 && r.roi > 0;
     });
@@ -3745,6 +4096,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     return {
       dynamicNextTiers: dynamicNextTiers,
       target: target,
+      answer: { kind: answer.kind, days: answer.days, viaSale: answer.viaSale },
       fundCapital: fundCapital,
       bridgeChain: bridgeChain,
       // `daysBaseline` belongs to `target` — it is the "Goal in ~Nd" line on the
@@ -3774,57 +4126,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     if (!plan || !plan.dynamicNextTiers || plan.dynamicNextTiers.length === 0) return null;
     ownedMap = ownedMap || {};
 
-    // Sell units: EVERY owned benefit marginal tier (each stock, tier 1..effTopTier).
-    // A stock's tiers must be sold top-down (shares are fungible — to drop a lower tier
-    // you must sell everything above it). Because a higher tier has lower ROI, sorting
-    // all units by ROI ascending lays out each stock's tiers in top-down order, so
-    // accumulating a prefix of the sorted list never violates the top-down rule.
-    // effTopTier honours the planner tier cap (shares above the cap are already swing).
-    var sellUnits = [];
-    Object.keys(ownedMap).forEach(function(sym) {
-      var o = ownedMap[sym];
-      if (!o || !o.has_dividend || o.benefit_shares <= 0) return;
-      if (roiSymSkipped(sym)) return; // released to swing — not a benefit block
-      var inc = o.dividend_increment || 0;
-      var cap = roiSymTierCap(sym);
-      var effTopTier = Math.min(inc, cap === Infinity ? inc : cap);
-      if (effTopTier < 1) return;
-      var req = BENEFIT_REQ[sym] || 0;
-      if (req <= 0) return;
-      var liveEntry = raw ? raw.find(function(x) { return x.stock === sym; }) : null;
-      var livePrice = liveEntry ? (parseFloat(liveEntry.price) || 0) : 0;
-      if (livePrice <= 0) return;
-      var isPassive = PASSIVE_STOCKS.indexOf(sym) >= 0;
-      var topT = isPassive ? 1 : effTopTier; // passive stocks are single-tier
-      for (var t = 1; t <= topT; t++) {
-        var marginalShares = isPassive ? req : Math.pow(2, t - 1) * req;
-        var saleValue = marginalShares * livePrice * SELL_FEE; // net of Torn's 0.1% sell fee
-        if (saleValue <= 0) continue;
-        var entry = ROI_MAP[sym + "|T" + t];
-        if (!entry) continue;
-        var perCycle = getPerCycle(entry);
-        var cycleDays = getCycleDays(entry, ownedMap);
-        var weekly = perCycle ? perCycle / cycleDays * 7 : 0;
-        var tierCost = marginalShares * livePrice;
-        // ROI on the LIVE per-cycle payout the buy side uses (getPerCycle), so the two
-        // sides are genuinely comparable for the 9 item-paying stocks. The cost basis
-        // stays this tier's own parcel at live price: that is what selling the block
-        // actually returns, which is the right denominator for a sell decision.
-        var roi = (tierCost > 0 && perCycle) ? (perCycle / tierCost * (365 / cycleDays) * 100) : 0;
-        sellUnits.push({ sym: sym, tier: "T" + t, tierNum: t, roi: roi, shares: marginalShares, saleValue: saleValue, weekly: weekly });
-      }
-    });
+    var sellUnits = computeSellUnits(ownedMap, raw);
     if (sellUnits.length === 0) return null;
-    // Lowest ROI first, then symbol alphabetically (deterministic instead of
-    // Object.keys order), then tier DESCENDING. The tier key is defence in depth
-    // only: within one symbol ROI is strictly decreasing in tier (the parcel doubles
-    // while the payout does not), so the ROI key already orders one stock's tiers
-    // top-down and the tier key cannot currently be reached. It stays as the explicit
-    // statement of the ordering the accumulate-a-prefix loop below depends on - it
-    // must never drop a lower tier while a higher one is still held.
-    sellUnits.sort(function(a, b) {
-      return (a.roi - b.roi) || a.sym.localeCompare(b.sym) || (b.tierNum - a.tierNum);
-    });
 
     var best = null;
     plan.dynamicNextTiers.forEach(function(b) {
@@ -3897,8 +4200,9 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var weeklyIncome = calcWeeklyIncome(ownedMap, raw, null);
 
     // Target + bridgebuilder chain via the shared computation (also used by
-    // the Quick Trade bridge pill, so both views always agree).
-    var plan = computeBridgePlan(ownedMap, raw, totalCapital, weeklyIncome);
+    // the Quick Trade bridge pill, so both views always agree). Licence mode:
+    // Dossier's answer, never a local one.
+    var plan = benefitPlan(ownedMap, raw, totalCapital, weeklyIncome);
     var dynamicNextTiers = plan.dynamicNextTiers;
     var target = plan.target;
     var nextEntries = target ? [target] : [];
@@ -3906,7 +4210,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var fundCapital = plan.fundCapital; // deployable toward target (excl. its own swing)
     var daysWait = plan.daysBaseline;
 
-    if (target) {
+    if (target && !plan.fromDossier) {
       // Sell candidates: owned benefit blocks with lower ROI than target
       // ROI of target
       var targetRoi = target.roi || 0;
@@ -4004,7 +4308,11 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       // to fund its own benefit block shrinks the very block being completed.
       var shortBy = Math.max(0, target.cost - fundCapital);
       var targetTier = target.tier || ("T" + target.tierInfo.nextIncrement);
+      var ans = plan.answer || {};
+      if (ans.kind === "buy" || ans.kind === "viaSale") shortBy = 0;
       html += nmRow("Target", target.sym + " " + targetTier + " · " + (target.roi || 0).toFixed(2) + "% ROI", c.blue);
+      html += nmRow("Why", nextBlockWhy(ans), ans.kind === "buy" || ans.kind === "viaSale" ? c.green : c.text);
+      if (plan.fromDossier) html += nmRow("Source", "Dossier Benefit Advisor", c.muted);
       html += nmRow("Payback", target.roi > 0 ? Math.round(36500 / target.roi).toLocaleString("en-US") + " days" : "—");
       html += nmRow("Cost", fmRoi(target.cost) + (shortBy > 0 ? " · short " + fmRoi(shortBy) : " ✓"), shortBy > 0 ? c.red : c.green);
       html += nmRow("Available", fmRoi(fundCapital), c.text);
@@ -4014,7 +4322,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       //
       // THE GOAL NAMED HERE IS NOT "Next move" ABOVE, and the line below says so
       // rather than leaving two different day counts on one panel to read as a
-      // contradiction. "Next move" is the best-ROI next increment; this chain aims at
+      // contradiction. "Next move" is the next-block rule's pick; this chain aims at
       // the biggest income reachable inside the horizon — see computeBridgePlan.
       html += '<div style="border-top:1px solid ' + c.divider + ';margin:6px 0"></div>';
       html += '<div style="font-size:var(--tsa-fs-micro);color:var(--tsa-bridge);letter-spacing:0.08em;' + s + ';margin-bottom:5px">🔗 Bridgebuilder · sell later for goal</div>';
@@ -4077,7 +4385,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       // net weekly income gain. Shares the computeUpgradeSwap plan with the Quick Trade
       // pill so the two always agree. On-hand cash only (not totalCapital) — the swap is
       // executed via the pill from cash + sale proceeds, so swing/armory aren't usable.
-      var upSwap = computeUpgradeSwap(ownedMap, raw, cashBalance, plan);
+      var upSwap = benefitSwap(ownedMap, raw, cashBalance, plan);
       if (upSwap) {
         var upSellLabel = upSwap.sells.map(function(sc){ return sc.sym + " " + sc.tier; }).join(" + ");
         html += '<div style="border-top:1px solid ' + c.divider + ';margin:6px 0"></div>';
@@ -4122,6 +4430,12 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       }
       html += nmRow("Goal in", daysWait === 0 ? "Now!" : daysWait === Infinity ? "N/A" : "~" + daysWait + " days", c.text);
       html += '</div>';
+    } else if (plan.fromDossier && plan.status) {
+      // Licence mode and Dossier named no block: say why. No local pick instead.
+      html += '<div style="padding:10px 14px;border-bottom:2px solid ' + c.divider + ';background:' + c.bg3 + '">' +
+        '<div style="font-size:var(--tsa-fs-micro);letter-spacing:0.12em;text-transform:uppercase;color:' + c.blue + ';' + s + ';font-weight:700;margin-bottom:6px">💡 Next move</div>' +
+        '<div style="font-size:var(--tsa-fs-micro);color:' + c.muted + ';line-height:1.5">' + escHtml(plan.status) +
+        ' With a TSA licence, the recommendation comes from Dossier only.</div></div>';
     }
 
     // Hidden stocks dropdown
@@ -4258,7 +4572,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     // follows in payback order. Owned tiers flagged ✓; for unowned tiers a running
     // "cum" shows the capital needed to reach that rung buying in this order.
     var roadmap = computeRoadmap(ownedMap, raw);
-    var fastest = computeFastestPath(ownedMap, raw, totalCapital, weeklyIncome, roadmap);
+    var fastest = plan.fromDossier ? plan.fastest : computeFastestPath(ownedMap, raw, totalCapital, weeklyIncome, roadmap);
     var rmStepMap = {};
     if (fastest) {
       fastest.steps.forEach(function(st, i) { rmStepMap[st.sym + "|" + st.tier] = { step: st, rank: i }; });
@@ -4533,6 +4847,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
 
   function fetchJSON(url, retries) {
     if (retries === undefined) retries = 3;
+    if (tsaSelfFetchBlocked(url)) return Promise.reject(new Error("Licence mode reads from Dossier only"));
     return new Promise(function(resolve, reject) {
       var attempt = function(n) {
         gmXhr({
@@ -6268,7 +6583,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
                                   : "\u26a0 tornsy partial \u2014 " + missingBatches + "/4 interval batches missing, signals degraded") + "</div>" + html;
       }
       // The data source's own state (Dossier throttled / unreachable / still loading
-      // holdings, or why this load fell back to the user's own Torn key), on top.
+      // holdings, or that a lapsed licence put TSA back on the user's own key), on top.
       if (lastDataBanner) {
         html = "<div style=\"padding:8px 14px;font-size:var(--tsa-fs-micro);font-weight:700;color:var(--tsa-warn);background:var(--tsa-warn-bg);border-bottom:1px solid var(--tsa-warn-border)\">" +
           "\u26a0 " + escHtml(lastDataBanner) + "</div>" + html;
@@ -6546,8 +6861,9 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var settled = false;
     licenseEnsure(false, function (d) {
       settled = true;
-      // Without a Torn key the free-mode prompt says why licence mode is off.
-      if (d.locked) loadDirect(hasTornKey() ? "" : "Your TSA licence is not active, so TSA runs free on your own Torn API key. " + licenseReasonText(d));
+      // Licence off (expired, rejected, unconfirmable): free mode, and the status
+      // line (or, without a Torn key, the key prompt) says so.
+      if (d.locked) loadDirect(licenceOffNote(d, ""));
       else loadDossier();
     });
     if (!settled) {
@@ -6571,6 +6887,15 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     } catch (e) { return false; }
   }
 
+  // True for a request to Torn's API or to tornsy while licence mode is on. Licence
+  // mode is Dossier ONLY (owner decision 2026-11-05): gmXhr and fetchJSON refuse
+  // such a request, so no code path can fetch for itself while a licence is active.
+  // Once the licence lapses (licenceModeOn() false) free mode fetches as before.
+  function tsaSelfFetchBlocked(url) {
+    if (typeof url !== "string" || !/^https?:\/\/(api\.torn\.com|(www\.)?tornsy\.com)([\/?#:]|$)/i.test(url)) return false;
+    return licenceModeOn();
+  }
+
   // A well-formed licence key is stored (active or not), from the cached state only.
   function licenceKeyStored() {
     try { return TSALicense.validToken(TSALicense.peek(licenseDeps).state.token); } catch (e) { return false; }
@@ -6587,6 +6912,11 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   var ME_MAX_AGE_MS         = 30 * 1000;
   var MARKET_MAX_AGE_MS     = 30 * 1000;
   var ME_PLANNER_MAX_AGE_MS = 60 * 1000;
+  var BENEFIT_MAX_AGE_MS    = 30 * 1000;
+  var BENEFIT_WAIT_MS       = 3000;
+  // The last /api/tsa/benefit result of a licence-mode load (a TSAData.get result),
+  // or null. Licence mode's ROI recommendation is read from here and nowhere else.
+  var lastDossierBenefit = null;
 
   // /me with every Quick Trade done here since Dossier's last poll laid over it.
   function meWithTrades(me) {
@@ -6650,21 +6980,27 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     if (resetSnapshot) lsSet("tsa_prev_holdings", "{}");
     lastOwnedMap = null;
     lastRaw = null;
+    lastDossierBenefit = null;
+    lastBestRec = null;
     licenseGen++;
   }
 
-  // A licence-mode load could not get its data from Dossier. With a Torn key in
-  // TSA, this load runs in free mode instead and says so in one status line. Without
-  // one, a lock-type answer (401, licence inactive, torn key required) shows the
-  // free-mode key prompt with the reason - never a lock screen. Returns false when
-  // the caller should carry on with what Dossier gave (no key, nothing better).
-  function dossierFallback(reason, isLockType) {
-    if (hasTornKey()) { loadDirect(reason + " — this load used your own Torn API key"); return true; }
-    if (!isLockType) return false;
-    dataMode = "direct";
-    var content = document.getElementById("tsa-content");
-    if (content) showKeyOnboarding(content, function() { loadData(); }, reason + ". Enter your own Torn API key to use TSA for free, or fix it in Dossier.");
-    return true;
+  // The status text for a load that runs in free mode although a licence key is
+  // stored: the licence is not active (expired, rejected, unconfirmable for 72 h).
+  // prefix: what the load saw first ("" when the licence check alone decided).
+  function licenceOffNote(d, prefix) {
+    var why = d ? licenseReasonText(d) : "";
+    return (prefix ? prefix + ". " : "") + (hasTornKey()
+      ? "Your TSA licence is not active, so TSA is back on your own Torn API key."
+      : "Your TSA licence is not active, so TSA runs free on your own Torn API key.") + (why ? " " + why : "");
+  }
+
+  // Appended to a licence-mode error: licence mode never falls back to the user's
+  // own key, and this says how to get free mode back on purpose.
+  function licenceOnlyHint() {
+    return hasTornKey()
+      ? " While a TSA licence is set, TSA reads from Dossier only and does not use your own Torn API key. Remove the licence in Settings → Account to run free on your key."
+      : " Or use TSA free with your own Torn API key: Settings → Account.";
   }
 
   // The error panel with a Retry button. Re-arms auto-refresh (a failed load must
@@ -6704,6 +7040,20 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     // these promises rejects; plan() below decides what the answers add up to.
     var meP = new Promise(function(resolve) { TSAData.get(licenseDeps, "me", ME_MAX_AGE_MS, resolve); });
     var marketP = new Promise(function(resolve) { TSAData.get(licenseDeps, "market", MARKET_MAX_AGE_MS, resolve); });
+    // Dossier's Benefit Advisor answer: the ONLY source of licence mode's ROI
+    // recommendation. Never rejects; a failure is shown as Dossier's status. Like
+    // history, the render waits for it at most BENEFIT_WAIT_MS: a slow answer must
+    // not hold back the holdings. A late one replaces the recommendation as it lands.
+    var benefitLate = false;
+    var benefitRaw = new Promise(function(resolve) { TSAData.get(licenseDeps, "benefit", BENEFIT_MAX_AGE_MS, resolve); });
+    var benefitP = Promise.race([benefitRaw, new Promise(function(r) { setTimeout(function() { benefitLate = true; r(null); }, BENEFIT_WAIT_MS); })]);
+    benefitRaw.then(function(res) {
+      if (!benefitLate || gen !== licenseGen || !lastOwnedMap || !lastRaw) return;
+      lastDossierBenefit = res;
+      lastBestRec = benefitPlan(lastOwnedMap, lastRaw, 0, 0).target;
+      renderQtPills();
+      updateQtRecommendation(null);
+    });
     // Awaited purely for ORDER: the tables must be installed before anything is
     // computed from them. Never rejects — a failure leaves the fallback standing.
     var cataloguePromise = refreshStockCatalogue();
@@ -6723,28 +7073,32 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       renderHoldingsSkeleton(buildOwnedMap(meWithTrades(res.body)));
     });
 
-    Promise.all([meP, marketP, cataloguePromise, historyPromise]).then(function(results) {
+    Promise.all([meP, marketP, cataloguePromise, historyPromise, benefitP]).then(function(results) {
       if (gen !== licenseGen) return;
+      lastDossierBenefit = results[4] || null;   // null: still on its way (see benefitRaw)
       var p = TSAData.plan(results[0], results[1], Date.now());
+      fullRendered = true;
+      // LICENCE MODE IS DOSSIER ONLY (owner decision 2026-11-05): nothing below
+      // falls back to the user's own Torn key while the licence is active.
       if (p.lock === "licence") {
         // Let the licence module apply its rules (401 = rejected, active:false =
-        // expired), so the next load goes straight to free mode. Never a lock.
-        licenseEnsure(true, function() {});
-        if (dossierFallback("Dossier did not accept the TSA licence", true)) { fullRendered = true; return; }
+        // expired). Lapsed: free mode on the user's own key, and the status line
+        // says so. Still active by the licence check: Dossier's error, retried.
+        licenseEnsure(true, function(d) {
+          if (gen !== licenseGen) return;
+          if (d.locked) loadDirect(licenceOffNote(d, "Dossier did not accept the TSA licence"));
+          else dataShowError("Dossier did not accept the TSA licence for data. TSA tries again shortly." + licenceOnlyHint());
+        });
+        return;
       }
       if (p.lock === "key") {
-        if (dossierFallback("Dossier has no working Torn API key for your account", true)) { fullRendered = true; return; }
+        dataShowError("Dossier has no working Torn API key for your account: add it on dossier.aec3.org. TSA tries again shortly." + licenceOnlyHint());
+        return;
       }
       if (p.lock) return;
-      // Dossier unreachable, throttled or still warming: free mode for this load, if
-      // TSA holds a Torn key. Otherwise carry on with what Dossier gave (as in 2.53).
-      if (p.dossier || p.warming || !p.me) {
-        var why = p.dossier === "throttled" ? "Dossier throttled"
-                : p.dossier === "unreachable" ? "Dossier unreachable"
-                : "Dossier is still loading your holdings";
-        if (dossierFallback(why, false)) { fullRendered = true; return; }
-      }
-      fullRendered = true;
+      // Dossier unreachable, throttled or still warming: carry on with what Dossier
+      // gave before (stored holdings, page prices) under a status line, or show
+      // Dossier's error below. Never the user's own key.
 
       // No holdings known at all (Dossier still warming for this player, or down,
       // with nothing stored here): do NOT render an empty book as if it were real —
@@ -6803,8 +7157,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       // A failed load must NOT kill the auto-refresh loop — dataShowError re-arms it,
       // so a transient error only skips one cycle. Without a Torn key in TSA there
       // was nothing to fall back to: say that free mode is one key away.
-      dataShowError("Error: " + e.message + (hasTornKey() ? ""
-        : " Or use TSA free with your own Torn API key: Settings → Account."));
+      dataShowError("Error: " + e.message + licenceOnlyHint());
     });
   }
 
@@ -6886,12 +7239,11 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       if (r.stock && px > 0) lastLoadPrices[r.stock] = px;
     });
 
-    // Best ROI recommendation for the Quick Trade bar = the planner's
+    // The next-block recommendation for the Quick Trade bar = the planner's
     // target from the shared computation, so the bank pill, rec widget,
-    // bridge pill and planner "Next move" always agree — and a stock the
-    // user ROI-skipped can never be recommended. Capital/income don't
-    // affect target selection (best ROI regardless of affordability).
-    lastBestRec = computeBridgePlan(ownedMap, raw, 0, 0).target;
+    // bridge pill and planner "Next move" always agree. Licence mode: Dossier's
+    // answer. Free mode: the same rule, which needs the real capital and income.
+    lastBestRec = benefitPlan(ownedMap, raw, planCapital(ownedMap, raw), calcWeeklyIncome(ownedMap, raw, null)).target;
     updateQtRecommendation(null);
 
     // Check price alerts
@@ -7239,7 +7591,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       setTimeout(function() { updateQtRecommendation(sym); }, 500);
       return;
     }
-    if (!lastBestRec) { recDiv.style.display = "none"; return; }
+    if (!lastBestRec || !lastBestRec.tierInfo || !(lastBestRec.tierInfo.sharesNeeded > 0)) { recDiv.style.display = "none"; return; }
 
     var rec = lastBestRec;
     var cash = typeof qtGetMoneyFast === "function" ? qtGetMoneyFast() : 0;
@@ -8281,16 +8633,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     // Capital: API money_onhand + swing value + faction armory (planner parity).
     var bpPlan = null;
     if (lastOwnedMap && lastRaw) {
-      var bpSwingCap = 0;
-      Object.keys(lastOwnedMap).forEach(function(s) {
-        var o = lastOwnedMap[s];
-        if (!o || o.swing_shares <= 0) return;
-        var le = lastRaw.find(function(x) { return x.stock === s; });
-        // Net of Torn's 0.1% sell fee — deployable cash if liquidated (planner parity).
-        if (le) bpSwingCap += (parseFloat(le.price) || 0) * o.swing_shares * SELL_FEE;
-      });
-      bpPlan = computeBridgePlan(lastOwnedMap, lastRaw,
-        lastCashBalance + bpSwingCap + lastArmoryFunds,
+      // Swing net of Torn's 0.1% sell fee — deployable cash if liquidated (planner parity).
+      bpPlan = benefitPlan(lastOwnedMap, lastRaw, planCapital(lastOwnedMap, lastRaw),
         calcWeeklyIncome(lastOwnedMap, lastRaw, null));
       // Keep the bank pill and rec widget on the same (skip-filtered) target.
       lastBestRec = bpPlan.target;
@@ -8326,6 +8670,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         qtBuildMaps();
         var r = lastBestRec;
         if (!r || !r.tierInfo) { showToast("No ROI recommendation yet", "warn"); return; }
+        if (!(r.tierInfo.sharesNeeded > 0)) { showToast(r.sym + " T" + r.tierInfo.nextIncrement + " is already bought — it pays from the next payout", "info"); return; }
         var sym = r.sym;
         var price = qtGetPrice(sym) || r.tierInfo.livePrice || 0;
         if (price <= 0) { showToast("Could not read price for " + sym, "error"); return; }
@@ -8382,7 +8727,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     // irreversible benefit-block sale can't strand the user mid-upgrade. Mirrors the ROI
     // Planner's "⤴ Upgrade" line (same computeUpgradeSwap plan).
     var upSwap = (bpPlan && lastOwnedMap && lastRaw && !qtPendingUpgrade)
-      ? computeUpgradeSwap(lastOwnedMap, lastRaw, lastCashBalance, bpPlan) : null;
+      ? benefitSwap(lastOwnedMap, lastRaw, lastCashBalance, bpPlan) : null;
 
     if (qtPendingUpgrade) {
       // ── Mid-upgrade: sell the remaining planned tiers one click at a time, then buy. ──

@@ -8,7 +8,9 @@
 // What is checked (owner decision 2026-11-02):
 //   - free mode (own Torn key, no licence) calls api.torn.com + tornsy.com, never Dossier
 //   - licence mode (active tsa1_ licence) calls only Dossier, never Torn or tornsy
-//   - a Dossier failure with a Torn key falls back to the direct calls for that load
+//   - licence mode is Dossier ONLY (owner decision 2026-11-05): a Dossier failure
+//     shows Dossier's status, never a load on the user's own Torn key
+//   - a licence that lapses (the licence check says so) puts TSA back on the own key
 //   - an invalid / expired / unconfirmable licence never locks TSA
 //   - start-up deletes and overwrites no stored key (2.50-style and 2.53.1-style stores)
 import { test } from "node:test";
@@ -180,6 +182,8 @@ const DOSSIER_OK = [
   [D + "/api/tsa/market", J({ data: [{ stock: "FHG", price: "500.00", interval: { m30: { price: "499" } }, ohlc: {} }], missing_batches: 0, meta: {} })],
   [D + "/api/tsa/history", J({ symbols: {}, meta: {} })],
   [D + "/api/tsa/reference", J({ stocks: null, items: null, meta: {} })],
+  [D + "/api/tsa/benefit", J({ player_id: 7, holdings_status: "ok", answer: { kind: "none", index: null, row: null, days: null, baseline_days: null, name: null },
+    payload: { capital: { total: 5 }, ranking: [] }, meta: {} })],
 ];
 const activeLicence = (extra = {}) => JSON.stringify({ token: TOKEN, status: "active", checked_ms: NOW - 60000, ok_ms: NOW - 60000,
   expires_ts: Math.floor(NOW / 1000) + 30 * 86400, name: "test", renew: null, retry_ms: null, fail: null, ...extra });
@@ -249,7 +253,7 @@ for (const [name, answer] of [
   ["403 licence inactive", J({ error: "licence inactive" }, 403)],
   ["401", J({ error: "unauthorized" }, 401)],
 ]) {
-  test("Dossier answering " + name + " with a Torn key in TSA: this load falls back to the direct calls", async () => {
+  test("Dossier answering " + name + " with a Torn key in TSA, licence still active: Dossier's error, zero Torn/tornsy calls", async () => {
     const routes = [
       [D + "/api/license/check", J({ active: true, expires_ts: NOW / 1000 + 86400 })],
       [D + "/api/tsa/", answer],
@@ -257,11 +261,14 @@ for (const [name, answer] of [
     const b = boot({ store: { "tsa-torn-apikey": TORN_KEY, tsa_license: activeLicence() }, routes });
     assert.equal(b.error, null, String(b.error && b.error.stack));
     await settle(60);
+    for (const ms of [3000, 10000, 100000, 600000]) { b.runTimers(ms); await settle(40); }   // warm-up, timeouts, retries
     const h = b.hosts();
     assert.ok(count(h, "dossier-api.aec3.org") >= 1, h.join(","));
-    assert.ok(count(h, "api.torn.com") >= 2, "no fallback to Torn: " + h);
-    assert.ok(count(h, "tornsy.com") >= 4, "no fallback to tornsy: " + h);
-    assert.match(b.content(), /this load used your own Torn API key/);
+    assert.equal(count(h, "api.torn.com"), 0, "self-fetch from Torn while licensed: " + h);
+    assert.equal(count(h, "tornsy.com"), 0, "self-fetch from tornsy while licensed: " + h);
+    assert.match(b.content(), /Dossier/);
+    assert.match(b.content(), /does not use your own Torn API key/);
+    assert.doesNotMatch(b.content(), /this load used your own Torn API key/);
     assert.doesNotMatch(b.page(), LOCK_WORDS);
     assert.equal(b.store["tsa-torn-apikey"], TORN_KEY);
   });

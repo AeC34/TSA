@@ -118,5 +118,31 @@ export function dossierRoutes(NOW) {
     [D + "/api/tsa/market", J({ data: tornsyBatch(["m30", "h1", "d1", "w1"]).data, missing_batches: 0, meta: {} })],
     [D + "/api/tsa/history", J({ symbols: {}, meta: {} })],
     [D + "/api/tsa/reference", J({ stocks: null, items: null, meta: {} })],
+    [D + "/api/tsa/benefit", J(benefitBody(NOW))],
   ];
+}
+
+// GET /api/tsa/benefit (Dossier 1.19.0, docs/tsa-data-from-dossier.md section 2.7):
+// {player_id, holdings_status, answer, payload, meta}. Invented numbers; `answer`
+// names `sym`/`tier` with kind `kind` (default "closest").
+export function benefitBody(NOW, { sym = "TCT", tier = 1, kind = "closest", days = 12, extra = {} } = {}) {
+  const row = { sym, tier, shares_needed: 100000, cost: 30100000, daily_inc: 32258, monthly_inc: 981183,
+    purchase_monthly_inc: 981183, roi: 39.1, payback_days: 933, affordable: kind === "buy", affordable_via_sale: null,
+    days_to_afford: kind === "buy" ? 0 : days, benefit_text: "$1,000,000", payout_kind: "cash", ...extra };
+  const known = ["buy", "viaSale", "closest", "save"].includes(kind);
+  return {
+    player_id: 7, holdings_status: "ok",
+    answer: { kind, index: known && kind !== "save" ? 0 : null, row: known ? row : null,
+      days: known ? row.days_to_afford : null, baseline_days: kind === "save" ? days : null, name: known ? "Some Corp" : null },
+    payload: {
+      capital: { cash: 5, swing: 0, armory: 0, total: 5 },
+      coverage: [{ sym, name: "Some Corp" }], ranking: known ? [row] : [],
+      fastest_path: { goal: known ? row : null, baseline_days: known ? days : null, steps: [] },
+      bridge: { goal: null, reason: "no open tier is affordable within 90 days", horizon_days: 90, baseline_days: null,
+        days_with_bridges: null, chain: [] },
+      unpriced: [], perks: [], swap: { best: null, candidates: [], blocked_reason: "no_profitable_swap" },
+      settings: { skipped: [], tier_cap: {} }, meta: {},
+    },
+    meta: { server_ts: Math.floor(NOW / 1000), source_ts: Math.floor(NOW / 1000) - 60, offline: false, unavailable: kind === "unavailable" },
+  };
 }
