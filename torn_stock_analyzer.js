@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.56.1
+// @version      2.56.2
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner that names the next benefit block to buy (affordable now, else by selling worse blocks, else the one closest to affordable) and whose roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Free to use with your own Torn API key: TSA reads your holdings from api.torn.com and prices and history from tornsy.com, and the key stays in your browser. Optional, paid: a TSA licence key from dossier.aec3.org (Xanax) lets TSA read the same data, and Dossier's Benefit Advisor recommendation, from Dossier instead (only the licence key is sent, only to dossier-api.aec3.org). While the licence is active TSA reads from Dossier only and never calls Torn or tornsy itself; without a licence, or if it lapses, TSA keeps working on your own key.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -9786,6 +9786,44 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     });
   }
 
+  // On touch-only devices native title bubbles can remain stuck in TornPDA's
+  // WebView. Keep their text available to assistive technology without exposing
+  // the native tooltip. This observer is deliberately limited to TSA roots.
+  // (hover: none) alone misses phones with a stylus, which report hover support;
+  // a coarse primary pointer is the other touch-first signal.
+  function tsaIsTouchOnly() {
+    if (!window.matchMedia) return false;
+    return window.matchMedia("(hover: none)").matches || window.matchMedia("(pointer: coarse)").matches;
+  }
+
+  function tsaStripTitles(root) {
+    if (!tsaIsTouchOnly() || !root) return;
+    function strip(el) {
+      if (!el || el.nodeType !== 1 || !el.hasAttribute("title")) return;
+      if (!el.hasAttribute("aria-label")) el.setAttribute("aria-label", el.getAttribute("title"));
+      el.removeAttribute("title");
+    }
+    strip(root);
+    if (root.querySelectorAll) Array.prototype.forEach.call(root.querySelectorAll("[title]"), strip);
+  }
+
+  var tsaTitleObserver = null;
+  function tsaObserveTitles() {
+    if (!tsaIsTouchOnly() || tsaTitleObserver) return;
+    var roots = ["tsa-overlay", "qt-bar", "qt-pills"].map(function(id) { return document.getElementById(id); }).filter(Boolean);
+    roots.forEach(tsaStripTitles);
+    if (!roots.length) return;
+    tsaTitleObserver = new MutationObserver(function(records) {
+      records.forEach(function(record) {
+        if (record.type === "attributes") tsaStripTitles(record.target);
+        else Array.prototype.forEach.call(record.addedNodes || [], tsaStripTitles);
+      });
+    });
+    roots.forEach(function(root) {
+      tsaTitleObserver.observe(root, { attributes: true, attributeFilter: ["title"], childList: true, subtree: true });
+    });
+  }
+
   function createUI() {
     injectStyles();
     // Extra CSS for v1.8.0 UI features
@@ -9833,6 +9871,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         "<div class=\"tsa-footer\"><span></span><button class=\"tsa-refresh\" id=\"tsa-init-btn\">Start</button></div>" +
       "</div>";
     document.body.appendChild(overlay);
+    tsaObserveTitles();
     applyOverlayPosition(getOverlayPosition());
 
     // Apply theme changes from the Settings panel.
