@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.58.0
+// @version      2.58.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner that names the next benefit block to buy (affordable now, else by selling worse blocks, else the one closest to affordable) and whose roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Free to use with your own Torn API key: TSA reads your holdings from api.torn.com and prices and history from tornsy.com, and the key stays in your browser. Optional, paid: a TSA licence key from dossier.aec3.org (Xanax) lets TSA read the same data, and Dossier's Benefit Advisor recommendation, from Dossier instead (only the licence key is sent, only to dossier-api.aec3.org). While the licence is active TSA reads from Dossier only and never calls Torn or tornsy itself; without a licence, or if it lapses, TSA keeps working on your own key.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -9380,7 +9380,11 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var domain = qtChartDomain(points.map(function(point) { return point.price; }), refs);
     var dpr = window.devicePixelRatio || 1;
     var touch = window.matchMedia("(hover: none)").matches || window.matchMedia("(pointer: coarse)").matches;
-    var height = touch ? 140 : 160, width = canvas.clientWidth || canvas.offsetWidth || 300;
+    var height = touch ? 100 : 160, width = canvas.clientWidth || canvas.offsetWidth || 300;
+    var tfRow = document.getElementById("qt-tf-row");
+    var chartHeader = title && title.parentNode;
+    if (tfRow && chartHeader && touch) chartHeader.insertBefore(tfRow, liveEl || null);
+    else if (tfRow && chartHeader && !touch && tfRow.parentNode === chartHeader) chartHeader.parentNode.insertBefore(tfRow, canvas);
     canvas.style.height = height + "px";
     canvas.style.touchAction = "pan-y";
     canvas.setAttribute("role", "img");
@@ -9583,7 +9587,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       "</div>";
 
     var qtResponsive = document.createElement("style");
-    qtResponsive.textContent = "@media (hover:none),(pointer:coarse){#qt-bar button,#qt-bar input{min-height:40px}#qt-trade-controls{display:flex;flex-direction:column;gap:0}#qt-trade-controls>[role=group]{width:100%;box-sizing:border-box;margin:0 0 4px!important;gap:0!important}#qt-trade-controls>[role=group] button{flex:1}#qt-amount-row{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px!important;width:100%;flex:none}#qt-amount-row button{width:100%;padding:8px 4px!important}#qt-row1{gap:8px!important}#qt-min-btn{min-height:36px!important}#qt-lock-label{padding:6px 10px!important;min-height:40px!important}#qt-chart-canvas{touch-action:pan-y}}#qt-bar.qt-minimized{padding:4px 10px!important}#qt-bar.qt-minimized #qt-body{display:none!important}";
+    qtResponsive.textContent = "@media (hover:none),(pointer:coarse){#qt-bar button,#qt-bar input{min-height:32px;padding:4px 8px;font-size:var(--tsa-fs-micro)}#qt-row1{gap:6px!important;margin-bottom:6px!important}#qt-trade-controls{display:flex;flex-direction:column;gap:6px;margin-bottom:6px}#qt-trade-controls>[role=group]{width:100%;height:32px;box-sizing:border-box;margin:0!important;gap:0!important}#qt-trade-controls>[role=group] button{flex:1;height:32px;padding:4px 8px!important}#qt-amount-row{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr));grid-auto-rows:32px;gap:6px!important;width:100%;flex:none}#qt-amount-row button{width:100%;height:32px;padding:4px 8px!important}#qt-lock-label{padding:4px 8px!important;min-height:32px!important}#qt-lock-benefit{width:16px!important;height:16px!important}#qt-lock-text{font-size:var(--tsa-fs-micro)!important}#qt-consequence{margin:4px 0!important;padding:4px 8px!important}#qt-rec{margin:4px 0!important;padding:4px 8px!important}#qt-chart-container{padding:6px 8px!important;margin-top:6px!important}#qt-chart-canvas{height:100px!important;touch-action:pan-y}#qt-chart-container>div:first-child{display:flex;gap:4px;min-width:0}#qt-chart-title{flex:1;min-width:0}#qt-tf-row{display:flex;flex:0 0 auto;gap:2px!important;margin:0!important}#qt-tf-row .qt-tf-btn{min-height:26px!important;height:26px;padding:2px 8px!important;font-size:12px!important;flex:0 0 auto!important}}#qt-bar.qt-minimized{padding:4px 10px!important}#qt-bar.qt-minimized #qt-body{display:none!important}";
     bar.appendChild(qtResponsive);
 
     var pillsDiv = document.createElement("div");
