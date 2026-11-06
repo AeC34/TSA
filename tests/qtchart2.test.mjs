@@ -6,7 +6,7 @@ import vm from "node:vm";
 const SRC = readFileSync(new URL("../torn_stock_analyzer.js", import.meta.url), "utf8");
 const start = SRC.indexOf("  function niceTicks(");
 const end = SRC.indexOf("  function applyQtTheme(", start);
-const names = ["niceTicks", "qtReferencePrices", "qtChartDomain", "qtNearestPoint", "qtMarkersInRange", "qtSellMarkersInRange", "qtSegmentPoints", "qtDecollideLabels", "qtTicksAwayFromLabels"];
+const names = ["niceTicks", "qtReferencePrices", "qtChartDomain", "qtNearestPoint", "qtMarkersInRange", "qtSellMarkersInRange", "qtDossierTradeMarkers", "qtChartTradeMarkers", "qtSegmentPoints", "qtDecollideLabels", "qtTicksAwayFromLabels"];
 const ctx = {};
 vm.runInNewContext(SRC.slice(start, end) + "\nthis.f={" + names.map(n => n + ":" + n).join(",") + "};", ctx);
 const f = ctx.f;
@@ -56,6 +56,23 @@ test("sell markers match symbol and visible unix-second range", () => {
     { ts: 2000, price: 9, shares: 3 },
     { ts: 4000, price: 11, shares: 0 },
   ]);
+});
+test("Dossier trade markers map ids, preserve side and net, and filter symbol and visible range", () => {
+  const got = f.qtDossierTradeMarkers([
+    { ts: 2, side: "buy", stock_id: 1, shares: 3, price: 9, net_profit: null },
+    { ts: 4, side: "sell", stock_id: 1, shares: 2, price: 11, net_profit: 5.5 },
+    { ts: 3, side: "sell", stock_id: 2, shares: 1, price: 7, net_profit: -1 },
+    { ts: 1, side: "buy", stock_id: 1, shares: 1, price: 8, net_profit: null },
+  ], "TCT", { 1: "TCT", 2: "FHG" }, 2000, 4000);
+  assert.deepEqual(JSON.parse(JSON.stringify(got)), [
+    { ts: 2000, price: 9, shares: 3, side: "buy", net_profit: null },
+    { ts: 4000, price: 11, shares: 2, side: "sell", net_profit: 5.5 },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.qtDossierTradeMarkers([], "TCT", { 1: "TCT" }, 0, 10))), []);
+  const fallback = f.qtChartTradeMarkers("dossier", [], "TCT", { 1: "TCT" },
+    [{ time_bought: 2, bought_price: 8, shares: 1 }], [{ ts: 3, sym: "TCT", sell_price: 9, shares: 2 }], 1000, 4000);
+  assert.equal(fallback.buys.length, 1);
+  assert.equal(fallback.sells.length, 1);
 });
 test("point segmentation splits only when adjacent points exceed four hours", () => {
   const got = f.qtSegmentPoints([

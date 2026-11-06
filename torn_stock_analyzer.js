@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.58.1
+// @version      2.59.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner that names the next benefit block to buy (affordable now, else by selling worse blocks, else the one closest to affordable) and whose roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Free to use with your own Torn API key: TSA reads your holdings from api.torn.com and prices and history from tornsy.com, and the key stays in your browser. Optional, paid: a TSA licence key from dossier.aec3.org (Xanax) lets TSA read the same data, and Dossier's Benefit Advisor recommendation, from Dossier instead (only the licence key is sent, only to dossier-api.aec3.org). While the licence is active TSA reads from Dossier only and never calls Torn or tornsy itself; without a licence, or if it lapses, TSA keeps working on your own key.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -507,7 +507,13 @@
       if (!b || typeof b !== "object") return b;
       var out = { holdings_status: typeof b.holdings_status === "string" ? b.holdings_status : null,
                   stocks: {}, money_onhand: numOrNull(b.money_onhand), armory: { ok: false, money_balance: 0 },
-                  meta: { source_ts: numOrNull(b.meta && b.meta.source_ts) } };
+                  meta: { source_ts: numOrNull(b.meta && b.meta.source_ts) }, trades: [] };
+      if (Array.isArray(b.trades)) out.trades = b.trades.slice(0, 300).filter(function(t) {
+        return !!(t && typeof t === "object" && typeof t.ts === "number" && isFinite(t.ts) && t.ts > 0 &&
+          (t.side === "buy" || t.side === "sell") && typeof t.stock_id === "number" && isFinite(t.stock_id) && /^[1-9][0-9]{0,4}$/.test(String(t.stock_id)) &&
+          typeof t.shares === "number" && isFinite(t.shares) && t.shares > 0 && typeof t.price === "number" && isFinite(t.price) && t.price > 0);
+      }).map(function(t) { return { ts: t.ts, side: t.side, stock_id: t.stock_id, shares: t.shares, price: t.price,
+        net_profit: typeof t.net_profit === "number" && isFinite(t.net_profit) ? t.net_profit : null }; });
       if (typeof b.player_id === "number") out.player_id = b.player_id;
       if (b.armory && typeof b.armory === "object") out.armory = { ok: b.armory.ok === true, money_balance: num(b.armory.money_balance) };
       var src = (b.stocks && typeof b.stocks === "object") ? b.stocks : {};
@@ -6917,6 +6923,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
   // The last /api/tsa/benefit result of a licence-mode load (a TSAData.get result),
   // or null. Licence mode's ROI recommendation is read from here and nowhere else.
   var lastDossierBenefit = null;
+  var lastDossierTrades = [];
 
   // /me with every Quick Trade done here since Dossier's last poll laid over it.
   function meWithTrades(me) {
@@ -7077,6 +7084,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       if (gen !== licenseGen) return;
       lastDossierBenefit = results[4] || null;   // null: still on its way (see benefitRaw)
       var p = TSAData.plan(results[0], results[1], Date.now());
+      lastDossierTrades = p.me && Array.isArray(p.me.trades) ? p.me.trades : [];
       fullRendered = true;
       // LICENCE MODE IS DOSSIER ONLY (owner decision 2026-11-05): nothing below
       // falls back to the user's own Torn key while the licence is active.
@@ -9112,6 +9120,24 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       return { ts: Number(e.ts) * 1000, price: Number(e.sell_price), shares: Number(e.shares) || 0 };
     });
   }
+  function qtDossierTradeMarkers(trades, sym, idMap, minTs, maxTs) {
+    var id = Object.keys(idMap || {}).find(function(k) { return idMap[k] === sym; });
+    if (!id) return [];
+    return (trades || []).filter(function(t) {
+      var ts = Number(t.ts) * 1000;
+      return Number(t.stock_id) === Number(id) && isFinite(ts) && ts >= minTs && ts <= maxTs &&
+        (t.side === "buy" || t.side === "sell") && Number(t.price) > 0;
+    }).map(function(t) { return { ts: Number(t.ts) * 1000, price: Number(t.price), shares: Number(t.shares) || 0,
+      side: t.side, net_profit: typeof t.net_profit === "number" && isFinite(t.net_profit) ? t.net_profit : null }; });
+  }
+  function qtChartTradeMarkers(mode, trades, sym, idMap, transactions, realized, minTs, maxTs) {
+    var all = mode === "dossier" ? qtDossierTradeMarkers(trades, sym, idMap, -Infinity, Infinity) : [];
+    if (all.length) {
+      var visible = qtDossierTradeMarkers(trades, sym, idMap, minTs, maxTs);
+      return { buys: visible.filter(function(m) { return m.side === "buy"; }), sells: visible.filter(function(m) { return m.side === "sell"; }) };
+    }
+    return { buys: transactions ? qtMarkersInRange(transactions, minTs, maxTs) : [], sells: qtSellMarkersInRange(realized, sym, minTs, maxTs) };
+  }
   function qtSegmentPoints(points, gap) {
     var segments = [];
     (points || []).forEach(function(point) {
@@ -9323,7 +9349,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           });
           if (!marker) return;
           var row = document.createElement("div");
-          row.textContent = index ? (marker.shares ? "Sold " + marker.shares + " @ $" : "Sold @ $") + marker.price.toFixed(2) : "Bought " + marker.shares + " @ $" + marker.price.toFixed(2);
+          row.textContent = index ? (marker.shares ? "Sold " + marker.shares + " @ $" : "Sold @ $") + marker.price.toFixed(2) +
+            (marker.net_profit == null ? "" : " \u00b7 net " + (marker.net_profit >= 0 ? "+$" : "-$") + Math.abs(Math.round(marker.net_profit)).toLocaleString("en-US")) : "Bought " + marker.shares + " @ $" + marker.price.toFixed(2);
           tip.appendChild(row);
         });
         tip.style.display = "block";
@@ -9375,8 +9402,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     if (!(avg > 0) && owned) avg = owned.avg_price;
     var refs = owned ? qtReferencePrices(avg, getProfitTarget(), getStopLoss(), SELL_FEE) : [];
     var minTs = points[0].ts, maxTs = points[points.length - 1].ts;
-    var buys = owned ? qtMarkersInRange(owned.transactions, minTs, maxTs) : [];
-    var sells = qtSellMarkersInRange(getRealizedEvents(), sym, minTs, maxTs);
+    var chartTrades = qtChartTradeMarkers(dataMode, lastDossierTrades, sym, STOCK_ID_MAP, owned && owned.transactions, getRealizedEvents(), minTs, maxTs);
+    var buys = chartTrades.buys, sells = chartTrades.sells;
     var domain = qtChartDomain(points.map(function(point) { return point.price; }), refs);
     var dpr = window.devicePixelRatio || 1;
     var touch = window.matchMedia("(hover: none)").matches || window.matchMedia("(pointer: coarse)").matches;

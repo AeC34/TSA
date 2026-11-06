@@ -404,7 +404,7 @@ test("/me is trimmed on arrival: storage and memory hold only what TSA reads, nu
   const r = get(s, "me"); s.answer(200, FULL_ME_JSON);
   const stored = JSON.parse(s.store.get("tsa_dossier_me")).body;
   for (const b of [stored, JSON.parse(JSON.stringify(r().body))]) {   // out of the vm realm for deepEqual
-    assert.deepEqual(Object.keys(b).sort(), ["armory", "holdings_status", "meta", "money_onhand", "player_id", "stocks"]);
+    assert.deepEqual(Object.keys(b).sort(), ["armory", "holdings_status", "meta", "money_onhand", "player_id", "stocks", "trades"]);
     assert.deepEqual(b.armory, { ok: true, money_balance: 50 });
     assert.deepEqual(b.meta, { source_ts: T0 / 1000 - 60 });
     assert.deepEqual(Object.keys(b.stocks).sort(), ["15", "25"]);
@@ -419,6 +419,21 @@ test("/me is trimmed on arrival: storage and memory hold only what TSA reads, nu
   for (const leak of ["Someone", "x@y", "KKKK", "secret", "internal", "Bought", "private", "<", "note"]) {
     assert.equal(raw.includes(leak), false, leak + " stored");
   }
+});
+
+test("/me trade rows are defensively trimmed, capped, and default to empty", () => {
+  const s = setup();
+  const row = { ts: 10, side: "sell", stock_id: 15, shares: 2, price: 4, net_profit: -1.25, private: "drop" };
+  const me = s.ctx.TSAData.trimMe({ trades: [row, { ...row, side: "buy", net_profit: "3" }] });
+  assert.deepEqual(JSON.parse(JSON.stringify(me.trades)), [
+    { ts: 10, side: "sell", stock_id: 15, shares: 2, price: 4, net_profit: -1.25 },
+    { ts: 10, side: "buy", stock_id: 15, shares: 2, price: 4, net_profit: null },
+  ]);
+  const bad = [{ ...row, ts: 0 }, { ...row, side: "BUY" }, { ...row, stock_id: 0 },
+    { ...row, stock_id: 1.5 }, { ...row, shares: 0 }, { ...row, price: Infinity }];
+  assert.equal(s.ctx.TSAData.trimMe({ trades: [row, ...bad] }).trades.length, 1);
+  assert.equal(s.ctx.TSAData.trimMe({ trades: Array.from({ length: 301 }, (_, i) => ({ ...row, ts: i + 1 })) }).trades.length, 300);
+  assert.deepEqual(JSON.parse(JSON.stringify(s.ctx.TSAData.trimMe({}).trades)), []);
 });
 
 test("/me stored by an older build is trimmed when read back", () => {
@@ -546,7 +561,7 @@ test("logTrade appends and trims entries older than 30 min", () => {
 test("source: free mode is back (own Torn key, api.torn.com + tornsy.com), Dossier stays an option", () => {
   const connects = SRC.match(/^\/\/ @connect\s+\S+/gm).map((x) => x.split(/\s+/).pop()).sort();
   assert.deepEqual(connects, ["api.torn.com", "dossier-api.aec3.org", "tornsy.com"]);
-  assert.match(SRC, /^\/\/ @version\s+2.58.1$/m);
+  assert.match(SRC, /^\/\/ @version\s+2.59.0$/m);
   // the 2.50 key field and storage key, so a key saved by 2.50 still works
   assert.match(SRC, /var TORN_API_KEY = lsGet\("tsa-torn-apikey", ""\);/);
   assert.match(SRC, /id=\\"tsa-setting-apikey\\"/);
