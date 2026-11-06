@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.59.0
+// @version      2.60.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner that names the next benefit block to buy (affordable now, else by selling worse blocks, else the one closest to affordable) and whose roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Free to use with your own Torn API key: TSA reads your holdings from api.torn.com and prices and history from tornsy.com, and the key stays in your browser. Optional, paid: a TSA licence key from dossier.aec3.org (Xanax) lets TSA read the same data, and Dossier's Benefit Advisor recommendation, from Dossier instead (only the licence key is sent, only to dossier-api.aec3.org). While the licence is active TSA reads from Dossier only and never calls Torn or tornsy itself; without a licence, or if it lapses, TSA keeps working on your own key.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -8486,6 +8486,65 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     }
   }
 
+  function qtScrollState(mode, scrollY, overrideOpen, manuallyMinimized) {
+    var scrollMode = mode === "scroll";
+    var down = Number(scrollY) > 40;
+    return { sticky: !scrollMode, thin: !scrollMode && down && !overrideOpen && !manuallyMinimized,
+      chartMin: down && !overrideOpen, };
+  }
+
+  function qtGetScrollMode() {
+    return lsGet("tsa_qt_scroll_mode", "thin") === "scroll" ? "scroll" : "thin";
+  }
+  var qtScrollOpenOverride = false, qtScrollOverrideY = 0, qtScrollFrame = 0;
+  function qtUpdateScrollState() {
+    qtScrollFrame = 0;
+    var bar = document.getElementById("qt-bar");
+    if (!bar) return;
+    var scrollY = Number(window.scrollY || 0);
+    if (scrollY <= 40 || (qtScrollOpenOverride && scrollY > qtScrollOverrideY + 40)) qtScrollOpenOverride = false;
+    var state = qtScrollState(qtGetScrollMode(), scrollY, qtScrollOpenOverride,
+      lsGet("qt_minimized", "false") === "true");
+    bar.classList.toggle("qt-scrolled", scrollY > 40);
+    bar.classList.toggle("qt-scroll-mode", !state.sticky);
+    bar.classList.toggle("qt-thin", state.thin);
+    bar.classList.toggle("qt-open-override", qtScrollOpenOverride);
+    bar.style.position = state.sticky ? "sticky" : "static";
+    var chart = document.getElementById("qt-chart-container");
+    if (chart) {
+      var chartWasMinimized = chart.classList.contains("qt-chart-minimized");
+      chart.classList.toggle("qt-chart-minimized", state.chartMin);
+      if (chartWasMinimized && !state.chartMin) {
+        var sym = (document.getElementById("qt-stock") || {}).value || "";
+        if (sym) qtDrawChart(sym);
+      }
+    }
+    var rec = document.getElementById("qt-rec");
+    if (rec) rec.classList.toggle("qt-rec-scroll-hidden", state.chartMin || state.thin);
+    var summary = document.getElementById("qt-thin-summary");
+    if (summary) {
+      var symNow = (document.getElementById("qt-stock") || {}).value || "";
+      var price = symNow ? qtGetPrice(symNow) : 0;
+      // The page card can be missing (Torn mid-render); fall back to the last loaded
+      // price, and leave the price out rather than show $0.
+      if (!(price > 0) && symNow && lastRaw) {
+        var rawRow = lastRaw.find(function(x) { return x.stock === symNow.toUpperCase(); });
+        price = rawRow ? (parseFloat(rawRow.price) || 0) : 0;
+      }
+      summary.textContent = "";
+      var left = document.createElement("span");
+      left.textContent = symNow ? symNow + (price > 0 ? " $" + price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "") + " \u00b7 " + (qtDir === "sell" ? "SELL" : "BUY") : "Quick Trade";
+      var right = document.createElement("span");
+      right.textContent = "\u25be Open";
+      right.style.color = "var(--tsa-fg-faint)";
+      summary.appendChild(left);
+      summary.appendChild(right);
+    }
+  }
+  function qtScheduleScrollUpdate() {
+    if (!qtScrollFrame) qtScrollFrame = requestAnimationFrame(qtUpdateScrollState);
+  }
+
   function qtFmtNum(n) {
     var a = Math.abs(n || 0), s;
     if (a >= 1e9) s = (a / 1e9).toFixed(2) + "B";
@@ -9552,6 +9611,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     bar.style.cssText = "background:var(--tsa-bg-bar);border-bottom:2px solid var(--tsa-border-strong);padding:8px 12px;box-shadow:0 4px 16px var(--tsa-shadow);font-family:var(--tsa-mono);position:sticky;top:0;z-index:9999;";
     if (!getShowQtBar()) bar.style.display = "none";
     bar.innerHTML =
+      "<div id='qt-thin-summary' role='button' tabindex='0' aria-label='Open Quick Trade bar' style='display:none;align-items:center;justify-content:space-between;height:36px;cursor:pointer;font-size:13px;font-weight:700;color:var(--tsa-fg-strong);'></div>" +
       // Row 1: Minimize button + Stock searchable combobox + edit + lock
       "<div id='qt-row1' style='display:flex;flex-wrap:wrap;gap:7px;margin-bottom:6px;align-items:center'>" +
         "<button id='qt-min-btn' title='Minimize Quick Trade bar' style='padding:4px 7px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-border);background:transparent;color:var(--tsa-fg-faint);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);cursor:pointer;flex-shrink:0;'>&#9660;</button>" +
@@ -9598,13 +9658,13 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         "<div id='qt-rec' style='display:none;margin-top:6px;'></div>" +
         // Chart
         "<div id='qt-chart-container' style='display:none;margin-top:8px;background:var(--tsa-bg-chart);border-radius:var(--tsa-r-3);border:1px solid var(--tsa-border);padding:8px 10px 6px;'>" +
-          "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;'>" +
+          "<div id='qt-chart-header' style='display:flex;justify-content:space-between;align-items:center;gap:4px;margin-bottom:4px;'>" +
             "<span id='qt-chart-title' style='font-size:var(--tsa-fs-micro);font-weight:700;color:var(--tsa-fg-faint);font-family:var(--tsa-mono);letter-spacing:0.08em;text-transform:uppercase;'></span>" +
             "<span id='qt-chart-live' style='font-size:var(--tsa-fs-micro);font-weight:700;font-family:var(--tsa-mono);color:var(--tsa-fg-strong);'></span>" +
           "</div>" +
           "<canvas id='qt-chart-canvas' height='110' style='width:100%;height:110px;display:block;'></canvas>" +
           "<div id='qt-chart-labels' style='position:relative;height:14px;font-size:var(--tsa-fs-micro);color:var(--tsa-fg-faint);font-family:var(--tsa-mono);margin-top:2px;'></div>" +
-          "<div id='qt-tf-row' style='display:flex;gap:3px;margin-top:5px;'>" +
+          "<div id='qt-tf-row' style='display:flex;gap:3px;margin:0;'>" +
             "<button class='qt-tf-btn' data-tf='1d' style='flex:1;min-height:32px;padding:7px 0;border-radius:var(--tsa-r-1);border:1px solid var(--tsa-border);background:none;color:var(--tsa-fg-faint);font-size:var(--tsa-fs-micro);font-family:var(--tsa-mono);cursor:pointer;'>1d</button>" +
             "<button class='qt-tf-btn' data-tf='3d' style='flex:1;min-height:32px;padding:7px 0;border-radius:var(--tsa-r-1);border:1px solid var(--tsa-border);background:none;color:var(--tsa-fg-faint);font-size:var(--tsa-fs-micro);font-family:var(--tsa-mono);cursor:pointer;'>3d</button>" +
             "<button class='qt-tf-btn' data-tf='7d' style='flex:1;min-height:32px;padding:7px 0;border-radius:var(--tsa-r-1);border:1px solid var(--tsa-border);background:none;color:var(--tsa-fg-faint);font-size:var(--tsa-fs-micro);font-family:var(--tsa-mono);cursor:pointer;'>7d</button>" +
@@ -9615,6 +9675,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
 
     var qtResponsive = document.createElement("style");
     qtResponsive.textContent = "@media (hover:none),(pointer:coarse){#qt-bar button,#qt-bar input{min-height:32px;padding:4px 8px;font-size:var(--tsa-fs-micro)}#qt-row1{gap:6px!important;margin-bottom:6px!important}#qt-trade-controls{display:flex;flex-direction:column;gap:6px;margin-bottom:6px}#qt-trade-controls>[role=group]{width:100%;height:32px;box-sizing:border-box;margin:0!important;gap:0!important}#qt-trade-controls>[role=group] button{flex:1;height:32px;padding:4px 8px!important}#qt-amount-row{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr));grid-auto-rows:32px;gap:6px!important;width:100%;flex:none}#qt-amount-row button{width:100%;height:32px;padding:4px 8px!important}#qt-lock-label{padding:4px 8px!important;min-height:32px!important}#qt-lock-benefit{width:16px!important;height:16px!important}#qt-lock-text{font-size:var(--tsa-fs-micro)!important}#qt-consequence{margin:4px 0!important;padding:4px 8px!important}#qt-rec{margin:4px 0!important;padding:4px 8px!important}#qt-chart-container{padding:6px 8px!important;margin-top:6px!important}#qt-chart-canvas{height:100px!important;touch-action:pan-y}#qt-chart-container>div:first-child{display:flex;gap:4px;min-width:0}#qt-chart-title{flex:1;min-width:0}#qt-tf-row{display:flex;flex:0 0 auto;gap:2px!important;margin:0!important}#qt-tf-row .qt-tf-btn{min-height:26px!important;height:26px;padding:2px 8px!important;font-size:12px!important;flex:0 0 auto!important}}#qt-bar.qt-minimized{padding:4px 10px!important}#qt-bar.qt-minimized #qt-body{display:none!important}";
+    qtResponsive.textContent += "#qt-bar.qt-scrolled:not(.qt-open-override) #qt-rec{display:none!important}#qt-bar.qt-thin{padding:0 12px!important;min-height:36px;box-sizing:border-box}#qt-bar.qt-thin #qt-thin-summary{display:flex!important}#qt-bar.qt-thin #qt-row1,#qt-bar.qt-thin #qt-body{display:none!important}#qt-chart-container.qt-chart-minimized #qt-chart-canvas,#qt-chart-container.qt-chart-minimized #qt-chart-labels{display:none!important}#qt-chart-container.qt-chart-minimized{padding-bottom:6px!important}#qt-chart-caret{display:none}#qt-chart-container.qt-chart-minimized #qt-chart-caret{display:inline-block}#qt-bar,#qt-bar #qt-chart-container{transition:padding .12s ease,min-height .12s ease}#qt-bar.qt-scroll-mode{position:static!important}@media(prefers-reduced-motion:reduce){#qt-bar,#qt-bar #qt-chart-container{transition:none!important}}";
     bar.appendChild(qtResponsive);
 
     var pillsDiv = document.createElement("div");
@@ -9628,8 +9689,9 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     if (target && target.firstChild) target.insertBefore(bar, target.firstChild);
     else document.body.insertBefore(bar, document.body.firstChild);
     bar.insertAdjacentElement("afterend", pillsDiv);
-    var tfRow = document.getElementById("qt-tf-row"), chartCanvas = document.getElementById("qt-chart-canvas");
-    if (tfRow && chartCanvas && chartCanvas.parentNode) chartCanvas.parentNode.insertBefore(tfRow, chartCanvas);
+    var tfRow = document.getElementById("qt-tf-row"), chartHeader = document.getElementById("qt-chart-header");
+    if (tfRow && chartHeader) chartHeader.insertBefore(tfRow, document.getElementById("qt-chart-live"));
+    if (chartHeader) { var caret = document.createElement("span"); caret.id = "qt-chart-caret"; caret.textContent = "\u25be"; caret.style.cssText = "flex:0 0 auto;color:var(--tsa-fg-faint);"; chartHeader.appendChild(caret); }
 
     renderQtRows();
     setTimeout(qtBuildMaps, 1000);
@@ -9746,7 +9808,22 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       lsSet("qt_minimized", String(minimized));
       this.textContent = minimized ? "\u25B6" : "\u25BC";
       applyQtBarVisibility();
+      qtUpdateScrollState();
     });
+    var thinSummary = document.getElementById("qt-thin-summary");
+    if (thinSummary) {
+      function openThinBar() { qtScrollOpenOverride = true; qtScrollOverrideY = Number(window.scrollY || 0); qtUpdateScrollState(); }
+      thinSummary.addEventListener("click", openThinBar);
+      thinSummary.addEventListener("keydown", function(e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openThinBar(); } });
+    }
+    var chartHeader = document.getElementById("qt-chart-header");
+    if (chartHeader) chartHeader.addEventListener("click", function(e) {
+      if (e.target && e.target.closest && e.target.closest(".qt-tf-btn")) return;
+      var chart = document.getElementById("qt-chart-container");
+      if (chart && chart.classList.contains("qt-chart-minimized")) { qtScrollOpenOverride = true; qtScrollOverrideY = Number(window.scrollY || 0); qtUpdateScrollState(); }
+    });
+    window.addEventListener("scroll", qtScheduleScrollUpdate, { passive: true });
+    qtUpdateScrollState();
   }
 
   // ============================================================
@@ -10082,6 +10159,13 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           "<span style=\"font-size:var(--tsa-fs-micro);color:" + text + "\">Always show Quick pills (even when bar is hidden)</span>" +
         "</label>" +
         "<div style=\"margin-bottom:12px\">" +
+          "<div style=\"" + labelTitle + "\">Quick Trade bar on scroll</div>" +
+          "<select id=\"tsa-setting-qt-scroll-mode\" style=\"" + inputStyle + "\">" +
+            "<option value=\"thin\"" + (qtGetScrollMode() === "thin" ? " selected" : "") + ">Thin sticky bar</option>" +
+            "<option value=\"scroll\"" + (qtGetScrollMode() === "scroll" ? " selected" : "") + ">Scroll away</option>" +
+          "</select>" +
+        "</div>" +
+        "<div style=\"margin-bottom:12px\">" +
           "<div style=\"" + labelTitle + "\">Quick Buy pill source</div>" +
           "<select id=\"tsa-setting-qt-buy-source\" style=\"" + inputStyle + "\">" +
             "<option value=\"top5\"" + (getQtBuySource() === "top5" ? " selected" : "") + ">Top 5 buy</option>" +
@@ -10190,6 +10274,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         var showQtBar = document.getElementById("tsa-setting-show-qt-bar").checked;
         var pillsAlways = document.getElementById("tsa-setting-pills-always").checked;
         var qtBuySource = (document.getElementById("tsa-setting-qt-buy-source") || {}).value;
+        var qtScrollMode = (document.getElementById("tsa-setting-qt-scroll-mode") || {}).value;
         var showTop5 = !!(document.getElementById("tsa-setting-show-top5") || {}).checked;
         var top5Min = parseInt(document.getElementById("tsa-setting-top5-min").value, 10);
         var reqInv = document.getElementById("tsa-setting-req-investors").checked;
@@ -10217,6 +10302,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         // Anything but the top5 literal stores as buyzone (the default), so a missing
         // element or a hand-edited value can never leave the pills pointed at nothing.
         lsSet("tsa_qt_buy_source", qtBuySource === "top5" ? "top5" : "buyzone");
+        lsSet("tsa_qt_scroll_mode", qtScrollMode === "scroll" ? "scroll" : "thin");
+        qtScrollOpenOverride = false;
+        qtScrollOverrideY = Number(window.scrollY || 0);
+        qtUpdateScrollState();
         lsSet("tsa_show_top5", showTop5 ? "true" : "false");
         applyQtBarVisibility();
         lsSet("tsa_top5_min_score", top5Min.toString());
