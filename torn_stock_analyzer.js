@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.57.0
+// @version      2.58.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner that names the next benefit block to buy (affordable now, else by selling worse blocks, else the one closest to affordable) and whose roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Free to use with your own Torn API key: TSA reads your holdings from api.torn.com and prices and history from tornsy.com, and the key stays in your browser. Optional, paid: a TSA licence key from dossier.aec3.org (Xanax) lets TSA read the same data, and Dossier's Benefit Advisor recommendation, from Dossier instead (only the licence key is sent, only to dossier-api.aec3.org). While the licence is active TSA reads from Dossier only and never calls Torn or tornsy itself; without a licence, or if it lapses, TSA keeps working on your own key.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -8404,6 +8404,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     if (bBuy && bSell) {
       bBuy.style.opacity = isBuy ? "1" : "0.4";
       bSell.style.opacity = isBuy ? "0.4" : "1";
+      bBuy.style.background = isBuy ? "var(--tsa-pos-bg-hi)" : "transparent";
+      bBuy.style.color = isBuy ? "var(--tsa-pos)" : "var(--tsa-fg-muted)";
+      bSell.style.background = isBuy ? "transparent" : "var(--tsa-neg-bg-hi)";
+      bSell.style.color = isBuy ? "var(--tsa-fg-muted)" : "var(--tsa-neg)";
       bBuy.setAttribute("aria-pressed", isBuy ? "true" : "false");
       bSell.setAttribute("aria-pressed", isBuy ? "false" : "true");
     }
@@ -8458,6 +8462,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var hasPills = (lastBuySymbols && lastBuySymbols.length > 0) || (lastSwingPills && lastSwingPills.length > 0) || !!lastBestRec;
     var pillsVisible = hasPills && (showBar || getPillsAlways());
     var minimized = lsGet("qt_minimized", "false") === "true";
+    bar.classList.toggle("qt-minimized", minimized);
 
     if (pills) pills.style.display = pillsVisible ? "block" : "none";
 
@@ -9061,6 +9066,76 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     return { points: points, dossierUsed: dossierUsed };
   }
 
+  function niceTicks(min, max, count) {
+    if (!isFinite(min) || !isFinite(max)) return [];
+    if (max < min) { var swap = min; min = max; max = swap; }
+    var span = max - min || Math.abs(max) * 0.01 || 1;
+    var raw = span / Math.max(1, count - 1), power = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+    var norm = raw / power, step = (norm <= 1.5 ? 1 : norm <= 2.25 ? 2 : norm <= 3.5 ? 2.5 : norm <= 7.5 ? 5 : 10) * power;
+    var out = []; for (var v = Math.ceil(min / step) * step; v <= max + step * 1e-8; v += step) out.push(+v.toPrecision(12));
+    return out;
+  }
+  function qtReferencePrices(base, targetPct, stopPct, fee) {
+    var refs = [];
+    if (base > 0 && fee > 0) {
+      refs.push({ key: "avg", label: "Avg", price: base });
+      if (isFinite(targetPct)) refs.push({ key: "target", label: "Target", price: base * (1 + targetPct / 100) / fee });
+      if (stopPct > 0) refs.push({ key: "stop", label: "Stop", price: base * (1 - stopPct / 100) / fee });
+    }
+    return refs;
+  }
+  function qtChartDomain(prices, refs) {
+    var min = Math.min.apply(null, prices), max = Math.max.apply(null, prices), range = max - min || Math.abs(max) * 0.001 || 1;
+    var pad = range * 0.08 || Math.abs(max) * 0.004 || 0.01;
+    var lo = min - pad, hi = max + pad;
+    var lines = (refs || []).map(function(r) {
+      var far = r.price < min - range * 0.25 || r.price > max + range * 0.25;
+      if (!far) { lo = Math.min(lo, r.price); hi = Math.max(hi, r.price); }
+      return { key: r.key, label: r.label, price: r.price, pinned: far ? (r.price < min ? "bottom" : "top") : null };
+    });
+    return { min: lo, max: hi, refs: lines };
+  }
+  function qtNearestPoint(points, ts) {
+    var best = null, dist = Infinity;
+    (points || []).forEach(function(p) { var d = Math.abs(p.ts - ts); if (d < dist) { dist = d; best = p; } });
+    return best;
+  }
+  function qtMarkersInRange(transactions, minTs, maxTs) {
+    return (transactions || []).filter(function(t) { var ts = Number(t.time_bought) * 1000; return isFinite(ts) && ts >= minTs && ts <= maxTs && Number(t.bought_price) > 0; })
+      .map(function(t) { return { ts: Number(t.time_bought) * 1000, price: Number(t.bought_price), shares: Number(t.shares) || 0 }; });
+  }
+  function qtSellMarkersInRange(events, sym, minTs, maxTs) {
+    return (events || []).filter(function(e) {
+      var ts = Number(e.ts) * 1000;
+      return e.sym === sym && Number(e.sell_price) > 0 && isFinite(ts) && ts >= minTs && ts <= maxTs;
+    }).map(function(e) {
+      return { ts: Number(e.ts) * 1000, price: Number(e.sell_price), shares: Number(e.shares) || 0 };
+    });
+  }
+  function qtSegmentPoints(points, gap) {
+    var segments = [];
+    (points || []).forEach(function(point) {
+      var segment = segments[segments.length - 1];
+      if (!segment || point.ts - segment[segment.length - 1].ts > gap) {
+        segment = [];
+        segments.push(segment);
+      }
+      segment.push(point);
+    });
+    return segments;
+  }
+  function qtDecollideLabels(labels, minY, maxY, gap) {
+    var a = (labels || []).map(function(x) { return { label: x.label, y: x.y, source: x }; }).sort(function(x,y){return x.y-y.y;});
+    for (var i=0;i<a.length;i++) a[i].y = Math.max(minY, Math.min(maxY, Math.max(a[i].y, i ? a[i-1].y+gap : minY)));
+    if (a.length && a[a.length-1].y > maxY) { a[a.length-1].y=maxY; for(var j=a.length-2;j>=0;j--) a[j].y=Math.min(a[j].y,a[j+1].y-gap); }
+    return a.filter(function(x){return x.y>=minY;}).map(function(x){return {label:x.label,y:x.y,source:x.source && x.source.source ? x.source.source : x.source};});
+  }
+  function qtTicksAwayFromLabels(ticks, chipYs, gap) {
+    return (ticks || []).filter(function(tick) {
+      return !(chipYs || []).some(function(y) { return Math.abs(tick.y - y) <= gap; });
+    });
+  }
+
   function qtDrawChart(sym) {
     var container = document.getElementById("qt-chart-container");
     var canvas = document.getElementById("qt-chart-canvas");
@@ -9068,302 +9143,298 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     var liveEl = document.getElementById("qt-chart-live");
     var labelsEl = document.getElementById("qt-chart-labels");
     if (!container || !canvas) return;
-
-    if (!sym || !getShowQtChart()) { container.style.display = "none"; return; }
-
-    var p_live = 0;
-    if (lastRaw) {
-      var r = lastRaw.find(function(x) { return x.stock === sym.toUpperCase(); });
-      if (r) p_live = parseFloat(r.price) || 0;
-    }
-
-    // Load local history. In licensed mode, Dossier hourly candles are the base.
-    var history = loadHistory();
-    var built = qtChartPoints(sym, dataMode, histH1Store, history, p_live, Date.now());
-    var points = built.points;
-    var dossierUsed = built.dossierUsed;
-
-    // Apply selected timeframe filter
-    var tf = lsGet("tsa_chart_timeframe", "all");
-    (function() {
-      var tfMs = { "1d": 86400000, "3d": 259200000, "7d": 604800000 }[tf];
-      if (tfMs) {
-        var cutoff = Date.now() - tfMs;
-        points = points.filter(function(p) { return p.ts >= cutoff; });
-      }
-      // Highlight active button
-      var btns = document.querySelectorAll(".qt-tf-btn");
-      btns.forEach(function(b) {
-        var active = b.getAttribute("data-tf") === tf;
-        b.style.background = active ? "var(--tsa-bg-raised)" : "none";
-        b.style.color = active ? "var(--tsa-fg-strong)" : "var(--tsa-fg-faint)";
-      });
-    })();
-
-    // ── Outlier filter: drop points > 12% away from local 5-pt median ──────
-    if (points.length >= 5) {
-      points = points.filter(function(pt, i, arr) {
-        var win = [];
-        for (var j = Math.max(0, i - 2); j <= Math.min(arr.length - 1, i + 2); j++) {
-          if (j !== i) win.push(arr[j].price);
-        }
-        if (!win.length) return true;
-        win.sort(function(a, b) { return a - b; });
-        var med = win[Math.floor(win.length / 2)];
-        return med <= 0 || Math.abs(pt.price - med) / med < 0.12;
-      });
-    }
-
-    // ── Bucket-downsample: 1 median price per 30-min slot ───────────────────
-    // (collapses clustered points that cause vertical spike artifacts)
-    (function() {
-      var BUCKET = 30 * 60000;
-      var map = {};
-      points.forEach(function(pt) {
-        var k = Math.floor(pt.ts / BUCKET);
-        if (!map[k]) map[k] = [];
-        map[k].push(pt.price);
-      });
-      var keys = Object.keys(map).map(Number).sort(function(a, b) { return a - b; });
-      points = keys.map(function(k) {
-        var arr = map[k].slice().sort(function(a, b) { return a - b; });
-        return { ts: k * BUCKET + BUCKET / 2, price: arr[Math.floor(arr.length / 2)] };
-      });
-    })();
-
-    if (points.length < 2) {
-      container.style.display = "block";
-      canvas.style.display = "none";
-      var noDataEl = document.getElementById("qt-chart-nodata");
-      if (!noDataEl) {
-        noDataEl = document.createElement("div");
-        noDataEl.id = "qt-chart-nodata";
-        noDataEl.style.cssText = "padding:18px;text-align:center;font-size:var(--tsa-fs-micro);color:var(--tsa-fg-faint)";
-        container.appendChild(noDataEl);
-      }
-      noDataEl.style.display = "block";
-      noDataEl.textContent = "Not enough history for " + sym + " — check back after next refresh";
+    if (!sym || !getShowQtChart()) {
+      container.style.display = "none";
       return;
     }
-    canvas.style.display = "";
-    var noDataEl2 = document.getElementById("qt-chart-nodata");
-    if (noDataEl2) noDataEl2.style.display = "none";
 
-    container.style.display = "block";
-    if (title) title.textContent = sym + " · " + points.length + " pts · " + tf + (dossierUsed ? " · Dossier 1h" : "");
-    if (liveEl) liveEl.textContent = p_live > 0 ? "$" + p_live.toFixed(2) : "";
-
-    // Canvas — taller to show more detail, full width
-    var w = canvas.offsetWidth || 300;
-    var h = 110;
-    canvas.width = w;
-    canvas.height = h;
-    var ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, w, h);
-
-    var prices = points.map(function(p) { return p.price; });
-    var minP = Math.min.apply(null, prices);
-    var maxP = Math.max.apply(null, prices);
-    var range = maxP - minP || maxP * 0.001 || 1;
-    var padT = 14, padB = 10, padL = 2, padR = 2;
-    var chartH = h - padT - padB;
-    var chartW = w - padL - padR;
-
-    // Time range for proportional x positioning
-    var tMin = points[0].ts;
-    var tMax = points[points.length - 1].ts;
-    var tRange = tMax - tMin || 1;
-
-    function xOf(ts) { return padL + ((ts - tMin) / tRange) * chartW; }
-    function yOf(price) { return padT + (1 - (price - minP) / range) * chartH; }
-
-    // Grid — 4 horizontal lines
-    ctx.strokeStyle = tsaToken("grid", canvas);
-    ctx.lineWidth = 0.5;
-    for (var g = 0; g <= 3; g++) {
-      var gy = padT + chartH * g / 3;
-      ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(w - padR, gy); ctx.stroke();
-    }
-
-    // Recalculate scales after filtering/downsampling
-    if (points.length < 2) return; // guard: filtering may have removed too many
-    prices = points.map(function(p) { return p.price; });
-    minP = Math.min.apply(null, prices);
-    maxP = Math.max.apply(null, prices);
-    // Add 4% padding so line never touches the very top/bottom edge
-    var pricePad = (maxP - minP) * 0.04 || maxP * 0.004 || 0.01;
-    minP -= pricePad; maxP += pricePad;
-    range = maxP - minP || 1;
-    // Re-anchor time scale to downsampled timestamps
-    tMin = points[0].ts;
-    tMax = points[points.length - 1].ts;
-    tRange = tMax - tMin || 1;
-
-    // Trend color
-    var isUp = prices[prices.length - 1] >= prices[0];
-    var lineColor = isUp ? tsaToken("pos", canvas) : tsaToken("neg", canvas);
-    var fillColor = isUp ? tsaToken("pos-bg", canvas) : tsaToken("neg-bg", canvas);
-
-    // Gap threshold: segments more than 4 h apart are not connected
-    var GAP = 4 * 3600000;
-
-    // Split into continuous segments respecting gaps
-    var segments = [];
-    var seg = [];
-    for (var si = 0; si < points.length; si++) {
-      if (seg.length > 0 && points[si].ts - points[si - 1].ts > GAP) {
-        if (seg.length >= 2) segments.push(seg);
-        seg = [];
+    function showNoHistory() {
+      container.style.display = "block";
+      canvas.style.display = "none";
+      var message = document.getElementById("qt-chart-nodata");
+      if (!message) {
+        message = document.createElement("div");
+        message.id = "qt-chart-nodata";
+        container.appendChild(message);
       }
-      seg.push(points[si]);
-    }
-    if (seg.length >= 2) segments.push(seg);
-
-    // Helper: draw smooth open path through segment using midpoint curves
-    function drawSmoothPath(pts) {
-      var x0 = xOf(pts[0].ts), y0 = yOf(pts[0].price);
-      ctx.moveTo(x0, y0);
-      for (var i = 1; i < pts.length; i++) {
-        var x1 = xOf(pts[i].ts), y1 = yOf(pts[i].price);
-        var mx = (xOf(pts[i - 1].ts) + x1) / 2;
-        var my = (yOf(pts[i - 1].price) + y1) / 2;
-        ctx.quadraticCurveTo(xOf(pts[i - 1].ts), yOf(pts[i - 1].price), mx, my);
-      }
-      // End exactly at last point
-      ctx.lineTo(xOf(pts[pts.length - 1].ts), yOf(pts[pts.length - 1].price));
+      message.style.cssText = "padding:18px;text-align:center;color:var(--tsa-fg-faint)";
+      message.textContent = "Not enough history for " + sym + " \u2014 check back after next refresh";
     }
 
-    // Fill under each segment
-    segments.forEach(function(pts) {
-      ctx.beginPath();
-      drawSmoothPath(pts);
-      ctx.lineTo(xOf(pts[pts.length - 1].ts), h - padB);
-      ctx.lineTo(xOf(pts[0].ts), h - padB);
-      ctx.closePath();
-      ctx.fillStyle = fillColor;
-      ctx.fill();
-    });
+    function preparePoints() {
+      var raw = lastRaw && lastRaw.find(function(item) { return item.stock === sym.toUpperCase(); });
+      var live = raw ? (parseFloat(raw.price) || 0) : 0;
+      var built = qtChartPoints(sym, dataMode, histH1Store, loadHistory(), live, Date.now());
+      var points = built.points;
+      var tf = lsGet("tsa_chart_timeframe", "all");
+      var span = { "1d": 86400000, "3d": 259200000, "7d": 604800000 }[tf];
+      if (span) points = points.filter(function(point) { return point.ts >= Date.now() - span; });
+      points = points.filter(function(point, i, all) {
+        if (all.length < 5) return true;
+        var windowPrices = [];
+        for (var j = Math.max(0, i - 2); j <= Math.min(all.length - 1, i + 2); j++) {
+          if (j !== i) windowPrices.push(all[j].price);
+        }
+        windowPrices.sort(function(a, b) { return a - b; });
+        var median = windowPrices[Math.floor(windowPrices.length / 2)];
+        return median <= 0 || Math.abs(point.price - median) / median < 0.12;
+      });
+      var buckets = {};
+      points.forEach(function(point) {
+        var key = Math.floor(point.ts / 1800000);
+        (buckets[key] || (buckets[key] = [])).push(point.price);
+      });
+      points = Object.keys(buckets).map(Number).sort(function(a, b) { return a - b; }).map(function(key) {
+        var prices = buckets[key].sort(function(a, b) { return a - b; });
+        return { ts: key * 1800000 + 900000, price: prices[Math.floor(prices.length / 2)] };
+      });
+      return { points: points, built: built, live: live, tf: tf };
+    }
 
-    // Price line over each segment
-    ctx.lineWidth = 1.5;
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    segments.forEach(function(pts) {
-      ctx.beginPath();
-      ctx.strokeStyle = lineColor;
-      drawSmoothPath(pts);
-      ctx.stroke();
-    });
-
-    // Buy markers (green ▲) from transaction history
-    var ownedForChart = lastOwnedMap && lastOwnedMap[sym.toUpperCase()];
-    if (ownedForChart && ownedForChart.transactions) {
-      ownedForChart.transactions.forEach(function(t) {
-        if (!t.bought_price || t.bought_price <= 0) return;
-        var txMs = (t.time_bought || 0) * 1000;
-        if (txMs < tMin || txMs > tMax) return;
-        var x = xOf(txMs), y = yOf(t.bought_price);
+    function drawGridAndTicks(ctx, ticks, yOf, w, padL, padR, fg, grid, chipYs) {
+      ctx.font = "10px " + tsaToken("mono", canvas);
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = grid;
+      ctx.fillStyle = fg;
+      qtTicksAwayFromLabels(ticks.map(function(value) { return { value: value, y: yOf(value) }; }), chipYs, 14).forEach(function(tick) {
+        var value = tick.value, y = tick.y;
         ctx.beginPath();
-        ctx.moveTo(x, y - 5);
-        ctx.lineTo(x - 4, y + 3);
-        ctx.lineTo(x + 4, y + 3);
+        ctx.moveTo(padL, y);
+        ctx.lineTo(w - padR + 3, y);
+        ctx.stroke();
+        ctx.fillText("$" + value.toFixed(2), w - 3, y);
+      });
+    }
+
+    function drawLineAndArea(ctx, segments, xOf, yOf, floorY, line) {
+      segments.forEach(function(segment) {
+        if (!segment.length) return;
+        ctx.beginPath();
+        segment.forEach(function(point, index) {
+          var x = xOf(point.ts), y = yOf(point.price);
+          if (!index) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = line;
+        ctx.stroke();
+        // Close each segment independently so the wash never bridges a history gap.
+        ctx.lineTo(xOf(segment[segment.length - 1].ts), floorY);
+        ctx.lineTo(xOf(segment[0].ts), floorY);
         ctx.closePath();
-        ctx.fillStyle = tsaToken("pos", canvas);
-        ctx.globalAlpha = 0.9;
+        ctx.globalAlpha = 0.1;
+        ctx.fillStyle = line;
         ctx.fill();
         ctx.globalAlpha = 1;
       });
     }
 
-    // Sell markers (red ▼) from realized events
-    var chartSellEvents = getRealizedEvents().filter(function(e) {
-      return e.sym === sym.toUpperCase() && e.sell_price > 0;
-    });
-    chartSellEvents.forEach(function(e) {
-      var evMs = e.ts * 1000;
-      if (evMs < tMin || evMs > tMax) return;
-      var x = xOf(evMs), y = yOf(e.sell_price);
-      ctx.beginPath();
-      ctx.moveTo(x, y + 5);
-      ctx.lineTo(x - 4, y - 3);
-      ctx.lineTo(x + 4, y - 3);
-      ctx.closePath();
-      ctx.fillStyle = tsaToken("neg", canvas);
-      ctx.globalAlpha = 0.9;
-      ctx.fill();
-      ctx.globalAlpha = 1;
-    });
-
-    // Min/Max price labels top-right (use actual data extremes, not padded)
-    var dataMax = Math.max.apply(null, prices);
-    var dataMin = Math.min.apply(null, prices);
-    ctx.fillStyle = tsaToken("fg-faint", canvas);
-    ctx.font = tsaToken("fs-micro", canvas) + " " + tsaToken("mono", canvas);
-    ctx.textAlign = "right";
-    ctx.fillText("$" + dataMax.toFixed(2), w - padR - 1, padT - 3);
-    ctx.fillText("$" + dataMin.toFixed(2), w - padR - 1, h - padB + 8);
-
-    // Time labels below — first, 25%, 50%, 75%, last
-    if (labelsEl) {
-      function fmtTs(ts) {
-        var d = new Date(ts);
-        var now2 = Date.now();
-        var age = now2 - ts;
-        if (age < 3600000) return Math.round(age / 60000) + "m";
-        if (age < 86400000) return Math.round(age / 3600000) + "h";
-        return d.getDate() + "/" + (d.getMonth() + 1);
-      }
-      var picks = [0, Math.floor(points.length * 0.25), Math.floor(points.length * 0.5), Math.floor(points.length * 0.75), points.length - 1];
-      // Deduplicate picks
-      picks = picks.filter(function(v, i, a) { return a.indexOf(v) === i; });
-      labelsEl.style.position = "relative";
-      labelsEl.innerHTML = picks.map(function(idx) {
-        var pt = points[idx];
-        var xPct = ((pt.ts - tMin) / tRange * 100).toFixed(1);
-        var isLast = idx === points.length - 1;
-        return '<span style="position:absolute;left:' + xPct + '%;transform:translateX(-50%);' + (isLast ? 'color:var(--tsa-pos)' : '') + '">' +
-          (isLast ? 'Now' : fmtTs(pt.ts)) + '</span>';
-      }).join('');
+    function drawReferenceLines(ctx, refs, yOf, padT, chartH, w, padL, padR, surface, fgStrong) {
+      var positioned = refs.map(function(ref) {
+        var y = ref.pinned === "top" ? padT : ref.pinned === "bottom" ? padT + chartH : yOf(ref.price);
+        var color = ref.key === "target" ? tsaToken("pos", canvas) : ref.key === "stop" ? tsaToken("neg", canvas) : tsaToken("fg-faint", canvas);
+        return { ref: ref, y: y, color: color };
+      });
+      positioned.forEach(function(item) {
+        ctx.strokeStyle = item.color;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padL, item.y);
+        ctx.lineTo(w - padR, item.y);
+        ctx.stroke();
+      });
+      qtDecollideLabels(positioned.map(function(item) {
+        return { label: item.ref.label, y: item.y, source: item };
+      }), padT + 5, padT + chartH - 5, 15).forEach(function(item) {
+        var source = item.source;
+        var glyph = source.ref.pinned === "top" ? "\u25B2 " : source.ref.pinned === "bottom" ? "\u25BC " : "";
+        var text = glyph + source.ref.label + " $" + source.ref.price.toFixed(2);
+        var textWidth = ctx.measureText(text).width + 8;
+        ctx.fillStyle = surface;
+        ctx.fillRect(w - textWidth - 2, item.y - 7, textWidth, 14);
+        ctx.fillStyle = fgStrong;
+        ctx.textAlign = "right";
+        ctx.fillText(text, w - 5, item.y);
+      });
     }
 
-    // Hover tooltip
-    (function() {
+    function drawMarkers(ctx, markers, xOf, yOf, surface, color) {
+      markers.forEach(function(marker) {
+        ctx.beginPath();
+        ctx.arc(xOf(marker.ts), yOf(marker.price), 6, 0, Math.PI * 2);
+        ctx.fillStyle = surface;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(xOf(marker.ts), yOf(marker.price), 4, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      });
+    }
+
+    function drawXLabels(points, labels, minTs, maxTs) {
+      if (!labels) return;
+      var picks = [0, Math.floor(points.length * 0.25), Math.floor(points.length * 0.5), Math.floor(points.length * 0.75), points.length - 1];
+      labels.innerHTML = "";
+      picks.filter(function(value, index, all) { return all.indexOf(value) === index; }).forEach(function(index) {
+        var span = document.createElement("span");
+        var point = points[index];
+        var date = new Date(point.ts);
+        span.textContent = index === points.length - 1 ? "Now" : (date.getDate() + "/" + (date.getMonth() + 1));
+        span.style.cssText = "position:absolute;left:" + ((point.ts - minTs) / (maxTs - minTs || 1) * 100) + "%;transform:translateX(-50%)";
+        labels.appendChild(span);
+      });
+    }
+
+    function bindTooltip(ctx, points, buys, sells, xOf, yOf, minTs, maxTs, chartW, chartH, padT, line, surface, firstPrice, dpr, snapshot) {
       var tip = document.getElementById("qt-chart-tip");
       if (!tip) {
         tip = document.createElement("div");
         tip.id = "qt-chart-tip";
-        tip.style.cssText = "position:absolute;pointer-events:none;display:none;background:var(--tsa-scrim);border:1px solid var(--tsa-border-strong);border-radius:var(--tsa-r-2);padding:5px 8px;font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);color:var(--tsa-fg-strong);z-index:9999;white-space:nowrap;";
+        tip.style.cssText = "position:absolute;display:none;z-index:9;pointer-events:none;padding:6px 8px;background:var(--tsa-bg-raised);border:1px solid var(--tsa-border);border-radius:var(--tsa-r-2);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);color:var(--tsa-fg-strong);";
         container.style.position = "relative";
         container.appendChild(tip);
       }
-      canvas.onmousemove = function(ev) {
+      var hideTimer = 0;
+      function showAt(event, touchEvent) {
         var rect = canvas.getBoundingClientRect();
-        var mx = ev.clientX - rect.left;
-        var scaleX = canvas.width / rect.width;
-        var px = mx * scaleX;
-        // Find nearest point
-        var best = null, bestDist = Infinity;
-        points.forEach(function(pt) {
-          var x = padL + ((pt.ts - tMin) / tRange) * chartW;
-          var dist = Math.abs(x - px);
-          if (dist < bestDist) { bestDist = dist; best = pt; }
+        var mouseX = event.clientX - rect.left;
+        var hit = qtNearestPoint(points, minTs + Math.max(0, Math.min(1, (mouseX - 4) / chartW)) * (maxTs - minTs));
+        if (!hit) return;
+        var px = xOf(hit.ts), py = yOf(hit.price);
+        ctx.putImageData(snapshot, 0, 0);
+        tip.innerHTML = "";
+        var strong = document.createElement("strong");
+        strong.textContent = "$" + hit.price.toFixed(2);
+        tip.appendChild(strong);
+        var sub = document.createElement("div"), date = new Date(hit.ts);
+        sub.textContent = date.toLocaleDateString() + " " + date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        tip.appendChild(sub);
+        var pct = document.createElement("div"), delta = (hit.price - firstPrice) / firstPrice * 100;
+        pct.textContent = (delta >= 0 ? "+" : "") + delta.toFixed(2) + "%";
+        tip.appendChild(pct);
+        [buys, sells].forEach(function(markers, index) {
+          var marker = markers.find(function(item) {
+            var dx = xOf(item.ts) - px, dy = yOf(item.price) - py;
+            return Math.sqrt(dx * dx + dy * dy) <= 24;
+          });
+          if (!marker) return;
+          var row = document.createElement("div");
+          row.textContent = index ? (marker.shares ? "Sold " + marker.shares + " @ $" : "Sold @ $") + marker.price.toFixed(2) : "Bought " + marker.shares + " @ $" + marker.price.toFixed(2);
+          tip.appendChild(row);
         });
-        if (!best) { tip.style.display = "none"; return; }
-        var tipX = mx + 10;
-        if (tipX + 120 > rect.width) tipX = mx - 130;
-        tip.style.left = tipX + "px";
-        tip.style.top = "4px";
         tip.style.display = "block";
-        var d2 = new Date(best.ts);
-        var timeStr = d2.getDate() + "/" + (d2.getMonth()+1) + " " +
-          ("0"+d2.getHours()).slice(-2) + ":" + ("0"+d2.getMinutes()).slice(-2);
-        tip.textContent = "$" + best.price.toFixed(2) + "  " + timeStr;
+        var left = canvas.offsetLeft - container.offsetLeft + mouseX + 10;
+        if (left + 150 > container.clientWidth) left = canvas.offsetLeft - container.offsetLeft + mouseX - 160;
+        tip.style.left = Math.max(2, left) + "px";
+        tip.style.top = Math.max(2, Math.min(container.clientHeight - 62, canvas.offsetTop - container.offsetTop + py - 28)) + "px";
+        // Keep the readout in the chart box; the canvas is redrawn by the next chart refresh.
+        ctx.save();
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.strokeStyle = getComputedStyle(canvas).getPropertyValue("--tsa-fg-faint").trim();
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + chartH); ctx.stroke();
+        ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.strokeStyle = surface; ctx.lineWidth = 3; ctx.stroke();
+        ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fillStyle = line; ctx.fill();
+        ctx.restore();
+        if (touchEvent) {
+          clearTimeout(hideTimer);
+          hideTimer = setTimeout(function() { tip.style.display = "none"; qtDrawChart(sym); }, 2000);
+        }
+      }
+      canvas.onpointerdown = function(event) { if (canvas.setPointerCapture) { try { canvas.setPointerCapture(event.pointerId); } catch(_) {} } showAt(event, true); };
+      canvas.onpointermove = function(event) { if (event.pointerType === "mouse" || event.buttons || event.pressure > 0) showAt(event, event.pointerType !== "mouse"); };
+      canvas.onpointerup = function(event) { showAt(event, true); clearTimeout(hideTimer); hideTimer = setTimeout(function() { tip.style.display = "none"; qtDrawChart(sym); }, 2000); };
+      canvas.onpointercancel = canvas.onpointerup;
+      canvas.onpointerleave = function(event) {
+        if (event.pointerType === "mouse") { tip.style.display = "none"; clearTimeout(hideTimer); qtDrawChart(sym); }
       };
-      canvas.onmouseleave = function() { tip.style.display = "none"; };
-    })();
-  }
+    }
 
+    var prepared = preparePoints();
+    var points = prepared.points, built = prepared.built, live = prepared.live, tf = prepared.tf;
+    document.querySelectorAll(".qt-tf-btn").forEach(function(button) {
+      var selected = button.getAttribute("data-tf") === tf;
+      button.setAttribute("aria-pressed", selected ? "true" : "false");
+      button.style.background = selected ? "var(--tsa-bg-raised)" : "none";
+      button.style.color = selected ? "var(--tsa-fg-strong)" : "var(--tsa-fg-faint)";
+    });
+    if (points.length < 2) { showNoHistory(); return; }
+    container.style.display = "block";
+    canvas.style.display = "block";
+    var noData = document.getElementById("qt-chart-nodata");
+    if (noData) noData.style.display = "none";
+    if (title) title.textContent = sym + " \u00B7 " + points.length + " pts \u00B7 " + tf + (built.dossierUsed ? " \u00B7 Dossier 1h" : "");
+    if (liveEl) liveEl.textContent = live > 0 ? "$" + live.toFixed(2) : "";
+
+    var owned = lastOwnedMap && lastOwnedMap[sym.toUpperCase()];
+    var avg = owned ? calcSwingAvgPrice(owned, owned.transactions, owned.avg_price) : 0;
+    if (!(avg > 0) && owned) avg = owned.avg_price;
+    var refs = owned ? qtReferencePrices(avg, getProfitTarget(), getStopLoss(), SELL_FEE) : [];
+    var minTs = points[0].ts, maxTs = points[points.length - 1].ts;
+    var buys = owned ? qtMarkersInRange(owned.transactions, minTs, maxTs) : [];
+    var sells = qtSellMarkersInRange(getRealizedEvents(), sym, minTs, maxTs);
+    var domain = qtChartDomain(points.map(function(point) { return point.price; }), refs);
+    var dpr = window.devicePixelRatio || 1;
+    var touch = window.matchMedia("(hover: none)").matches || window.matchMedia("(pointer: coarse)").matches;
+    var height = touch ? 140 : 160, width = canvas.clientWidth || canvas.offsetWidth || 300;
+    canvas.style.height = height + "px";
+    canvas.style.touchAction = "pan-y";
+    canvas.setAttribute("role", "img");
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    var ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    var padT = 10, padB = 12, padL = 4, padR = 66;
+    var chartW = width - padL - padR, chartH = height - padT - padB;
+    var timeRange = maxTs - minTs || 1, priceRange = domain.max - domain.min || 1;
+    function xOf(ts) { return padL + (ts - minTs) / timeRange * chartW; }
+    function yOf(price) { return padT + (1 - (price - domain.min) / priceRange) * chartH; }
+    var style = getComputedStyle(canvas);
+    var fg = style.getPropertyValue("--tsa-fg-faint").trim() || tsaToken("fg-faint", canvas);
+    var fgStrong = style.getPropertyValue("--tsa-fg-strong").trim() || tsaToken("fg-strong", canvas);
+    var grid = style.getPropertyValue("--tsa-border").trim() || tsaToken("border", canvas);
+    var surface = style.getPropertyValue("--tsa-bg-chart").trim() || tsaToken("bg-chart", canvas);
+    ctx.font = "10px " + tsaToken("mono", canvas);
+    var chartTicks = niceTicks(domain.min, domain.max, 4);
+    var chipYs = qtDecollideLabels(domain.refs.map(function(ref) {
+      return { label: ref.label, y: ref.pinned === "top" ? padT : ref.pinned === "bottom" ? padT + chartH : yOf(ref.price) };
+    }), padT + 5, padT + chartH - 5, 15).map(function(item) { return item.y; });
+    var gutterWidth = chartTicks.reduce(function(max, value) { return Math.max(max, ctx.measureText("$" + value.toFixed(2)).width); }, 0);
+    domain.refs.forEach(function(ref) {
+      var glyph = ref.pinned === "top" ? "\u25B2 " : ref.pinned === "bottom" ? "\u25BC " : "";
+      gutterWidth = Math.max(gutterWidth, ctx.measureText(glyph + ref.label + " $" + ref.price.toFixed(2)).width);
+    });
+    padR = gutterWidth + 10;
+    chartW = width - padL - padR;
+    var segments = qtSegmentPoints(points, 4 * 3600000);
+    var rising = points[points.length - 1].price >= points[0].price;
+    var line = style.getPropertyValue(rising ? "--tsa-pos" : "--tsa-neg").trim() || tsaToken(rising ? "pos" : "neg", canvas);
+    drawGridAndTicks(ctx, chartTicks, yOf, width, padL, padR, fg, grid, chipYs);
+    drawLineAndArea(ctx, segments, xOf, yOf, height - padB, line);
+    var last = points[points.length - 1], lastX = xOf(last.ts), lastY = yOf(last.price);
+    ctx.beginPath(); ctx.arc(lastX, lastY, 6, 0, Math.PI * 2); ctx.fillStyle = surface; ctx.fill();
+    ctx.beginPath(); ctx.arc(lastX, lastY, 4, 0, Math.PI * 2); ctx.fillStyle = line; ctx.fill();
+    drawReferenceLines(ctx, domain.refs, yOf, padT, chartH, width, padL, padR, surface, fgStrong);
+    drawMarkers(ctx, buys, xOf, yOf, surface, tsaToken("pos", canvas));
+    // Sale markers use a smaller dot with a crisp chart-surface ring.
+    sells.forEach(function(marker) {
+      ctx.beginPath(); ctx.arc(xOf(marker.ts), yOf(marker.price), 6, 0, Math.PI * 2); ctx.fillStyle = surface; ctx.fill();
+      ctx.beginPath(); ctx.arc(xOf(marker.ts), yOf(marker.price), 4, 0, Math.PI * 2); ctx.fillStyle = tsaToken("neg", canvas); ctx.fill();
+    });
+    drawXLabels(points, labelsEl, minTs, maxTs);
+    var firstPrice = points[0].price;
+    var prices = points.map(function(point) { return point.price; });
+    var change = (last.price - firstPrice) / firstPrice * 100;
+    canvas.setAttribute("aria-label", sym + " chart, " + tf + " range. First $" + firstPrice.toFixed(2) + ", last $" + last.price.toFixed(2) + ", min $" + Math.min.apply(null, prices).toFixed(2) + ", max $" + Math.max.apply(null, prices).toFixed(2) + ", change " + (change >= 0 ? "+" : "") + change.toFixed(2) + "%.");
+    var snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    bindTooltip(ctx, points, buys, sells, xOf, yOf, minTs, maxTs, chartW, chartH, padT, line, surface, firstPrice, dpr, snapshot);
+  }
   function applyQtTheme(isDark) {
     var bar = document.getElementById("qt-bar");
     if (!bar) return;
@@ -9479,7 +9550,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         // easy mis-click on a trade that spends real money and cannot be undone.
         // Now the direction is chosen once, in words, and the amounts inherit it.
         // Costs one extra click only when you actually switch sides.
-        "<div style='display:flex;gap:5px;align-items:flex-start'>" +
+        "<div id='qt-trade-controls' style='display:flex;gap:5px;align-items:flex-start'>" +
           "<div role='group' aria-label='Trade direction' style='display:flex;gap:3px;flex-shrink:0;margin-right:4px;'>" +
             "<button id='qt-dir-buy' aria-pressed='true' title='Buy' style='padding:6px 9px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-pos-border);background:var(--tsa-pos-bg-hi);color:var(--tsa-pos);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);font-weight:700;cursor:pointer;letter-spacing:0.04em;'>BUY</button>" +
             "<button id='qt-dir-sell' aria-pressed='false' title='Sell' style='padding:6px 9px;border-radius:var(--tsa-r-2);border:1px solid var(--tsa-neg-border);background:var(--tsa-neg-bg-hi);color:var(--tsa-neg);font-family:var(--tsa-mono);font-size:var(--tsa-fs-micro);font-weight:700;cursor:pointer;letter-spacing:0.04em;'>SELL</button>" +
@@ -9511,6 +9582,10 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         "</div>" +
       "</div>";
 
+    var qtResponsive = document.createElement("style");
+    qtResponsive.textContent = "@media (hover:none),(pointer:coarse){#qt-bar button,#qt-bar input{min-height:40px}#qt-trade-controls{display:flex;flex-direction:column;gap:0}#qt-trade-controls>[role=group]{width:100%;box-sizing:border-box;margin:0 0 4px!important;gap:0!important}#qt-trade-controls>[role=group] button{flex:1}#qt-amount-row{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px!important;width:100%;flex:none}#qt-amount-row button{width:100%;padding:8px 4px!important}#qt-row1{gap:8px!important}#qt-min-btn{min-height:36px!important}#qt-lock-label{padding:6px 10px!important;min-height:40px!important}#qt-chart-canvas{touch-action:pan-y}}#qt-bar.qt-minimized{padding:4px 10px!important}#qt-bar.qt-minimized #qt-body{display:none!important}";
+    bar.appendChild(qtResponsive);
+
     var pillsDiv = document.createElement("div");
     pillsDiv.id = "qt-pills";
     pillsDiv.style.cssText = "display:none;padding:4px 12px 8px;";
@@ -9522,6 +9597,8 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     if (target && target.firstChild) target.insertBefore(bar, target.firstChild);
     else document.body.insertBefore(bar, document.body.firstChild);
     bar.insertAdjacentElement("afterend", pillsDiv);
+    var tfRow = document.getElementById("qt-tf-row"), chartCanvas = document.getElementById("qt-chart-canvas");
+    if (tfRow && chartCanvas && chartCanvas.parentNode) chartCanvas.parentNode.insertBefore(tfRow, chartCanvas);
 
     renderQtRows();
     setTimeout(qtBuildMaps, 1000);
