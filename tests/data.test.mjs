@@ -546,7 +546,7 @@ test("logTrade appends and trims entries older than 30 min", () => {
 test("source: free mode is back (own Torn key, api.torn.com + tornsy.com), Dossier stays an option", () => {
   const connects = SRC.match(/^\/\/ @connect\s+\S+/gm).map((x) => x.split(/\s+/).pop()).sort();
   assert.deepEqual(connects, ["api.torn.com", "dossier-api.aec3.org", "tornsy.com"]);
-  assert.match(SRC, /^\/\/ @version\s+2\.56\.2$/m);
+  assert.match(SRC, /^\/\/ @version\s+2\.57\.0$/m);
   // the 2.50 key field and storage key, so a key saved by 2.50 still works
   assert.match(SRC, /var TORN_API_KEY = lsGet\("tsa-torn-apikey", ""\);/);
   assert.match(SRC, /id=\\"tsa-setting-apikey\\"/);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.56.2
+// @version      2.57.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner that names the next benefit block to buy (affordable now, else by selling worse blocks, else the one closest to affordable) and whose roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Free to use with your own Torn API key: TSA reads your holdings from api.torn.com and prices and history from tornsy.com, and the key stays in your browser. Optional, paid: a TSA licence key from dossier.aec3.org (Xanax) lets TSA read the same data, and Dossier's Benefit Advisor recommendation, from Dossier instead (only the licence key is sent, only to dossier-api.aec3.org). While the licence is active TSA reads from Dossier only and never calls Torn or tornsy itself; without a licence, or if it lapses, TSA keeps working on your own key.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -9031,6 +9031,36 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     applyQtBarVisibility();
   }
 
+  function qtChartPoints(sym, mode, h1Store, history, pLive, now) {
+    var localPoints = (history[sym.toUpperCase()] || []).map(function(h) { return { ts: h.ts, price: h.price }; });
+    var dossierUsed = false;
+    var points = localPoints;
+    if (mode === "dossier") {
+      var h1 = h1Store[sym.toUpperCase()];
+      if (h1 && Array.isArray(h1.closes) && Array.isArray(h1.stamps) && h1.closes.length >= 2 && h1.stamps.length >= 2) {
+        var dossierPoints = [];
+        for (var hi = 0; hi < h1.closes.length && hi < h1.stamps.length; hi++) {
+          var hc = parseFloat(h1.closes[hi]), hs = Number(h1.stamps[hi]);
+          if (isFinite(hc) ? hc > 0 : false) { if (isFinite(hs) && hs > 0) dossierPoints.push({ ts: hs * 1000, price: hc }); }
+        }
+        if (dossierPoints.length >= 2) {
+          dossierPoints.sort(function(a, b) { return a.ts - b.ts; });
+          var dossierLastTs = dossierPoints[dossierPoints.length - 1].ts;
+          points = dossierPoints.concat(localPoints.filter(function(p) { return p.ts > dossierLastTs; }));
+          dossierUsed = true;
+        }
+      }
+    }
+    if (pLive > 0) {
+      var liveTs = Math.round(now / 60000) * 60000;
+      points = points.filter(function(p) { return p.ts !== liveTs; });
+      points.push({ ts: liveTs, price: pLive });
+    }
+    points.sort(function(a, b) { return a.ts - b.ts; });
+    points = points.reduce(function(out, p) { if (out.length && out[out.length - 1].ts === p.ts) out[out.length - 1] = p; else out.push(p); return out; }, []);
+    return { points: points, dossierUsed: dossierUsed };
+  }
+
   function qtDrawChart(sym) {
     var container = document.getElementById("qt-chart-container");
     var canvas = document.getElementById("qt-chart-canvas");
@@ -9047,23 +9077,11 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       if (r) p_live = parseFloat(r.price) || 0;
     }
 
-    // Load ALL stored history for this stock
+    // Load local history. In licensed mode, Dossier hourly candles are the base.
     var history = loadHistory();
-    var points = (history[sym.toUpperCase()] || []).map(function(h) {
-      return { ts: h.ts, price: h.price };
-    });
-
-    // Add live price as final point if it differs from last stored
-    var now = Date.now();
-    if (p_live > 0) {
-      var liveTs = Math.round(now / 60000) * 60000;
-      // Remove any duplicate ts at this minute, then push fresh live
-      points = points.filter(function(p) { return p.ts !== liveTs; });
-      points.push({ ts: liveTs, price: p_live });
-    }
-
-    // Sort chronologically
-    points.sort(function(a, b) { return a.ts - b.ts; });
+    var built = qtChartPoints(sym, dataMode, histH1Store, history, p_live, Date.now());
+    var points = built.points;
+    var dossierUsed = built.dossierUsed;
 
     // Apply selected timeframe filter
     var tf = lsGet("tsa_chart_timeframe", "all");
@@ -9132,7 +9150,7 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     if (noDataEl2) noDataEl2.style.display = "none";
 
     container.style.display = "block";
-    if (title) title.textContent = sym + " · " + points.length + " pts · " + tf;
+    if (title) title.textContent = sym + " · " + points.length + " pts · " + tf + (dossierUsed ? " · Dossier 1h" : "");
     if (liveEl) liveEl.textContent = p_live > 0 ? "$" + p_live.toFixed(2) : "";
 
     // Canvas — taller to show more detail, full width
