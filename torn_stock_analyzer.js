@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.60.0
+// @version      2.60.1
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner that names the next benefit block to buy (affordable now, else by selling worse blocks, else the one closest to affordable) and whose roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Free to use with your own Torn API key: TSA reads your holdings from api.torn.com and prices and history from tornsy.com, and the key stays in your browser. Optional, paid: a TSA licence key from dossier.aec3.org (Xanax) lets TSA read the same data, and Dossier's Benefit Advisor recommendation, from Dossier instead (only the licence key is sent, only to dossier-api.aec3.org). While the licence is active TSA reads from Dossier only and never calls Torn or tornsy itself; without a licence, or if it lapses, TSA keeps working on your own key.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -5006,7 +5006,12 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         }
       }
 
-      if (increment <= 0) {
+      // An active stock's FIRST tier, bought but not yet credited by Torn (increment
+      // still 0), falls through to the pending-tier loop below like higher tiers do;
+      // otherwise a fresh benefit block reads as a swing trade until the next poll.
+      var firstTierPending = PASSIVE_STOCKS.indexOf(sym) < 0 && (BENEFIT_REQ[sym] || 0) > 0 &&
+        totalShares >= BENEFIT_REQ[sym] && roiSymTierCap(sym) >= 1;
+      if (increment <= 0 && !firstTierPending) {
         o.benefit_shares = 0;
         o.swing_shares = totalShares;
         o.has_dividend = false;

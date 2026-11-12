@@ -103,10 +103,11 @@ test("first buy uses trade price, unlocks benefits, and buying below a block sta
   assert.equal(o.swing_shares, 50);
   assert.equal(o.is_passive_perk, false);
   s.trade(75);
+  // Torn has not credited the tier yet, but the first full block is benefit, not swing.
   assert.equal(o.dividend_increment, 0);
-  assert.equal(o.has_dividend, false);
-  assert.equal(o.benefit_shares, 0);
-  assert.equal(o.swing_shares, 125);
+  assert.equal(o.has_dividend, true);
+  assert.equal(o.benefit_shares, 100);
+  assert.equal(o.swing_shares, 25);
   s.trade(-50);
   assert.equal(o.benefit_shares, 0);
   assert.equal(o.swing_shares, 75);
@@ -306,4 +307,47 @@ test("real cached renderer updates holdings, swing pills and ROI view without an
     assert.doesNotMatch(b.content(), /Fetching data|Loading\.\.\./);
     assert.equal(b.calls.length, before);
   }
+});
+
+// A first benefit tier bought before Torn credits it (increment 0) is benefit, not swing.
+function firstTier(shares, cap = Infinity) {
+  const s = setup();
+  s.ctx.roiSymTierCap = () => cap;
+  s.ctx.lastOwnedMap = s.ctx.buildOwnedMap({ stocks: { 1: {
+    dividend: { increment: 0, progress: 0, frequency: 7 },
+    transactions: { a: { shares, bought_price: 10, time_bought: 123 } },
+  } } });
+  s.ctx.enrichOwnedMap(s.ctx.lastOwnedMap, null);
+  return s.ctx.lastOwnedMap.FHG;
+}
+
+test("uncredited first tier: exactly req is all benefit", () => {
+  const o = firstTier(100);
+  assert.equal(o.benefit_shares, 100);
+  assert.equal(o.swing_shares, 0);
+  assert.equal(o.dividend_increment, 0);
+});
+
+test("uncredited first tier: shares above req stay swing", () => {
+  const o = firstTier(150);
+  assert.equal(o.benefit_shares, 100);
+  assert.equal(o.swing_shares, 50);
+});
+
+test("below req and tier cap 0 stay all swing", () => {
+  assert.equal(firstTier(99).swing_shares, 99);
+  assert.equal(firstTier(99).benefit_shares, 0);
+  assert.equal(firstTier(100, 0).swing_shares, 100);
+  assert.equal(firstTier(100, 0).benefit_shares, 0);
+});
+
+test("buying a fresh active stock up to req on the page reads as a benefit block", () => {
+  const s = setup();
+  s.ctx.lastOwnedMap = {};
+  s.count.value = 0;
+  s.trade(100);
+  const o = s.ctx.lastOwnedMap.FHG;
+  assert.equal(o.shares, 100);
+  assert.equal(o.benefit_shares, 100);
+  assert.equal(o.swing_shares, 0);
 });
