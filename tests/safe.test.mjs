@@ -47,26 +47,6 @@ test("escHtml leaves no markup and no quote; the text reads the same once decode
   assert.equal(escHtml("Lawyer's Business Card & Co"), "Lawyer&#39;s Business Card &amp; Co");
 });
 
-test("the ROI planner's Breakdown entry: an item name with <img onerror> becomes text, not an element", () => {
-  const { incomeBreakdownHtml } = load();
-  for (const p of PAYLOADS) {
-    const html = incomeBreakdownHtml("FHG", p, "$13.50M");
-    assertInert(html);
-    assert.ok(html.startsWith("FHG ("));
-    assert.ok(html.endsWith(") $13.50M"));
-  }
-  assert.equal(incomeBreakdownHtml("FHG", XSS, "$13.50M"),
-    "FHG (Feathery Hotel Coupon&lt;img id=xssitem src=x onerror=alert(document.cookie)&gt;) $13.50M");
-  assert.equal(incomeBreakdownHtml("TCT", "", "$1K"), "TCT $1K");
-});
-
-test("source: the Breakdown is built only through incomeBreakdownHtml (the e2e sink)", () => {
-  assert.match(SRC, /incomeBreakdown\.push\(incomeBreakdownHtml\(sym, itemName, fmRoi\(stockWeekly\)\)\);/);
-  assert.equal(/" \(" \+ itemName \+ "\)"/.test(SRC), false, "a raw item-name concatenation is back");
-  // getItemName is the one reader of item names, and its one caller feeds the helper above
-  assert.equal((SRC.match(/getItemName\(/g) || []).length, 2);
-});
-
 test("safeItemName keeps Torn-style names and refuses markup, control characters and huge strings", () => {
   const { safeItemName } = load();
   for (const ok of ["Xanax", "Feathery Hotel Coupon", "Lawyer's Business Card", "Box of Grenades",

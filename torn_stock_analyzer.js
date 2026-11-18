@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Stock Analyzer
 // @namespace    https://greasyfork.org
-// @version      2.60.1
+// @version      2.61.0
 // @author       AeC3
 // @description  Analyzes all 35 Torn City stocks and scores them for buy signals using 4 data-backed indicators: drop from weekly peak (dynamic volatility threshold), position in short-term range, active price rise (m30>h1>h2), and MACD momentum. Drop is measured against the week's actual high from Torn's own w1 candle, not a max of daily snapshots. A Buy zone section flags stocks that have sat in the bottom of their own 30-day range for several days, and by default its BUY calls fill the Quick Buy pills. An optional Top-5 buy list (off by default, enable it in Settings; always shown while it feeds the Quick Buy pills) only shows a stock priced in the lower half of its own 30-day range, states each row's position in that range, and says how many stocks were hidden for sitting above the middle. Includes an ROI planner that names the next benefit block to buy (affordable now, else by selling worse blocks, else the one closest to affordable) and whose roadmap is ranked by time to the highest-income block (the goal is the biggest absolute payout per month, not the best raw ROI), a benefit block tracker, swing trade P/L, benefit-block upgrade swaps, and a Quick Trade bar with a BUY/SELL direction toggle and a preview line stating what the next click will trade. Free to use with your own Torn API key: TSA reads your holdings from api.torn.com and prices and history from tornsy.com, and the key stays in your browser. Optional, paid: a TSA licence key from dossier.aec3.org (Xanax) lets TSA read the same data, and Dossier's Benefit Advisor recommendation, from Dossier instead (only the licence key is sent, only to dossier-api.aec3.org). While the licence is active TSA reads from Dossier only and never calls Torn or tornsy itself; without a licence, or if it lapses, TSA keeps working on your own key.
 // @match        https://www.torn.com/page.php?sid=stocks*
@@ -4410,30 +4410,6 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
       html += '<div style="font-size:var(--tsa-fs-micro);color:var(--tsa-fg-muted);letter-spacing:0.08em;' + s + ';margin-bottom:5px">⏱ Alt: Wait</div>';
       html += nmRow("Income", fmRoi(weeklyIncome) + " / 7d (current benefits)");
 
-      // Income breakdown
-      var incomeBreakdown = [];
-      Object.keys(ownedMap).forEach(function(sym) {
-        var o = ownedMap[sym];
-        if (!o.has_dividend || o.benefit_shares <= 0) return;
-        var increments = o.dividend_increment || 0;
-        if (increments <= 0) return;
-        var stockWeekly = 0;
-        var itemName = "";
-        ROI_TABLE.forEach(function(entry) {
-          if (entry.sym !== sym) return;
-          var tierNum = parseInt(entry.tier.replace("T",""), 10);
-          if (tierNum > increments) return;
-          stockWeekly += getPerCycle(entry) / getCycleDays(entry, ownedMap) * 7;
-          if (entry.item) itemName = getItemName(entry.item) || itemName;
-        });
-        if (stockWeekly > 0) {
-          incomeBreakdown.push(incomeBreakdownHtml(sym, itemName, fmRoi(stockWeekly)));
-        }
-      });
-      if (incomeBreakdown.length > 0) {
-        html += nmRow("Breakdown", incomeBreakdown.slice(0,3).join(" · "));
-        if (incomeBreakdown.length > 3) html += nmRow("", incomeBreakdown.slice(3,6).join(" · "));
-      }
       html += nmRow("Goal in", daysWait === 0 ? "Now!" : daysWait === Infinity ? "N/A" : "~" + daysWait + " days", c.text);
       html += '</div>';
     } else if (plan.fromDossier && plan.status) {
@@ -5538,11 +5514,261 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
     return out;
   }
 
-  // One entry of the ROI planner's income "Breakdown" line, as HTML.
-  function incomeBreakdownHtml(sym, itemName, amountText) {
-    return escHtml(sym) + (itemName ? " (" + escHtml(itemName) + ")" : "") + " " + escHtml(amountText);
-  }
   // ==TSA-SAFE-END==
+
+  // ==TSA-INCOME-BEGIN==
+  // INCOME STATEMENT (2.61.0, owner's design "D", chosen 2026-11-18).
+  //
+  // What the owner asked for: income SPECIFIED, every owned stock and every owned
+  // tier, laid out like a bank statement grouped by what the money IS - cash,
+  // items valued at market price, points, and perks that have no dollar value at
+  // all. Each group carries its own subtotal, so it is visible how much of the
+  // income is hard cash and how much moves with an item's market price.
+  //
+  // RULES THE OWNER SET:
+  //   * only tiers he OWNS (no "next tier" teaser rows);
+  //   * an item-paid tier shows the item AND its dollar value; an item with no
+  //     price says "price unknown" and is NEVER read as $0 (same rule as
+  //     payoutKind: art "item" with a null price is not zero);
+  //   * perks are listed as text, with no amount, and never enter a total;
+  //   * one unit switch for the whole statement: day / 7d / month / year,
+  //     defaulting to month and remembered per browser.
+  //
+  // MONTH = 365/12 DAYS, the same calendar month the planner's monthlyInc uses
+  // (see DAYS_PER_MONTH). A monthly-paying stock is converted through its real
+  // 31-day CYCLE first, so the two never mix.
+  //
+  // Pure on purpose: everything it needs from the live script comes in through
+  // `deps`, so tests/income.test.mjs loads this block unchanged beside TSA-SAFE.
+  var INCOME_UNITS = [
+    { key: "day",   label: "/day", days: 1 },
+    { key: "week",  label: "/7d",  days: 7 },
+    { key: "month", label: "/mo",  days: 365 / 12 },   // = DAYS_PER_MONTH (a test pins the two together)
+    { key: "year",  label: "/yr",  days: 365 }
+  ];
+  var INCOME_DEFAULT_UNIT = "month";
+  function incomeUnit(key) {
+    var i;
+    for (i = 0; i < INCOME_UNITS.length; i++) if (INCOME_UNITS[i].key === key) return INCOME_UNITS[i];
+    for (i = 0; i < INCOME_UNITS.length; i++) if (INCOME_UNITS[i].key === INCOME_DEFAULT_UNIT) return INCOME_UNITS[i];
+    return INCOME_UNITS[0];
+  }
+
+  // Statement order. A group with no rows is never printed, so "Points" only
+  // appears when something he owns pays points.
+  var INCOME_GROUPS = [
+    { kind: "cash",   title: "Cash",                 subtotal: "Subtotal cash" },
+    { kind: "item",   title: "Items (market price)", subtotal: "Subtotal items" },
+    { kind: "points", title: "Points",               subtotal: "Subtotal points" },
+    { kind: "perk",   title: "Perks (no $ value)",   subtotal: "" }
+  ];
+
+  // ownedMap -> one line per OWNED tier:
+  //   {sym, tier, kind, detail, perDay, estimate}
+  // perDay is null when there is no price at all. estimate is true when an item's
+  // live market price has not loaded and the figure is the ROI table's stored
+  // baseline - the planner counts that same stand-in (getPerCycle), so it stays in
+  // the total, but the row says it is an old price instead of passing it off as
+  // the market's.
+  // Same holding filter as calcWeeklyIncome (has_dividend, benefit_shares > 0,
+  // increment > 0) and the same per-tier sum (every tier up to the increment), so
+  // the priced total here is calcWeeklyIncome's figure in another unit. One
+  // addition: a PASSIVE perk is listed whenever its block is held, increment or
+  // not - enrichOwnedMap's fail-safe keeps a held perk block without one.
+  // deps:
+  //   roiRows        ROI_TABLE
+  //   perCycle(e)    getPerCycle
+  //   cycleDays(e)   getCycleDays bound to ownedMap
+  //   liveValue(e)   the item's live market value, 0 when it has not loaded
+  //   descOf(sym)    Torn's benefit description, "" when the catalogue is missing
+  //   parse(desc)    {kind, amount, itemName}: payoutKind/parsePayout/payoutItem
+  //   itemName(e)    the item's catalogue name, or ""
+  function collectIncomeLines(ownedMap, deps) {
+    var lines = [];
+    Object.keys(ownedMap || {}).sort().forEach(function(sym) {
+      var o = ownedMap[sym];
+      if (!o || !o.has_dividend || o.benefit_shares <= 0) return;
+      var desc = deps.descOf(sym) || "";
+      var p = desc ? deps.parse(desc) : null;
+
+      if (o.is_passive_perk) {
+        lines.push({ sym: sym, tier: "", kind: "perk", detail: desc || "passive perk", perDay: null, estimate: false });
+        return;
+      }
+      var inc = o.dividend_increment || 0;
+      if (inc <= 0) return;
+
+      var rows = deps.roiRows.filter(function(e) {
+        return e.sym === sym && parseInt(String(e.tier).replace("T", ""), 10) <= inc;
+      });
+      if (!rows.length) {
+        // An active benefit the planner has no row for: BAG's "1x Ammunition Pack",
+        // a nerve/energy/happiness payout, or a stock newer than the table. It is
+        // still income he owns, so it is listed. A cash or points amount Torn
+        // states outright is used; anything else has no amount - never $0.
+        var k = p ? p.kind : "perk";
+        var cyc = o.dividend_frequency || 0;
+        var per = (p && (k === "cash" || k === "points") && p.amount > 0 && cyc > 0) ? p.amount / cyc : null;
+        for (var t = 1; t <= inc; t++) {
+          lines.push({ sym: sym, tier: "T" + t, kind: k, detail: incomeDetail(k, desc, p ? p.itemName : "") || "benefit", perDay: per, estimate: false });
+        }
+        return;
+      }
+      rows.forEach(function(e) {
+        // The catalogue decides the kind. Without one (cold start) the ROI row does:
+        // a derived row carries it in `type`; a hardcoded row only has the item id
+        // and PTS as the one points payer.
+        var k = (p && p.kind !== "perk") ? p.kind
+          : (e.type === "cash" || e.type === "item" || e.type === "points") ? e.type
+          : (e.item ? "item" : (sym === "PTS" ? "points" : "cash"));
+        var perC = deps.perCycle(e), days = deps.cycleDays(e);
+        lines.push({
+          sym: sym, tier: e.tier, kind: k,
+          detail: incomeDetail(k, desc, deps.itemName(e) || (p ? p.itemName : "")),
+          perDay: (perC > 0 && days > 0) ? perC / days : null,
+          estimate: k === "item" && perC > 0 && !(deps.liveValue(e) > 0)
+        });
+      });
+    });
+    return lines;
+  }
+
+  // The words after "SYM Tn": the item's name, the points text, the perk itself.
+  // Cash needs none - the amount column already says it. The item name comes from
+  // the item catalogue or payoutItem; this never parses a description itself.
+  function incomeDetail(kind, desc, itemName) {
+    if (kind === "cash") return "";
+    if (kind === "item") return itemName || "";
+    return String(desc || "").trim();
+  }
+
+  // lines + unit key -> {unit, groups:[{kind,title,subtotalLabel,rows,subtotal}],
+  //                       total, unpriced, estimated}
+  // Rows sort by amount, largest first. A row without a price sorts last, then by
+  // symbol and tier, so the order is stable between renders.
+  function buildIncomeStatement(lines, unitKey) {
+    var unit = incomeUnit(unitKey);
+    var total = 0, unpriced = 0, estimated = 0, groups = [];
+    INCOME_GROUPS.forEach(function(g) {
+      var isPerk = g.kind === "perk";
+      var rows = (lines || []).filter(function(l) { return l.kind === g.kind; }).map(function(l) {
+        var amount = (isPerk || l.perDay == null) ? null : l.perDay * unit.days;
+        if (amount == null && !isPerk) unpriced++;
+        var est = amount != null && !!l.estimate;
+        if (est) estimated++;
+        return { sym: l.sym, tier: l.tier, detail: l.detail, amount: amount, estimate: est };
+      });
+      if (!rows.length) return;
+      rows.sort(function(a, b) {
+        if (a.amount == null && b.amount != null) return 1;
+        if (b.amount == null && a.amount != null) return -1;
+        if (a.amount != null && b.amount !== a.amount) return b.amount - a.amount;
+        if (a.sym !== b.sym) return a.sym < b.sym ? -1 : 1;
+        return a.tier < b.tier ? -1 : a.tier > b.tier ? 1 : 0;
+      });
+      var subtotal = isPerk ? null : rows.reduce(function(s, r) { return s + (r.amount || 0); }, 0);
+      if (subtotal != null) total += subtotal;
+      groups.push({ kind: g.kind, title: g.title, subtotalLabel: g.subtotal, rows: rows, subtotal: subtotal });
+    });
+    return { unit: unit, groups: groups, total: total, unpriced: unpriced, estimated: estimated };
+  }
+
+  // Money for the statement. fmRoi rounds $1K-$1M to whole thousands, which in the
+  // /day and /7d units makes rows visibly fail to add up to their subtotal; one
+  // decimal on K and two on M/B keep the column honest.
+  function fmIncome(n) {
+    var a = Math.abs(n);
+    if (a >= 1e9) return "$" + (n / 1e9).toFixed(2) + "B";
+    if (a >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
+    if (a >= 1e3) return "$" + (n / 1e3).toFixed(1) + "K";
+    return "$" + n.toFixed(0);
+  }
+
+  // The collapsed section's header. It carries the same caveats as the Total
+  // line: with nothing priced it says so instead of a green "$0", and unpriced or
+  // old-price rows are flagged next to the figure.
+  function incomeHeaderHtml(st, fmt) {
+    var priced = st.groups.some(function(g) { return g.kind !== "perk" && g.rows.some(function(r) { return r.amount != null; }); });
+    var h = priced
+      ? '<span style="color:var(--tsa-pos)">' + escHtml(fmt(st.total)) + ' ' + escHtml(st.unit.label) + '</span>'
+      : '<span style="color:var(--tsa-fg-faint)">' + (st.unpriced ? 'price unknown' : 'perks only') + '</span>';
+    if (priced && st.unpriced) h += ' <span style="color:var(--tsa-warn)">+' + st.unpriced + ' unpriced</span>';
+    if (st.estimated) h += ' <span style="color:var(--tsa-warn)" title="Live market price not loaded; the stored baseline price is used">≈</span>';
+    return h;
+  }
+
+  // Statement -> HTML: the unit switch, one block per group with dotted leaders
+  // to the amount and a subtotal, then the grand total. Every string that came
+  // from Torn (symbols, item names, perk texts) goes through escHtml. fmt is fmIncome.
+  function incomeStatementHtml(st, fmt) {
+    var mono = "font-family:var(--tsa-mono);font-variant-numeric:tabular-nums;white-space:nowrap";
+    function line(label, amountHtml, extra) {
+      return '<div style="display:flex;gap:6px;align-items:baseline;min-width:0;' + (extra || "") + '">' +
+        '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0">' + label + '</span>' +
+        '<span style="flex:1;min-width:12px;border-bottom:1px dotted var(--tsa-border-strong);transform:translateY(-3px)"></span>' +
+        '<span style="' + mono + '">' + amountHtml + '</span></div>';
+    }
+    var h = '<div style="display:flex;margin-bottom:8px" role="group" aria-label="Income unit">';
+    INCOME_UNITS.forEach(function(u, i) {
+      var on = u.key === st.unit.key;
+      var radius = i === 0 ? "var(--tsa-r-2) 0 0 var(--tsa-r-2)"
+        : i === INCOME_UNITS.length - 1 ? "0 var(--tsa-r-2) var(--tsa-r-2) 0" : "0";
+      h += '<button class="tsa-income-unit" data-income-unit="' + u.key + '" aria-pressed="' + on + '" style="' +
+        'font-size:var(--tsa-fs-micro);font-weight:700;padding:3px 9px;cursor:pointer;' +
+        'border:1px solid var(--tsa-accent-border);' + (i ? 'border-left:0;' : '') + 'border-radius:' + radius + ';' +
+        'background:' + (on ? 'var(--tsa-accent)' : 'var(--tsa-bg-raised)') + ';' +
+        'color:' + (on ? 'var(--tsa-on-accent)' : 'var(--tsa-fg-muted)') + '">' + u.label + '</button>';
+    });
+    h += '</div><div style="display:flex;flex-direction:column;gap:2px;font-size:var(--tsa-fs-micro);color:var(--tsa-fg)">';
+    st.groups.forEach(function(g, gi) {
+      h += '<div style="letter-spacing:0.12em;text-transform:uppercase;color:var(--tsa-fg-faint);font-weight:700;margin-top:' + (gi ? 8 : 0) + 'px">' + escHtml(g.title) + '</div>';
+      g.rows.forEach(function(r) {
+        var label = '<strong>' + escHtml(r.sym) + '</strong>' + (r.tier ? ' ' + escHtml(r.tier) : '') +
+          (r.detail ? ' <span style="color:var(--tsa-fg-muted)">· ' + escHtml(r.detail) + '</span>' : '');
+        var amt = g.kind === "perk" ? '<span style="color:var(--tsa-fg-faint)">—</span>'
+          : r.amount == null ? '<span style="color:var(--tsa-warn)">price unknown</span>'
+          : r.estimate ? '<span style="color:var(--tsa-warn)" title="Live market price not loaded; the stored baseline price is used">≈' + escHtml(fmt(r.amount)) + ' old price</span>'
+          : escHtml(fmt(r.amount));
+        h += line(label, amt);
+      });
+      if (g.subtotal != null) {
+        h += line('<span style="color:var(--tsa-fg-muted)">' + escHtml(g.subtotalLabel) + '</span>',
+          '<span style="color:var(--tsa-fg-muted)">' + escHtml(fmt(g.subtotal)) + '</span>');
+      }
+    });
+    h += line('<strong>Total ' + escHtml(st.unit.label) + '</strong>' +
+        (st.unpriced ? ' <span style="color:var(--tsa-warn);font-weight:400">(+' + st.unpriced + ' without a price)</span>' : '') +
+        (st.estimated ? ' <span style="color:var(--tsa-warn);font-weight:400">(' + st.estimated + ' on an old price)</span>' : ''),
+      '<strong style="color:var(--tsa-pos)">' + escHtml(fmt(st.total)) + '</strong>',
+      'border-top:1px solid var(--tsa-fg);padding-top:4px;margin-top:6px');
+    return h + '</div>';
+  }
+  // ==TSA-INCOME-END==
+
+  // The live script's side of TSA-INCOME: what collectIncomeLines needs, read from
+  // the globals it must not touch itself. The benefit description comes from Torn's
+  // stock catalogue (free mode: torn/?selections=stocks; licence: Dossier's
+  // /api/tsa/reference); without a catalogue every row falls back to the ROI table.
+  function incomeDeps(ownedMap) {
+    var descBySym = {};
+    if (stockCatalogue) Object.keys(stockCatalogue).forEach(function(id) {
+      var st = stockCatalogue[id];
+      if (st && st.acronym) descBySym[st.acronym] = String((st.benefit || {}).description || "");
+    });
+    return {
+      roiRows: ROI_TABLE,
+      perCycle: getPerCycle,
+      cycleDays: function(e) { return getCycleDays(e, ownedMap); },
+      liveValue: getItemValue,
+      descOf: function(sym) { return descBySym[sym] || ""; },
+      parse: function(desc) {
+        var pp = parsePayout(desc, null);
+        return { kind: payoutKind(pp.kind, desc), amount: pp.amount, itemName: payoutItem(desc).name || "" };
+      },
+      itemName: function(e) { return e.item ? getItemName(e.item) : ""; }
+    };
+  }
+
 
   // Dedup identical toasts within 3 seconds. Stops Benefit-Lock-cap and similar
   // warnings from spamming the screen on rapid clicks.
@@ -6558,6 +6784,23 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
         }
       }
 
+      // Income, specified (2.61.0): every owned tier as a statement grouped into
+      // cash / items / points / perks - see TSA-INCOME. Collapsed until opened.
+      var incomeLines = collectIncomeLines(ownedMap, incomeDeps(ownedMap));
+      if (incomeLines.length > 0) {
+        var incomeCollapsed = lsGet("tsa_income_collapsed", "true") === "true";
+        var incomeSt = buildIncomeStatement(incomeLines, lsGet("tsa_income_unit", INCOME_DEFAULT_UNIT));
+        html += "<hr style=\"border:none;border-top:1px solid " + d.divider + ";margin:6px 14px\">";
+        html += "<div style=\"padding:10px 14px 6px;background:" + d.bg + "\">" +
+          "<div style=\"display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;cursor:pointer;\" id=\"tsa-income-header\">" +
+          "<span style=\"font-size:var(--tsa-fs-micro);letter-spacing:0.12em;color:" + d.muted + ";text-transform:uppercase;font-weight:bold;" + ms + "\">Income</span>" +
+          "<span style=\"display:flex;align-items:center;gap:8px\">" +
+          "<span style=\"font-size:var(--tsa-fs-micro);font-weight:bold;" + ms + "\">" + incomeHeaderHtml(incomeSt, fmIncome) + "</span>" +
+          "<span style=\"font-size:var(--tsa-fs-body);color:" + d.muted + ";\">" + (incomeCollapsed ? "&#9658;" : "&#9660;") + "</span></span></div>" +
+          "<div id=\"tsa-income-body\" style=\"display:" + (incomeCollapsed ? "none" : "block") + "\">" +
+          incomeStatementHtml(incomeSt, fmIncome) + "</div></div>";
+      }
+
       var autoRefreshMins = getAutoRefreshInterval();
       var autoRefreshLabel = autoRefreshMins > 0 ? " · Auto " + autoRefreshMins + "m" : "";
       var histSyms = Object.keys(cachedPriceHistory);
@@ -6789,6 +7032,20 @@ var STYLES = TSA_TOKEN_CSS + "\n" + [
           }
           // Trade failed — clear the in-flight visual.
           clearSwingRowHighlight();
+        });
+      });
+
+      var incomeHeader = document.getElementById("tsa-income-header");
+      if (incomeHeader) incomeHeader.addEventListener("click", function() {
+        lsSet("tsa_income_collapsed", String(lsGet("tsa_income_collapsed", "true") !== "true"));
+        renderCached();
+      });
+      // The unit switch only re-renders from the data already loaded: no API call.
+      content.querySelectorAll(".tsa-income-unit").forEach(function(btn) {
+        btn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          lsSet("tsa_income_unit", incomeUnit(btn.getAttribute("data-income-unit")).key);
+          renderCached();
         });
       });
 
